@@ -333,8 +333,12 @@ func synthesis(text string, speed float64) (*SynthesisResult, error) {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		log.Printf("TTS service error: status=%d, body=%s", resp.StatusCode, string(body))
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			log.Printf("Failed to read error response body: %v", err)
+		} else {
+			log.Printf("TTS service error: status=%d, body=%s", resp.StatusCode, string(body))
+		}
 		return nil, fmt.Errorf("TTS service error: status %d", resp.StatusCode)
 	}
 
@@ -652,14 +656,10 @@ func healthHandler(w http.ResponseWriter, r *http.Request) {
 		},
 		"errors": map[string]interface{}{
 			"recent_errors_count": len(lastErrors),
-			"recent_errors":       lastErrors,
 		},
 		"config_status": map[string]interface{}{
 			"all_required_vars_set": allEnvVarsSet,
 			"config_error":          ttsConfigErr != nil,
-			"config_error_message":  fmt.Sprintf("%v", ttsConfigErr),
-			"resource_id":           ttsConfig.ResourceId,
-			"speaker":               ttsConfig.Speaker,
 		},
 	}
 
@@ -678,11 +678,44 @@ func (rec *statusRecorder) WriteHeader(code int) {
 	rec.ResponseWriter.WriteHeader(code)
 }
 
+var allowedOrigins []string
+
+func initCORSConfig() {
+	origins := os.Getenv("ALLOWED_ORIGINS")
+	if origins != "" {
+		allowedOrigins = strings.Split(origins, ",")
+		for i, origin := range allowedOrigins {
+			allowedOrigins[i] = strings.TrimSpace(origin)
+		}
+		log.Printf("已配置 %d 个允许的跨域来源", len(allowedOrigins))
+	} else {
+		log.Println("警告: ALLOWED_ORIGINS 环境变量未设置")
+		log.Println("将使用反射模式允许所有请求来源，生产环境建议配置白名单")
+	}
+}
+
 func corsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+		origin := r.Header.Get("Origin")
+		allowOrigin := ""
+
+		if len(allowedOrigins) == 0 {
+			allowOrigin = origin
+		} else {
+			for _, allowed := range allowedOrigins {
+				if allowed == origin {
+					allowOrigin = origin
+					break
+				}
+			}
+		}
+
+		if allowOrigin != "" {
+			w.Header().Set("Access-Control-Allow-Origin", allowOrigin)
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+			w.Header().Set("Access-Control-Allow-Credentials", "true")
+		}
 
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusOK)
@@ -700,6 +733,7 @@ func main() {
 	log.SetPrefix("[TTS-Server] ")
 
 	initAPIKeys()
+	initCORSConfig()
 
 	ttsConfigErr = initTTSConfig()
 	if ttsConfigErr != nil {
@@ -761,9 +795,7 @@ func main() {
 		log.Printf("Listening on port: %s", port)
 		log.Printf("OpenAI TTS endpoint: http://localhost:%s/v1/audio/speech", port)
 		log.Printf("Health check: http://localhost:%s/health", port)
-		log.Printf("Using ByteDance v3 API: %s", ttsConfig.URL)
-		log.Printf("Resource ID: %s", ttsConfig.ResourceId)
-		log.Printf("Speaker: %s", ttsConfig.Speaker)
+		log.Printf("Using ByteDance v3 API")
 
 		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("Server failed to start: %v", err)
