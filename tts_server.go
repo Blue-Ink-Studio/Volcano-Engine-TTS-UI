@@ -652,11 +652,14 @@ func healthHandler(w http.ResponseWriter, r *http.Request) {
 		},
 		"errors": map[string]interface{}{
 			"recent_errors_count": len(lastErrors),
+			"recent_errors":       lastErrors,
 		},
 		"config_status": map[string]interface{}{
 			"all_required_vars_set": allEnvVarsSet,
 			"config_error":          ttsConfigErr != nil,
 			"config_error_message":  fmt.Sprintf("%v", ttsConfigErr),
+			"resource_id":           ttsConfig.ResourceId,
+			"speaker":               ttsConfig.Speaker,
 		},
 	}
 
@@ -730,8 +733,11 @@ func main() {
 
 	router.HandleFunc("/v1/audio/speech", openaiTTSHandler).Methods("POST", "OPTIONS")
 	router.HandleFunc("/health", healthHandler).Methods("GET")
+	router.HandleFunc("/dashboard", func(w http.ResponseWriter, r *http.Request) {
+		http.ServeFile(w, r, "health.html")
+	}).Methods("GET")
 	router.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		http.Redirect(w, r, "/health", http.StatusFound)
+		http.Redirect(w, r, "/dashboard", http.StatusFound)
 	}).Methods("GET")
 
 	port := os.Getenv("PORT")

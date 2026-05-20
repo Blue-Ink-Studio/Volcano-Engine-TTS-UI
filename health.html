@@ -1,0 +1,494 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TTS 服务监控</title>
+    <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
+    <script src="https://unpkg.com/axios/dist/axios.min.js"></script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+            min-height: 100vh;
+            color: #e0e0e0;
+            padding: 20px;
+        }
+        #app {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+        .header {
+            text-align: center;
+            margin-bottom: 30px;
+        }
+        .header h1 {
+            font-size: 2em;
+            background: linear-gradient(90deg, #00d4ff, #7b2ff7);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            margin-bottom: 10px;
+        }
+        .header .version {
+            color: #888;
+            font-size: 0.9em;
+        }
+        .refresh-btn {
+            background: linear-gradient(90deg, #00d4ff, #7b2ff7);
+            border: none;
+            color: white;
+            padding: 10px 24px;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 14px;
+            margin-top: 15px;
+            transition: opacity 0.3s;
+        }
+        .refresh-btn:hover {
+            opacity: 0.9;
+        }
+        .refresh-btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 20px;
+            margin-bottom: 20px;
+            transition: all 0.3s ease;
+        }
+        .card {
+            background: rgba(255, 255, 255, 0.05);
+            border-radius: 16px;
+            padding: 24px;
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            transition: all 0.3s ease;
+        }
+        .card-title {
+            font-size: 14px;
+            color: #888;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            margin-bottom: 16px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        .card-title .dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: #00d4ff;
+        }
+        .card-title .dot.error {
+            background: #ff4757;
+        }
+        .card-title .dot.warning {
+            background: #ffa502;
+        }
+        .stat-value {
+            font-size: 2.5em;
+            font-weight: bold;
+            background: linear-gradient(90deg, #00d4ff, #7b2ff7);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            transition: all 0.3s ease;
+        }
+        .stat-label {
+            color: #888;
+            font-size: 14px;
+            margin-top: 5px;
+        }
+        .info-row {
+            display: flex;
+            justify-content: space-between;
+            padding: 12px 0;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+        }
+        .info-row:last-child {
+            border-bottom: none;
+        }
+        .info-label {
+            color: #888;
+        }
+        .info-value {
+            color: #fff;
+            font-family: 'Monaco', 'Menlo', monospace;
+        }
+        .info-value.success {
+            color: #2ed573;
+        }
+        .info-value.error {
+            color: #ff4757;
+        }
+        .info-value.warning {
+            color: #ffa502;
+        }
+        .chart-container {
+            height: 120px;
+            display: flex;
+            align-items: flex-end;
+            gap: 2px;
+            padding: 10px 0;
+        }
+        .bar {
+            flex: 1;
+            background: linear-gradient(180deg, #7b2ff7, #00d4ff);
+            border-radius: 4px 4px 0 0;
+            min-height: 2px;
+            transition: height 0.3s ease;
+        }
+        .error-list {
+            max-height: 200px;
+            overflow-y: auto;
+        }
+        .error-item {
+            background: rgba(255, 71, 87, 0.1);
+            border-left: 3px solid #ff4757;
+            padding: 10px 12px;
+            margin-bottom: 8px;
+            border-radius: 0 8px 8px 0;
+            font-size: 13px;
+            word-break: break-all;
+        }
+        .error-time {
+            color: #888;
+            font-size: 12px;
+            margin-bottom: 4px;
+        }
+        .loading {
+            text-align: center;
+            padding: 40px;
+            color: #888;
+        }
+        .error-box {
+            background: rgba(255, 71, 87, 0.1);
+            border: 1px solid rgba(255, 71, 87, 0.3);
+            border-radius: 12px;
+            padding: 20px;
+            color: #ff4757;
+            text-align: center;
+            transition: all 0.3s ease;
+            animation: fadeIn 0.3s ease;
+        }
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(-10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        .uptime {
+            font-size: 1.5em;
+            font-weight: bold;
+            color: #2ed573;
+        }
+        .progress-ring {
+            width: 100px;
+            height: 100px;
+            margin: 0 auto;
+        }
+        .progress-ring circle {
+            fill: none;
+            stroke-width: 8;
+        }
+        .progress-ring .bg {
+            stroke: rgba(255, 255, 255, 0.1);
+        }
+        .progress-ring .progress {
+            stroke: url(#gradient);
+            stroke-linecap: round;
+            transform: rotate(-90deg);
+            transform-origin: center;
+            transition: stroke-dashoffset 0.5s ease;
+        }
+        .progress-text {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            text-align: center;
+        }
+        .memory-stat {
+            display: flex;
+            justify-content: space-around;
+            text-align: center;
+        }
+        .memory-stat .value {
+            font-size: 1.2em;
+            font-weight: bold;
+            color: #00d4ff;
+        }
+        .memory-stat .label {
+            font-size: 12px;
+            color: #888;
+            margin-top: 4px;
+        }
+        .no-errors {
+            text-align: center;
+            color: #2ed573;
+            padding: 20px;
+        }
+        ::-webkit-scrollbar {
+            width: 6px;
+        }
+        ::-webkit-scrollbar-track {
+            background: rgba(255, 255, 255, 0.05);
+        }
+        ::-webkit-scrollbar-thumb {
+            background: rgba(255, 255, 255, 0.2);
+            border-radius: 3px;
+        }
+    </style>
+</head>
+<body>
+    <div id="app">
+        <div class="header">
+            <h1>TTS 服务监控</h1>
+            <div class="version">{{ healthData.service || 'Loading...' }} - {{ healthData.version || '' }}</div>
+            <button class="refresh-btn" @click="fetchHealth(true)" :disabled="loading">
+                {{ loading ? '刷新中...' : '刷新数据' }}
+            </button>
+        </div>
+
+        <div v-if="error" class="error-box">
+            {{ error }}
+        </div>
+
+        <div v-if="healthData.status">
+            <div class="grid">
+                <div class="card">
+                    <div class="card-title">
+                        <span class="dot" :class="{ error: healthData.status !== 'ok' }"></span>
+                        服务状态
+                    </div>
+                    <div class="stat-value">{{ healthData.status === 'ok' ? '正常运行' : '配置错误' }}</div>
+                    <div class="stat-label">运行时长: {{ formatUptime(healthData.uptime) }}</div>
+                </div>
+
+                <div class="card">
+                    <div class="card-title">
+                        <span class="dot"></span>
+                        请求统计
+                    </div>
+                    <div style="display: flex; gap: 30px;">
+                        <div>
+                            <div class="stat-value">{{ healthData.api_stats?.total_requests || 0 }}</div>
+                            <div class="stat-label">总请求数</div>
+                        </div>
+                        <div>
+                            <div class="stat-value" style="color: #2ed573">{{ healthData.api_stats?.successful_requests || 0 }}</div>
+                            <div class="stat-label">成功</div>
+                        </div>
+                        <div>
+                            <div class="stat-value" style="color: #ff4757">{{ healthData.api_stats?.failed_requests || 0 }}</div>
+                            <div class="stat-label">失败</div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="card">
+                    <div class="card-title">
+                        <span class="dot" :class="{ warning: errorRate > 10 }"></span>
+                        错误率
+                    </div>
+                    <div class="stat-value" :style="{ color: errorRate > 10 ? '#ff4757' : '#2ed573' }">
+                        {{ healthData.api_stats?.error_rate_percent || '0' }}%
+                    </div>
+                    <div class="stat-label">平均响应: {{ healthData.api_stats?.avg_response_time_ms || '0' }} ms</div>
+                </div>
+            </div>
+
+            <div class="grid">
+                <div class="card">
+                    <div class="card-title">
+                        <span class="dot"></span>
+                        配置状态
+                    </div>
+                    <div class="info-row">
+                        <span class="info-label">环境变量</span>
+                        <span class="info-value" :class="healthData.config_status?.all_required_vars_set ? 'success' : 'error'">
+                            {{ healthData.config_status?.all_required_vars_set ? '已配置' : '未配置' }}
+                        </span>
+                    </div>
+                    <div class="info-row">
+                        <span class="info-label">Resource ID</span>
+                        <span class="info-value">{{ healthData.config_status?.resource_id || '-' }}</span>
+                    </div>
+                    <div class="info-row">
+                        <span class="info-label">发音人</span>
+                        <span class="info-value">{{ healthData.config_status?.speaker || '-' }}</span>
+                    </div>
+                    <div class="info-row">
+                        <span class="info-label">启动时间</span>
+                        <span class="info-value">{{ healthData.start_time || '-' }}</span>
+                    </div>
+                </div>
+
+                <div class="card">
+                    <div class="card-title">
+                        <span class="dot"></span>
+                        内存使用
+                    </div>
+                    <div class="memory-stat">
+                        <div>
+                            <div class="value">{{ formatBytes(healthData.memory?.heap_alloc) }}</div>
+                            <div class="label">Heap Alloc</div>
+                        </div>
+                        <div>
+                            <div class="value">{{ formatBytes(healthData.memory?.heap_inuse) }}</div>
+                            <div class="label">Heap Inuse</div>
+                        </div>
+                        <div>
+                            <div class="value">{{ healthData.memory?.goroutines || 0 }}</div>
+                            <div class="label">Goroutines</div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="card">
+                    <div class="card-title">
+                        <span class="dot"></span>
+                        响应时间趋势
+                    </div>
+                    <div class="chart-container">
+                        <div v-for="(time, index) in chartData" :key="index" class="bar"
+                             :style="{ height: Math.max(2, (time / maxResponseTime) * 100) + '%' }"
+                             :title="time.toFixed(1) + 'ms'">
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="card">
+                <div class="card-title">
+                    <span class="dot" :class="{ error: recentErrors.length > 0 }"></span>
+                    错误记录 ({{ recentErrors.length }})
+                </div>
+                <div v-if="recentErrors.length === 0" class="no-errors">
+                    暂无错误记录
+                </div>
+                <div v-else class="error-list">
+                    <div v-for="(err, index) in recentErrors" :key="index" class="error-item">
+                        <div class="error-time">{{ err }}</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div v-if="loading && !healthData.status" class="loading">
+            加载中...
+        </div>
+    </div>
+
+    <script>
+        const { createApp, ref, computed, onMounted } = Vue;
+
+        createApp({
+            setup() {
+                const healthData = ref({});
+                const loading = ref(false);
+                const error = ref(null);
+                const isAutoRefresh = ref(false);
+
+                const deepUpdate = (target, source) => {
+                    for (const key of Object.keys(source)) {
+                        if (source[key] && typeof source[key] === 'object' && !Array.isArray(source[key])) {
+                            if (!target[key]) target[key] = {};
+                            deepUpdate(target[key], source[key]);
+                        } else {
+                            target[key] = source[key];
+                        }
+                    }
+                };
+
+                const fetchHealth = async (showLoading = false) => {
+                    if (showLoading) {
+                        loading.value = true;
+                    }
+                    const oldError = error.value;
+                    try {
+                        const response = await axios.get('/health');
+                        deepUpdate(healthData.value, response.data);
+                        if (response.data.config_status?.all_required_vars_set !== false) {
+                            error.value = null;
+                        }
+                    } catch (e) {
+                        if (e.response && e.response.data) {
+                            deepUpdate(healthData.value, e.response.data);
+                            if (e.response.status === 503 && e.response.data.config_status?.config_error_message) {
+                                error.value = e.response.data.config_status.config_error_message;
+                            } else {
+                                error.value = '服务异常: ' + (e.message || '未知错误');
+                            }
+                        } else {
+                            error.value = '无法获取服务状态: ' + (e.message || '未知错误');
+                        }
+                    } finally {
+                        loading.value = false;
+                    }
+                };
+
+                const errorRate = computed(() => {
+                    return parseFloat(healthData.value.api_stats?.error_rate_percent || 0);
+                });
+
+                const recentErrors = computed(() => {
+                    return healthData.value.errors?.recent_errors || [];
+                });
+
+                const chartData = computed(() => {
+                    return healthData.value.api_stats?.recent_response_times_ms || [];
+                });
+
+                const maxResponseTime = computed(() => {
+                    const times = chartData.value;
+                    if (times.length === 0) return 100;
+                    return Math.max(...times, 100);
+                });
+
+                const formatBytes = (bytes) => {
+                    if (!bytes) return '0 B';
+                    const k = 1024;
+                    const sizes = ['B', 'KB', 'MB', 'GB'];
+                    const i = Math.floor(Math.log(bytes) / Math.log(k));
+                    return (bytes / Math.pow(k, i)).toFixed(1) + ' ' + sizes[i];
+                };
+
+                const formatUptime = (seconds) => {
+                    if (!seconds) return '-';
+                    const s = parseInt(seconds);
+                    const d = Math.floor(s / 86400);
+                    const h = Math.floor((s % 86400) / 3600);
+                    const m = Math.floor((s % 3600) / 60);
+                    if (d > 0) return `${d}天 ${h}小时`;
+                    if (h > 0) return `${h}小时 ${m}分钟`;
+                    return `${m}分钟`;
+                };
+
+                onMounted(() => {
+                    fetchHealth(true);
+                    setInterval(() => fetchHealth(false), 10000);
+                });
+
+                return {
+                    healthData,
+                    loading,
+                    error,
+                    fetchHealth,
+                    errorRate,
+                    recentErrors,
+                    chartData,
+                    maxResponseTime,
+                    formatBytes,
+                    formatUptime
+                };
+            }
+        }).mount('#app');
+    </script>
+</body>
+</html>
