@@ -107,7 +107,7 @@ func init() {
 		Timeout: DEFAULT_TIMEOUT,
 		Transport: &http.Transport{
 			MaxIdleConns:        100,
-			MaxIdleConnsPerHost: 10,
+			MaxIdleConnsPerHost: 20,
 			IdleConnTimeout:     90 * time.Second,
 			TLSHandshakeTimeout: 10 * time.Second,
 		},
@@ -344,7 +344,7 @@ func synthesis(text string, speed float64) (*SynthesisResult, error) {
 
 	var audioData []byte
 	scanner := bufio.NewScanner(resp.Body)
-	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
+	scanner.Buffer(make([]byte, 1024*1024), 8*1024*1024)
 
 	for scanner.Scan() {
 		line := scanner.Bytes()
@@ -472,21 +472,6 @@ func openaiTTSHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	clientIP := getClientIP(r)
-	if !rateLimiter.Allow(clientIP) {
-		log.Printf("警告: 已超过IP速率限制，拒绝请求 - 客户端IP: %s", clientIP)
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusTooManyRequests)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"error": map[string]interface{}{
-				"message": "Rate limit exceeded. Please try again later.",
-				"type":    "rate_limit_error",
-				"code":    "rate_limit_exceeded",
-			},
-		})
-		return
-	}
-
 	select {
 	case concurrencySem <- struct{}{}:
 		defer func() { <-concurrencySem }()
@@ -504,13 +489,28 @@ func openaiTTSHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, MAX_REQUEST_BODY_SIZE))
+	clientIP := getClientIP(r)
+	if !rateLimiter.Allow(clientIP) {
+		log.Printf("警告: 已超过IP速率限制，拒绝请求 - 客户端IP: %s", clientIP)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusTooManyRequests)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error": map[string]interface{}{
+				"message": "Rate limit exceeded. Please try again later.",
+				"type":    "rate_limit_error",
+				"code":    "rate_limit_exceeded",
+			},
+		})
+		return
+	}
+
+	r.Body = http.MaxBytesReader(w, r.Body, MAX_REQUEST_BODY_SIZE)
+	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		if strings.Contains(err.Error(), "request body too large") {
-			http.Error(w, "Request body too large", http.StatusRequestEntityTooLarge)
-		} else {
-			http.Error(w, "Failed to read request body", http.StatusBadRequest)
+			return
 		}
+		http.Error(w, "Failed to read request body", http.StatusBadRequest)
 		return
 	}
 
@@ -678,47 +678,112 @@ func (rec *statusRecorder) WriteHeader(code int) {
 	rec.ResponseWriter.WriteHeader(code)
 }
 
-var allowedOrigins []string
+var (
+	allowedOrigins   []string
+	allowAllOrigins  bool
+	corsMaxAgeHeader = "86400"
+)
+
+func normalizeOrigin(origin string) string {
+	origin = strings.TrimSpace(origin)
+	origin = strings.TrimRight(origin, "/")
+	return strings.ToLower(origin)
+}
 
 func initCORSConfig() {
 	origins := os.Getenv("ALLOWED_ORIGINS")
-	if origins != "" {
-		allowedOrigins = strings.Split(origins, ",")
-		for i, origin := range allowedOrigins {
-			allowedOrigins[i] = strings.TrimSpace(origin)
-		}
-		log.Printf("已配置 %d 个允许的跨域来源", len(allowedOrigins))
-	} else {
+	if origins == "" {
 		log.Println("警告: ALLOWED_ORIGINS 环境变量未设置")
-		log.Println("将使用反射模式允许所有请求来源，生产环境建议配置白名单")
+		log.Println("出于安全考虑，跨域请求将被拒绝。如需开放跨域请配置 ALLOWED_ORIGINS")
+		log.Println("开发环境可设置 ALLOWED_ORIGINS=* 允许所有来源（不可与凭据共用）")
+		return
 	}
+
+	parts := strings.Split(origins, ",")
+	for _, p := range parts {
+		o := strings.TrimSpace(p)
+		if o == "" {
+			continue
+		}
+		if o == "*" {
+			allowAllOrigins = true
+			continue
+		}
+		allowedOrigins = append(allowedOrigins, normalizeOrigin(o))
+	}
+
+	if allowAllOrigins {
+		log.Println("警告: ALLOWED_ORIGINS=*，将允许所有来源跨域请求（不携带凭据）")
+	}
+	if len(allowedOrigins) > 0 {
+		log.Printf("已配置 %d 个允许的跨域来源白名单", len(allowedOrigins))
+	}
+}
+
+func checkStaticFiles() {
+	if _, err := os.Stat("health.html"); os.IsNotExist(err) {
+		log.Println("警告: health.html 不存在，/dashboard 路由将返回 404")
+	}
+}
+
+func isValidOrigin(origin string) bool {
+	if origin == "" || origin == "null" || origin == "nil" {
+		return false
+	}
+	if !strings.HasPrefix(origin, "http://") && !strings.HasPrefix(origin, "https://") {
+		return false
+	}
+	return true
+}
+
+func matchOrigin(origin string) (string, bool) {
+	if !isValidOrigin(origin) {
+		return "", false
+	}
+	if allowAllOrigins {
+		return "*", true
+	}
+	normalized := normalizeOrigin(origin)
+	for _, allowed := range allowedOrigins {
+		if allowed == normalized {
+			return origin, true
+		}
+	}
+	return "", false
 }
 
 func corsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		origin := r.Header.Get("Origin")
-		allowOrigin := ""
 
-		if len(allowedOrigins) == 0 {
-			allowOrigin = origin
-		} else {
-			for _, allowed := range allowedOrigins {
-				if allowed == origin {
-					allowOrigin = origin
-					break
+		if origin != "" {
+			allowOrigin, matched := matchOrigin(origin)
+			if matched {
+				w.Header().Set("Access-Control-Allow-Origin", allowOrigin)
+				w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+				w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+				w.Header().Set("Access-Control-Expose-Headers", "X-Request-Id")
+				w.Header().Set("Access-Control-Max-Age", corsMaxAgeHeader)
+				if allowOrigin != "*" {
+					w.Header().Set("Access-Control-Allow-Credentials", "true")
+				}
+				vary := w.Header().Get("Vary")
+				if vary == "" {
+					w.Header().Set("Vary", "Origin")
+				} else if !strings.Contains(vary, "Origin") {
+					w.Header().Set("Vary", vary+", Origin")
 				}
 			}
 		}
 
-		if allowOrigin != "" {
-			w.Header().Set("Access-Control-Allow-Origin", allowOrigin)
-			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
-			w.Header().Set("Access-Control-Allow-Credentials", "true")
-		}
-
 		if r.Method == http.MethodOptions {
-			w.WriteHeader(http.StatusOK)
+			if origin != "" {
+				if _, matched := matchOrigin(origin); !matched {
+					w.WriteHeader(http.StatusNoContent)
+					return
+				}
+			}
+			w.WriteHeader(http.StatusNoContent)
 			return
 		}
 
@@ -734,6 +799,7 @@ func main() {
 
 	initAPIKeys()
 	initCORSConfig()
+	checkStaticFiles()
 
 	ttsConfigErr = initTTSConfig()
 	if ttsConfigErr != nil {
@@ -782,8 +848,8 @@ func main() {
 	server := &http.Server{
 		Addr:         ":" + port,
 		Handler:      router,
-		ReadTimeout:  15 * time.Second,
-		WriteTimeout: 15 * time.Second,
+		ReadTimeout:  30 * time.Second,
+		WriteTimeout: 120 * time.Second,
 		IdleTimeout:  60 * time.Second,
 	}
 

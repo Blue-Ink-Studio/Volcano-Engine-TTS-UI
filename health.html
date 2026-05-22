@@ -316,12 +316,10 @@
                         </span>
                     </div>
                     <div class="info-row">
-                        <span class="info-label">Resource ID</span>
-                        <span class="info-value">{{ healthData.config_status?.resource_id || '-' }}</span>
-                    </div>
-                    <div class="info-row">
-                        <span class="info-label">发音人</span>
-                        <span class="info-value">{{ healthData.config_status?.speaker || '-' }}</span>
+                        <span class="info-label">配置状态</span>
+                        <span class="info-value" :class="healthData.config_status?.config_error ? 'error' : 'success'">
+                            {{ healthData.config_status?.config_error ? '异常' : '正常' }}
+                        </span>
                     </div>
                     <div class="info-row">
                         <span class="info-label">启动时间</span>
@@ -366,15 +364,15 @@
 
             <div class="card">
                 <div class="card-title">
-                    <span class="dot" :class="{ error: recentErrors.length > 0 }"></span>
-                    错误记录 ({{ recentErrors.length }})
+                    <span class="dot" :class="{ error: recentErrorsCount > 0 }"></span>
+                    错误记录 ({{ recentErrorsCount }})
                 </div>
-                <div v-if="recentErrors.length === 0" class="no-errors">
+                <div v-if="recentErrorsCount === 0" class="no-errors">
                     暂无错误记录
                 </div>
                 <div v-else class="error-list">
-                    <div v-for="(err, index) in recentErrors" :key="index" class="error-item">
-                        <div class="error-time">{{ err }}</div>
+                    <div class="error-item">
+                        <div class="error-time">检测到 {{ recentErrorsCount }} 条最近错误，详细信息请查看服务器日志</div>
                     </div>
                 </div>
             </div>
@@ -420,8 +418,8 @@
                     } catch (e) {
                         if (e.response && e.response.data) {
                             deepUpdate(healthData.value, e.response.data);
-                            if (e.response.status === 503 && e.response.data.config_status?.config_error_message) {
-                                error.value = e.response.data.config_status.config_error_message;
+                            if (e.response.status === 503) {
+                                error.value = '服务配置异常，请检查环境变量配置';
                             } else {
                                 error.value = '服务异常: ' + (e.message || '未知错误');
                             }
@@ -437,8 +435,8 @@
                     return parseFloat(healthData.value.api_stats?.error_rate_percent || 0);
                 });
 
-                const recentErrors = computed(() => {
-                    return healthData.value.errors?.recent_errors || [];
+                const recentErrorsCount = computed(() => {
+                    return healthData.value.errors?.recent_errors_count || 0;
                 });
 
                 const chartData = computed(() => {
@@ -481,7 +479,7 @@
                     error,
                     fetchHealth,
                     errorRate,
-                    recentErrors,
+                    recentErrorsCount,
                     chartData,
                     maxResponseTime,
                     formatBytes,
