@@ -1,4 +1,4 @@
-module bytedance-tts-openai-adapter
+module github.com/volcano-tts/tts-api
 
 go 1.19
 

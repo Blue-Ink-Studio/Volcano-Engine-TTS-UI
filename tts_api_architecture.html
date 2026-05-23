@@ -1,0 +1,444 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TTS-API 架构设计 — TTS 版 New-API</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: #fafafa; color: #111;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", monospace;
+    line-height: 1.75; max-width: 960px; margin: 0 auto; padding: 60px 24px 100px;
+  }
+  h1 { font-size: 2rem; font-weight: 700; letter-spacing: -0.03em; margin-bottom: 4px; }
+  .sub { font-size: 0.85rem; color: #888; margin-bottom: 40px; padding-bottom: 16px; border-bottom: 1px solid #ddd; }
+  h2 {
+    font-size: 1.25rem; font-weight: 700; margin: 48px 0 16px; padding-bottom: 8px;
+    border-bottom: 2px solid #111; letter-spacing: -0.01em;
+  }
+  h3 { font-size: 1rem; font-weight: 700; margin: 28px 0 10px; color: #333; }
+  p { margin-bottom: 12px; font-size: 0.9rem; color: #444; }
+  ul, ol { margin: 0 0 16px 20px; font-size: 0.9rem; color: #444; }
+  li { margin-bottom: 4px; }
+
+  /* ASCII 图表 */
+  .diagram {
+    background: #fff; border: 1px solid #ddd; padding: 20px 24px;
+    margin: 16px 0; overflow-x: auto; font-size: 0.78rem; line-height: 1.5;
+    font-family: "SF Mono", "Fira Code", "Consolas", monospace;
+    color: #333; white-space: pre;
+  }
+
+  /* 对照表 */
+  table {
+    width: 100%; border-collapse: collapse; margin: 16px 0; font-size: 0.85rem;
+  }
+  th, td {
+    border: 1px solid #ddd; padding: 10px 14px; text-align: left;
+  }
+  th { background: #111; color: #fff; font-weight: 600; }
+  tr:nth-child(even) { background: #f7f7f7; }
+
+  /* 代码块 */
+  .code-block {
+    background: #fff; border: 1px solid #ddd; padding: 16px 20px;
+    margin: 12px 0; font-size: 0.8rem; font-family: "SF Mono", "Fira Code", "Consolas", monospace;
+    overflow-x: auto; white-space: pre; color: #333;
+  }
+
+  /* 标签 */
+  .tag {
+    display: inline-block; background: #111; color: #fff; padding: 1px 8px;
+    font-size: 0.7rem; font-weight: 600; margin-right: 4px; letter-spacing: 0.03em;
+  }
+  .tag-outline { background: transparent; color: #111; border: 1px solid #111; }
+
+  .footer { margin-top: 60px; padding-top: 16px; border-top: 1px solid #ddd; font-size: 0.75rem; color: #aaa; text-align: center; }
+</style>
+</head>
+<body>
+
+<h1>TTS-API</h1>
+<p class="sub">TTS 版 New-API 架构设计 · 多 Provider 统一 TTS 网关 · 2026-05-21</p>
+
+<h2>1. 项目定位</h2>
+
+<p>参考 new-api 的设计理念，TTS-API 定位为<strong>企业级 TTS 统一网关与资产管理平台</strong>，核心能力：</p>
+
+<table>
+<tr><th>能力维度</th><th>说明</th></tr>
+<tr><td><strong>统一接入</strong></td><td>以 OpenAI <code>/v1/audio/speech</code> 为唯一入口，屏蔽火山引擎、阿里、Azure、讯飞等上游差异</td></tr>
+<tr><td><strong>统一音色</strong></td><td>定义标准音色命名体系，自动映射到各 Provider 的实际音色 ID</td></tr>
+<tr><td><strong>统一计费</strong></td><td>按字符数 / 时长计费，支持配额管理与成本核算</td></tr>
+<tr><td><strong>统一治理</strong></td><td>权限分组、速率限制、渠道故障切换、审计日志、可视化看板</td></tr>
+</table>
+
+<h2>2. 与 new-api 的关键差异</h2>
+
+<table>
+<tr><th>维度</th><th>new-api（LLM）</th><th>TTS-API（本项目）</th></tr>
+<tr><td>核心接口</td><td><code>/v1/chat/completions</code></td><td><code>/v1/audio/speech</code></td></tr>
+<tr><td>协议转换</td><td>OpenAI ↔ Claude ↔ Gemini 互转</td><td>只需转到各 Provider 原生格式（单向）</td></tr>
+<tr><td>模型映射</td><td>模型名 → 渠道选择</td><td><strong>音色映射</strong>：标准 voice → 各 Provider 实际音色 ID<br>（这是最大难点）</td></tr>
+<tr><td>输出处理</td><td>文本 / JSON 流</td><td><strong>二进制音频流</strong>，需处理格式转换（wav/mp3/pcm）</td></tr>
+<tr><td>计费单位</td><td>Token 数</td><td><strong>字符数 + 音频时长</strong></td></tr>
+<tr><td>缓存</td><td>语义缓存（相同问题命中）</td><td><strong>音频缓存</strong>（相同文本+音色 → 直接返回已合成音频）</td></tr>
+<tr><td>流式</td><td>SSE 文本流</td><td><strong>音频流式推送</strong>（边合成边返回，首字节延迟是关键指标）</td></tr>
+</table>
+
+<h2>3. 整体分层架构</h2>
+
+<div class="diagram">
+┌─────────────────────────────────────────────────────────────────┐
+│                        客户端 / 应用层                            │
+│          OpenAI SDK  │  REST API  │  Web 管理后台                 │
+└────────────────────────────┬────────────────────────────────────┘
+                             │
+┌────────────────────────────▼────────────────────────────────────┐
+│                       Gin HTTP Server                            │
+│  ┌──────────────────────────────────────────────────────────────┐│
+│  │                    路由层 (router/)                           ││
+│  │   /v1/audio/speech    /api/* (管理)    /web/* (前端静态)      ││
+│  └──────────────────────────────────────────────────────────────┘│
+└────────────────────────────┬────────────────────────────────────┘
+                             │
+┌────────────────────────────▼────────────────────────────────────┐
+│                    中间件层 (middleware/)                         │
+│    认证(JWT/API Key) │ 限流(IP/用户) │ 日志 │ CORS │ 请求分发     │
+└────────────────────────────┬────────────────────────────────────┘
+                             │
+┌────────────────────────────▼────────────────────────────────────┐
+│                    控制器层 (controller/)                         │
+│    ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────────┐   │
+│    │ 语音合成  │  │ 用户管理  │  │ 渠道管理  │  │  计费 & 统计  │   │
+│    │ controller│  │controller │  │controller │  │  controller  │   │
+│    └──────────┘  └──────────┘  └──────────┘  └──────────────┘   │
+└────────────────────────────┬────────────────────────────────────┘
+                             │
+       ┌─────────────────────┼─────────────────────┐
+       │                     │                     │
+┌──────▼──────┐     ┌────────▼────────┐    ┌───────▼──────┐
+│  服务层      │     │   适配器层       │    │   数据层     │
+│ (service/)  │     │  (adapter/)     │    │  (model/)   │
+│             │     │                 │    │             │
+│ · 配额管理   │     │  接口定义        │    │  GORM ORM   │
+│ · 音频缓存   │     │  · volcano      │    │             │
+│ · 音色映射   │     │  · aliyun       │    │             │
+│ · 格式转换   │     │  · azure        │    │             │
+│ · 计费服务   │     │  · tencent      │    │             │
+│ · 渠道调度   │     │  · xunfei       │    │             │
+└──────────────┘     │  · openai       │    └───────┬──────┘
+                     │  · fish_audio   │            │
+                     │  · bert_vits    │    ┌───────┼───────┐
+                     └─────────────────┘    │       │       │
+                                     ┌──────▼──┐ ┌──▼──┐ ┌─▼────┐
+                                     │ SQLite  │ │MySQL│ │  PG  │
+                                     └─────────┘ └─────┘ └──────┘
+</div>
+
+<h2>4. 请求处理全流程</h2>
+
+<div class="diagram">
+ 客户端发送 OpenAI 格式 TTS 请求
+         │
+         ▼
+ [1] Gin 路由匹配 → /v1/audio/speech
+         │
+         ▼
+ [2] 中间件链：认证(API Key) → 用户级限流 → 请求日志
+         │
+         ▼
+ [3] 控制器：解析请求 { model, input, voice, speed, response_format }
+         │
+         ▼
+ [4] 音色映射服务：标准 voice 名 → 查找可用渠道 → 映射为渠道实际音色ID
+         │         例: "gentle_male" → 火山引擎(zh_male_qingxin)
+         │                          → Azure(zh-CN-YunxiNeural)
+         │                          → 阿里(cosyvoice-v1-longxiaochun)
+         ▼
+ [5] 渠道调度器：按权重+可用性选择最优渠道，失败自动切换
+         │
+         ▼
+ [6] 适配器：将 OpenAI 请求转为 Provider 原生格式，发送请求
+         │
+         ▼
+ [7] 音频处理：接收二进制音频 → 格式转换(如需) → 写入音频缓存
+         │
+         ▼
+ [8] 计费结算：按字符数/时长扣费，记录日志
+         │
+         ▼
+ [9] 返回响应：Content-Type: audio/wav，流式或整段返回
+</div>
+
+<h2>5. 核心设计：适配器接口</h2>
+
+<p>参考 new-api 的 <code>Adaptor</code> 接口设计，TTS 版适配器接口如下：</p>
+
+<div class="code-block">
+// adapter.go — TTS Provider 统一接口
+
+type TTSAdapter interface {
+    // 初始化：传入渠道配置（API Key / Resource ID / 默认音色等）
+    Init(info *TTSRelayInfo) error
+
+    // 构建上游请求 URL
+    BuildRequestURL(info *TTSRelayInfo) (string, error)
+
+    // 设置请求头（鉴权、Content-Type 等）
+    SetupRequestHeader(c *gin.Context, req *http.Request, info *TTSRelayInfo) error
+
+    // 核心：将 OpenAI 格式请求转为 Provider 原生请求体
+    ConvertRequest(info *TTSRelayInfo, req *dto.OpenAITTSRequest) (any, error)
+
+    // 发送请求到上游
+    DoRequest(c *gin.Context, info *TTSRelayInfo, body io.Reader) (*http.Response, error)
+
+    // 处理上游响应：提取音频、统计字符数/时长、返回标准结构
+    DoResponse(c *gin.Context, resp *http.Response, info *TTSRelayInfo) (*dto.TTSUsage, *dto.TTSError)
+
+    // 返回此渠道支持的音色列表（用于音色映射表构建）
+    GetVoiceList() []ProviderVoice
+
+    // 渠道标识
+    GetChannelName() string
+
+    // 是否支持流式 TTS
+    SupportStreaming() bool
+}
+
+// ProviderVoice 各 Provider 的音色结构
+type ProviderVoice struct {
+    ProviderID   string   // Provider 内部音色 ID，如 "zh_female_qingxin"
+    Language     string   // zh-CN / en-US / ja-JP
+    Gender       string   // male / female
+    Style        string   // 风格标签，如 "news" / "story" / "chat"
+    Description  string   // 音色描述
+}
+</div>
+
+<h2>6. 核心设计：音色映射系统</h2>
+
+<p>这是 TTS 网关区别于 LLM 网关的<strong>最大难点与核心创新点</strong>。LLM 网关只需按模型名路由，但 TTS 需要一套跨 Provider 的音色统一体系。</p>
+
+<div class="diagram">
+                    标准音色命名空间
+          ┌──────────────────────────────────┐
+          │  tts-1-gentle-male               │
+          │  tts-1-gentle-female             │
+          │  tts-1-news-male                 │
+          │  tts-1-story-female              │
+          │  tts-1-casual-male               │
+          │  ...                             │
+          └──────────┬───────────────────────┘
+                     │  音色映射表 (voice_mapping)
+                     │
+     ┌───────────────┼───────────────┬───────────────┐
+     │               │               │               │
+     ▼               ▼               ▼               ▼
+┌─────────┐    ┌─────────┐    ┌─────────┐    ┌─────────┐
+│ 火山引擎  │    │  Azure   │    │  阿里    │    │  讯飞    │
+│         │    │         │    │         │    │         │
+│zh_male_ │    │zh-CN-   │    │cosyvoice│    │x4_ling  │
+│qingxin  │    │Yunxi    │    │-v1-long │    │xiaoxuan  │
+│         │    │Neural   │    │xiaochun │    │         │
+└─────────┘    └─────────┘    └─────────┘    └─────────┘
+</div>
+
+<h3>6.1 音色映射表结构</h3>
+
+<div class="code-block">
+// voice_mapping 表 (数据库)
+type VoiceMapping struct {
+    ID            uint
+    StandardVoice string   // "tts-1-gentle-male"
+    ChannelID     uint     // 渠道 ID
+    ProviderVoice string   // Provider 原始音色 ID
+    Priority      int      // 优先级（同一标准音色多渠道时，优先选谁）
+    IsDefault     bool     // 是否为该标准音色的默认渠道
+}
+
+// 示例数据：
+// standard_voice       | channel | provider_voice            | priority
+// tts-1-gentle-male   | 火山引擎  | zh_male_qingxin          | 1
+// tts-1-gentle-male   | Azure    | zh-CN-YunxiNeural        | 2
+// tts-1-gentle-male   | 阿里     | cosyvoice-v1-longxiaochun| 3
+</div>
+
+<h3>6.2 音色发现与自动映射建议</h3>
+
+<p>每个 Provider 适配器实现 <code>GetVoiceList()</code>，系统启动或渠道更新时自动拉取，通过语言+性别+风格标签与标准命名空间做相似度匹配，自动生成映射建议，管理员在 Web UI 审核确认即可。</p>
+
+<h2>7. 渠道调度与故障切换</h2>
+
+<div class="diagram">
+ 请求 → 查找"tts-1-gentle-male"可用的渠道列表
+         │
+         ▼
+ 按 priority 排序 → 加权随机选择一个渠道
+         │
+         ▼
+ 适配器发送请求 → 成功？
+         ├── 是 → 返回音频，记录成功
+         │
+         └── 否 → 标记渠道失败
+                  │
+                  ▼
+              自动切换 priority+1 的渠道重试
+                  │
+                  ▼
+              所有渠道失败 → 返回 503 + 错误详情
+</div>
+
+<h2>8. 项目目录结构</h2>
+
+<div class="code-block">
+tts-api/
+├── main.go                    # 入口：初始化 DB、路由、启动服务
+├── go.mod / go.sum
+├── .env.example               # 环境变量示例
+├── Dockerfile                 # 多阶段构建
+├── docker-compose.yml
+│
+├── router/                    # 路由层
+│   ├── main.go               # 路由聚合
+│   ├── api-router.go         # /api/*  管理接口
+│   ├── relay-router.go       # /v1/audio/speech  TTS 代理
+│   └── web-router.go         # /web/*  管理后台静态资源
+│
+├── middleware/                # 中间件
+│   ├── auth.go               # JWT + API Key 认证
+│   ├── rate-limit.go         # 用户/IP 级别限流
+│   ├── cors.go               # 跨域
+│   └── logger.go             # 请求日志
+│
+├── controller/               # 控制器
+│   ├── tts.go                # TTS 合成入口（核心）
+│   ├── channel.go            # 渠道 CRUD
+│   ├── user.go               # 用户管理
+│   ├── token.go              # API Key 管理
+│   ├── voice.go              # 音色映射管理
+│   └── billing.go            # 计费统计
+│
+├── service/                  # 服务层
+│   ├── voice_mapping/        # 音色映射服务（核心）
+│   │   └── matcher.go       # 自动匹配 & 建议
+│   ├── channel_scheduler/    # 渠道调度（权重/故障切换）
+│   │   └── scheduler.go
+│   ├── audio_cache/          # 音频缓存（相同文本+音色命中）
+│   │   └── cache.go
+│   ├── audio_convert/        # 音频格式转换（ffmpeg 封装）
+│   │   └── converter.go
+│   ├── billing/              # 计费服务
+│   │   └── billing.go
+│   └── quota/                # 配额管理
+│       └── quota.go
+│
+├── adapter/                  # 适配器层（核心！）
+│   ├── adapter.go            # TTSAdapter 接口定义
+│   ├── volcano/              # 火山引擎 TTS
+│   │   └── volcano.go
+│   ├── aliyun/               # 阿里云 CosyVoice / 百炼
+│   │   └── aliyun.go
+│   ├── azure/                # 微软 Azure TTS
+│   │   └── azure.go
+│   ├── tencent/              # 腾讯云 TTS
+│   │   └── tencent.go
+│   ├── xunfei/               # 讯飞 TTS
+│   │   └── xunfei.go
+│   ├── openai/               # OpenAI TTS（基准）
+│   │   └── openai.go
+│   ├── fish_audio/           # Fish Audio（开源）
+│   │   └── fish_audio.go
+│   └── bert_vits/            # Bert-VITS2（开源自建）
+│       └── bert_vits.go
+│
+├── model/                    # 数据模型 (GORM)
+│   ├── user.go
+│   ├── channel.go            # 渠道（Provider 配置）
+│   ├── token.go              # API Key / Token
+│   ├── voice_mapping.go      # 音色映射
+│   ├── usage_record.go       # 用量记录
+│   └── audio_cache.go        # 音频缓存记录
+│
+├── dto/                      # 请求/响应结构体
+│   ├── openai_tts.go         # OpenAI TTS 请求/响应格式
+│   ├── relay_info.go         # 中继上下文（TTSRelayInfo）
+│   └── common.go             # 通用响应
+│
+├── setting/                   # 配置管理 (Viper)
+│   └── setting.go
+│
+├── common/                    # 通用工具
+│   ├── utils.go
+│   └── constants.go
+│
+└── web/                       # React 管理后台
+    ├── src/
+    │   ├── pages/
+    │   │   ├── Dashboard      # 数据看板
+    │   │   ├── Channels       # 渠道管理
+    │   │   ├── VoiceMapping   # 音色映射配置
+    │   │   ├── Users          # 用户管理
+    │   │   ├── Tokens         # API Key
+    │   │   ├── Billing        # 计费 & 用量
+    │   │   └── Logs           # 调用日志
+    │   └── ...
+    └── package.json
+</div>
+
+<h2>9. 管理后台页面规划</h2>
+
+<table>
+<tr><th>页面</th><th>功能</th></tr>
+<tr><td><strong>Dashboard</strong></td><td>今日合成次数、字符数、时长、费用、渠道健康状态、QPS 曲线</td></tr>
+<tr><td><strong>渠道管理</strong></td><td>添加/编辑 Provider（API Key、Resource ID、权重、并发上限）</td></tr>
+<tr><td><strong>音色映射</strong></td><td>核心页面：标准音色 ↔ 各渠道音色 ID 的映射表，支持自动匹配建议与手动调整</td></tr>
+<tr><td><strong>API Key</strong></td><td>生成/管理用户 API Key，绑定分组与配额</td></tr>
+<tr><td><strong>用户管理</strong></td><td>用户 CRUD、分组、角色（Admin / User）</td></tr>
+<tr><td><strong>计费统计</strong></td><td>按用户/渠道/日期维度的用量与费用报表</td></tr>
+<tr><td><strong>调用日志</strong></td><td>每次 TTS 请求的详细日志（文本、音色、渠道、耗时、费用）</td></tr>
+</table>
+
+<h2>10. 一期 vs 二期路线图</h2>
+
+<h3>一期（MVP，你现有的 Volcano-Engine-TTS-UI 升级版）</h3>
+<table>
+<tr><th>模块</th><th>内容</th></tr>
+<tr><td>适配器</td><td>火山引擎 + Azure + 阿里云，3 个 Provider</td></tr>
+<tr><td>接口</td><td><code>/v1/audio/speech</code>，OpenAI 兼容</td></tr>
+<tr><td>音色映射</td><td>硬编码映射表（配置文件），先跑通再抽象</td></tr>
+<tr><td>计费</td><td>简单字符数计数 + 日志</td></tr>
+<tr><td>管理后台</td><td>极简版：渠道配置页面 + 用量看板</td></tr>
+<tr><td>数据库</td><td>SQLite，单文件部署</td></tr>
+</table>
+
+<h3>二期（完整版）</h3>
+<table>
+<tr><th>模块</th><th>内容</th></tr>
+<tr><td>适配器</td><td>扩到 8+ Provider（讯飞、腾讯、Fish Audio、Bert-VITS2、OpenAI）</td></tr>
+<tr><td>音色映射</td><td>数据库驱动 + Web UI 可视化管理 + 自动匹配建议</td></tr>
+<tr><td>计费</td><td>字符数/时长双维度计费，用户配额，欠费阻断</td></tr>
+<tr><td>缓存</td><td>Redis 音频缓存，相同文本+音色直接命中</td></tr>
+<tr><td>流式</td><td>支持流式 TTS（SSE 推送音频 chunk），降低首字节延迟</td></tr>
+<tr><td>管理后台</td><td>完整 React 后台（参考 new-api 的 Semi Design UI）</td></tr>
+<tr><td>数据库</td><td>MySQL / PostgreSQL 支持</td></tr>
+<tr><td>部署</td><td>Docker Compose 一键部署</td></tr>
+</table>
+
+<h2>11. 关键工程建议</h2>
+
+<ol>
+  <li><strong>从你现有的火山引擎适配器起步</strong>，先抽象出 <code>TTSAdapter</code> 接口，接入 2~3 个 Provider 验证接口设计是否合理，不要一上来就搞 8 个适配器。</li>
+  <li><strong>音色映射先硬编码</strong>，跑通流程后再做成数据库驱动的 Web UI。映射表是长期维护工作，需要社区共建。</li>
+  <li><strong>音频格式转换用 ffmpeg</strong>，Go 侧通过 <code>exec.Command</code> 调用或使用 <code>go-ffmpeg</code> 绑定。各 Provider 输出格式不同（wav / mp3 / pcm），统一转码是刚需。</li>
+  <li><strong>渠道调度直接复用 new-api 的加权随机 + 故障重试思路</strong>，这是成熟的模式，不需要重新发明。</li>
+  <li><strong>管理后台前期可以不写</strong>，SQLite + 配置文件就能用；等 Provider 多了再补 React 前端。</li>
+  <li><strong>考虑直接 fork new-api 改造</strong>：new-api 的渠道管理、用户系统、计费框架、中间件、部署方案都是现成的，你只需要把 relay 层的 LLM 适配器替换成 TTS 适配器，再加音色映射模块。这比从零搭建快得多。</li>
+</ol>
+
+<div class="footer">Architecture Design for TTS-API · Inspired by new-api (QuantumNous)</div>
+
+</body>
+</html>
