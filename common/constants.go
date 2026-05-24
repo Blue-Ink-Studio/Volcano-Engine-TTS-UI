@@ -1,4 +1,4 @@
-package common
+﻿package common
 
 import "time"
 
@@ -17,4 +17,5 @@ const (
 	MaxConcurrentRequests = 10
 	CleanupInterval       = time.Hour
 	MaxModelNameLength    = 64
+	MaxRateLimiterEntries = 100000
 )

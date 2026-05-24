@@ -96,16 +96,13 @@ func CORS(next http.Handler) http.Handler {
 				} else if !strings.Contains(vary, "Origin") {
 					w.Header().Set("Vary", vary+", Origin")
 				}
+			} else {
+				log.Printf("CORS拦截: 来源=%q 路径=%s 方法=%s 客户端=%s",
+					origin, r.URL.Path, r.Method, GetClientIP(r))
 			}
 		}
 
 		if r.Method == http.MethodOptions {
-			if origin != "" {
-				if _, matched := matchOrigin(origin); !matched {
-					w.WriteHeader(http.StatusNoContent)
-					return
-				}
-			}
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}

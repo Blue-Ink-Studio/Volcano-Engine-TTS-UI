@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"log"
 	"net"
 	"net/http"
 	"strings"
@@ -77,6 +78,16 @@ func (rl *RateLimiter) cleanup() {
 			rl.requests[k] = valid
 		}
 	}
+
+	if len(rl.requests) > common.MaxRateLimiterEntries {
+		log.Printf("警告: 限流器条目数 %d 超过上限 %d，触发强制清理", len(rl.requests), common.MaxRateLimiterEntries)
+		for k := range rl.requests {
+			if len(rl.requests) <= common.MaxRateLimiterEntries/2 {
+				break
+			}
+			delete(rl.requests, k)
+		}
+	}
 }
 
 func GetClientIP(r *http.Request) string {
@@ -84,11 +95,14 @@ func GetClientIP(r *http.Request) string {
 	if xForwardedFor != "" {
 		ips := strings.Split(xForwardedFor, ",")
 		if len(ips) > 0 {
-			return strings.TrimSpace(ips[0])
+			ip := strings.TrimSpace(ips[0])
+			if ip != "" {
+				return ip
+			}
 		}
 	}
 
-	xRealIP := r.Header.Get("X-Real-IP")
+	xRealIP := strings.TrimSpace(r.Header.Get("X-Real-IP"))
 	if xRealIP != "" {
 		return xRealIP
 	}

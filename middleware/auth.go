@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"crypto/subtle"
 	"encoding/json"
 	"log"
 	"net/http"
@@ -39,7 +40,7 @@ func ValidateAPIKey(r *http.Request) bool {
 
 	token := strings.TrimPrefix(authHeader, "Bearer ")
 	for _, validKey := range validAPIKeys {
-		if token == validKey {
+		if subtle.ConstantTimeCompare([]byte(token), []byte(validKey)) == 1 {
 			return true
 		}
 	}
