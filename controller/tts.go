@@ -71,6 +71,17 @@ func OpenaiTTSHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if req.Model != "" {
+		if len(req.Model) > common.MaxModelNameLength {
+			http.Error(w, fmt.Sprintf("Model name too long (max %d characters)", common.MaxModelNameLength), http.StatusBadRequest)
+			return
+		}
+		if strings.ContainsAny(req.Model, "\x00\n\r\t") {
+			http.Error(w, "Model name contains invalid characters", http.StatusBadRequest)
+			return
+		}
+	}
+
 	if req.Input == "" {
 		http.Error(w, "Input text is required", http.StatusBadRequest)
 		return

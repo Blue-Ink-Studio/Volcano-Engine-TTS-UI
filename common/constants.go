@@ -16,4 +16,5 @@ const (
 	MaxErrors             = 10
 	MaxConcurrentRequests = 10
 	CleanupInterval       = time.Hour
+	MaxModelNameLength    = 64
 )
