@@ -58,10 +58,11 @@ func OpenaiTTSHandler(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, common.MaxRequestBodySize)
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
-		if strings.Contains(err.Error(), "request body too large") {
-			return
-		}
-		http.Error(w, "Failed to read request body", http.StatusBadRequest)
+	if strings.Contains(err.Error(), "request body too large") {
+		http.Error(w, fmt.Sprintf("Request body too large (max %d bytes)", common.MaxRequestBodySize), http.StatusRequestEntityTooLarge)
+		return
+	}
+	http.Error(w, "Failed to read request body", http.StatusBadRequest)
 		return
 	}
 

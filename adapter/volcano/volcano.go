@@ -132,8 +132,6 @@ func Synthesis(config *dto.ByteDanceTTSConfig, httpClient *HTTPClient, text stri
 			if v3Resp.Usage != nil {
 				log.Printf("TTS synthesis completed, usage: %+v", v3Resp.Usage)
 			}
-			for scanner.Scan() {
-			}
 			break
 		}
 
