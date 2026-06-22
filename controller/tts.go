@@ -39,23 +39,7 @@ func OpenaiTTSHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	select {
-	case middleware.ConcurrencySem <- struct{}{}:
-		defer func() { <-middleware.ConcurrencySem }()
-	default:
-		log.Printf("警告: 已达到最大并发请求数限制，拒绝请求 - 客户端IP: %s", middleware.GetClientIP(r))
-		middleware.SendJSONError(w, http.StatusServiceUnavailable, "Server is busy, maximum concurrent requests reached. Please try again later.", "concurrency_limit_error", "max_concurrent_requests")
-		return
-	}
-
-	clientIP := middleware.GetClientIP(r)
-	if !middleware.GlobalRateLimiter.Allow(clientIP) {
-		log.Printf("警告: 已超过IP速率限制，拒绝请求 - 客户端IP: %s", clientIP)
-		middleware.SendJSONError(w, http.StatusTooManyRequests, "Rate limit exceeded. Please try again later.", "rate_limit_error", "rate_limit_exceeded")
-		return
-	}
-
-	r.Body = http.MaxBytesReader(w, r.Body, common.MaxRequestBodySize)
+		r.Body = http.MaxBytesReader(w, r.Body, common.MaxRequestBodySize)
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		if strings.Contains(err.Error(), "request body too large") {

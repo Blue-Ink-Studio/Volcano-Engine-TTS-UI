@@ -13,6 +13,8 @@ func Setup() *mux.Router {
 
 	r.Use(middleware.CORS)
 	r.Use(middleware.SecurityHeaders)
+	r.Use(middleware.RateLimit)
+	r.Use(middleware.ConcurrencyLimit)
 	r.Use(middleware.Logger)
 
 	r.HandleFunc("/v1/audio/speech", controller.OpenaiTTSHandler).Methods("POST", "OPTIONS")
