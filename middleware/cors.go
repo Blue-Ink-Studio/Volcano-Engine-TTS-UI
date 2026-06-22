@@ -1,4 +1,4 @@
-package middleware
+﻿﻿package middleware
 
 import (
 	"log"
@@ -8,8 +8,8 @@ import (
 )
 
 var (
-	allowedOrigins   []string
-	allowAllOrigins  bool
+	allowedOrigins  []string
+	allowAllOrigins bool
 	corsMaxAgeHeader = "86400"
 )
 
@@ -46,6 +46,9 @@ func InitCORSConfig() {
 	}
 	if len(allowedOrigins) > 0 {
 		log.Printf("已配置 %d 个允许的跨域来源白名单", len(allowedOrigins))
+		for _, o := range allowedOrigins {
+			log.Printf("  - %s", o)
+		}
 	}
 }
 
@@ -53,7 +56,9 @@ func isValidOrigin(origin string) bool {
 	if origin == "" || origin == "null" || origin == "nil" {
 		return false
 	}
-	if !strings.HasPrefix(origin, "http://") && !strings.HasPrefix(origin, "https://") {
+	// 使用小写比较，避免大小写问题
+	lowerOrigin := strings.ToLower(origin)
+	if !strings.HasPrefix(lowerOrigin, "http://") && !strings.HasPrefix(lowerOrigin, "https://") {
 		return false
 	}
 	return true
@@ -61,17 +66,22 @@ func isValidOrigin(origin string) bool {
 
 func matchOrigin(origin string) (string, bool) {
 	if !isValidOrigin(origin) {
+		log.Printf("[CORS] Origin %q 验证失败", origin)
 		return "", false
 	}
 	if allowAllOrigins {
+		log.Printf("[CORS] Origin %q 匹配 allowAllOrigins", origin)
 		return "*", true
 	}
 	normalized := normalizeOrigin(origin)
+	log.Printf("[CORS] 检查 origin %q (normalized: %q) 对比白名单: %v", origin, normalized, allowedOrigins)
 	for _, allowed := range allowedOrigins {
 		if allowed == normalized {
+			log.Printf("[CORS] Origin %q 匹配白名单 %q", origin, allowed)
 			return origin, true
 		}
 	}
+	log.Printf("[CORS] Origin %q 未匹配任何白名单", origin)
 	return "", false
 }
 
@@ -97,7 +107,7 @@ func CORS(next http.Handler) http.Handler {
 					w.Header().Set("Vary", vary+", Origin")
 				}
 			} else {
-				log.Printf("CORS拦截: 来源=%q 路径=%s 方法=%s 客户端=%s",
+				log.Printf("CORS拦截: 来源=%q 路径=%s 方法=%s 客户端IP=%s",
 					origin, r.URL.Path, r.Method, GetClientIP(r))
 			}
 		}
