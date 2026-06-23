@@ -1,4 +1,4 @@
-﻿﻿﻿﻿package middleware
+package middleware
 
 import (
 	"log"
@@ -53,7 +53,8 @@ func isValidOrigin(origin string) bool {
 	if origin == "" || origin == "null" || origin == "nil" {
 		return false
 	}
-	if !strings.HasPrefix(origin, "http://") && !strings.HasPrefix(origin, "https://") {
+	lowerOrigin := strings.ToLower(origin)
+	if !strings.HasPrefix(lowerOrigin, "http://") && !strings.HasPrefix(lowerOrigin, "https://") {
 		return false
 	}
 	return true

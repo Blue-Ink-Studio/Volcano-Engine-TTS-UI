@@ -1,4 +1,4 @@
-package main
+﻿package main
 
 import (
 	"context"
@@ -30,10 +30,10 @@ func main() {
 
 	setting.TTSConfigErr = setting.InitTTSConfig()
 	if setting.TTSConfigErr != nil {
-		log.Printf("警告: 配置初始化失败: %v", setting.TTSConfigErr)
-		log.Printf("服务将继续运行，但TTS功能不可用，请检查环境变量配置")
+		log.Printf("警告：配置初始化失败: %v", setting.TTSConfigErr)
+		log.Printf("服务将继续运行，但TTS功能不可用，请检查环境变量配置
 	} else {
-		log.Printf("配置初始化成功")
+		log.Printf("閰嶇疆鍒濆鍖栨垚鍔?)
 	}
 
 	controller.SetStartTime(time.Now())

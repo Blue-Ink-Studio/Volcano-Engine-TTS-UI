@@ -1,4 +1,4 @@
-package middleware
+﻿package middleware
 
 import (
 	"crypto/subtle"
@@ -18,9 +18,9 @@ func InitAPIKeys() {
 		for i, k := range validAPIKeys {
 			validAPIKeys[i] = strings.TrimSpace(k)
 		}
-		log.Printf("已配置 %d 个有效的API密钥", len(validAPIKeys))
+		log.Printf("宸查厤缃?%d 涓湁鏁堢殑API瀵嗛挜", len(validAPIKeys))
 	} else {
-		log.Println("警告: OPENAI_TTS_API_KEY 环境变量未设置，将允许所有请求")
+		log.Println("警告: OPENAI_TTS_API_KEY环境变量未设置，将拒绝所有请求?)
 	}
 }
 
