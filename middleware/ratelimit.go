@@ -90,26 +90,63 @@ func (rl *RateLimiter) cleanup() {
 	}
 }
 
+// 私有网络 CIDR 范围：仅在直连来源属于这些范围时才信任代理头
+var privateCIDRs []*net.IPNet
+
+func init() {
+	for _, cidr := range []string{
+		"10.0.0.0/8",
+		"172.16.0.0/12",
+		"192.168.0.0/16",
+		"127.0.0.0/8",
+		"169.254.0.0/16",
+		"::1/128",
+		"fc00::/7",
+		"fe80::/10",
+	} {
+		_, ipNet, _ := net.ParseCIDR(cidr)
+		privateCIDRs = append(privateCIDRs, ipNet)
+	}
+}
+
+func isPrivateIP(ipStr string) bool {
+	ip := net.ParseIP(ipStr)
+	if ip == nil {
+		return false
+	}
+	if ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
+		return true
+	}
+	for _, cidr := range privateCIDRs {
+		if cidr.Contains(ip) {
+			return true
+		}
+	}
+	return false
+}
+
+// GetClientIP 提取客户端真实 IP。
+// 仅当直连来源为私有网络（本地代理、Docker 网桥等）时才信任 X-Forwarded-For / X-Real-IP，
+// 防止公网直连场景下攻击者伪造代理头绕过速率限制。
 func GetClientIP(r *http.Request) string {
-	xForwardedFor := r.Header.Get("X-Forwarded-For")
-	if xForwardedFor != "" {
-		ips := strings.Split(xForwardedFor, ",")
-		if len(ips) > 0 {
-			ip := strings.TrimSpace(ips[0])
-			if ip != "" {
+	directIP, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		directIP = r.RemoteAddr
+	}
+
+	if isPrivateIP(directIP) {
+		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+			ip := strings.TrimSpace(strings.Split(xff, ",")[0])
+			if net.ParseIP(ip) != nil {
 				return ip
+			}
+		}
+		if xri := strings.TrimSpace(r.Header.Get("X-Real-IP")); xri != "" {
+			if net.ParseIP(xri) != nil {
+				return xri
 			}
 		}
 	}
 
-	xRealIP := strings.TrimSpace(r.Header.Get("X-Real-IP"))
-	if xRealIP != "" {
-		return xRealIP
-	}
-
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		return r.RemoteAddr
-	}
-	return host
+	return directIP
 }

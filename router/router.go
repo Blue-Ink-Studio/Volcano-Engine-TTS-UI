@@ -11,7 +11,6 @@ import (
 func Setup() *mux.Router {
 	r := mux.NewRouter()
 
-	r.Use(middleware.CORS)
 	r.Use(middleware.SecurityHeaders)
 	r.Use(middleware.RateLimit)
 	r.Use(middleware.ConcurrencyLimit)

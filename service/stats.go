@@ -1,8 +1,8 @@
 package service
 
 import (
-	"fmt"
 	"runtime"
+	"strings"
 	"sync"
 	"time"
 
@@ -10,15 +10,17 @@ import (
 )
 
 type Stats struct {
-	totalRequests       int64
-	successfulRequests  int64
-	failedRequests      int64
-	totalResponseTime   time.Duration
-	recentResponseTimes []float64
-	responseTimesIndex  int
-	lastErrors          []string
-	errorsIndex         int
-	mutex               sync.RWMutex
+	totalRequests        int64
+	successfulRequests   int64
+	failedRequests       int64
+	totalResponseTime    time.Duration
+	recentResponseTimes  []float64
+	responseTimesIndex   int
+	responseTimesCount   int
+	lastErrors           []string
+	errorsIndex          int
+	errorsCount          int
+	mutex                sync.RWMutex
 }
 
 var GlobalStats *Stats
@@ -39,15 +41,34 @@ func (s *Stats) AddRequest(success bool, responseTime time.Duration, errMsg stri
 
 	s.recentResponseTimes[s.responseTimesIndex] = responseTime.Seconds() * 1000
 	s.responseTimesIndex = (s.responseTimesIndex + 1) % common.MaxResponseTimes
+	if s.responseTimesCount < common.MaxResponseTimes {
+		s.responseTimesCount++
+	}
 
 	if success {
 		s.successfulRequests++
 	} else {
 		s.failedRequests++
 		if errMsg != "" {
-			errInfo := fmt.Sprintf("%s: %s", time.Now().Format(time.RFC3339), errMsg)
-			s.lastErrors[s.errorsIndex] = errInfo
+			now := time.Now().Format(time.RFC3339)
+
+			// 去重：如果最近一条错误的消息内容相同，仅更新时间戳
+			if s.errorsCount > 0 {
+				lastIdx := (s.errorsIndex - 1 + common.MaxErrors) % common.MaxErrors
+				lastEntry := s.lastErrors[lastIdx]
+				if sepIdx := strings.Index(lastEntry, ": "); sepIdx != -1 {
+					if lastEntry[sepIdx+2:] == errMsg {
+						s.lastErrors[lastIdx] = now + ": " + errMsg
+						return
+					}
+				}
+			}
+
+			s.lastErrors[s.errorsIndex] = now + ": " + errMsg
 			s.errorsIndex = (s.errorsIndex + 1) % common.MaxErrors
+			if s.errorsCount < common.MaxErrors {
+				s.errorsCount++
+			}
 		}
 	}
 }
@@ -62,19 +83,32 @@ func (s *Stats) GetSnapshot() (totalRequests int64, successfulRequests int64, fa
 	failedRequests = s.failedRequests
 	totalResponseTime = s.totalResponseTime
 
-	recentResponseTimes = make([]float64, 0, common.MaxResponseTimes)
-	for _, t := range s.recentResponseTimes {
-		if t > 0 {
-			recentResponseTimes = append(recentResponseTimes, t)
+	// 按时间顺序（从旧到新）遍历响应时间环形缓冲区
+	recentResponseTimes = make([]float64, 0, s.responseTimesCount)
+	if s.responseTimesCount > 0 {
+		start := 0
+		if s.responseTimesCount == common.MaxResponseTimes {
+			start = s.responseTimesIndex
+		}
+		for i := 0; i < s.responseTimesCount; i++ {
+			idx := (start + i) % common.MaxResponseTimes
+			recentResponseTimes = append(recentResponseTimes, s.recentResponseTimes[idx])
 		}
 	}
 
-	lastErrors = make([]string, 0, common.MaxErrors)
-	for _, e := range s.lastErrors {
-		if e != "" {
-			lastErrors = append(lastErrors, e)
+	// 按时间顺序（从旧到新）遍历错误环形缓冲区
+	lastErrors = make([]string, 0, s.errorsCount)
+	if s.errorsCount > 0 {
+		start := 0
+		if s.errorsCount == common.MaxErrors {
+			start = s.errorsIndex
+		}
+		for i := 0; i < s.errorsCount; i++ {
+			idx := (start + i) % common.MaxErrors
+			lastErrors = append(lastErrors, s.lastErrors[idx])
 		}
 	}
+
 	return
 }
 

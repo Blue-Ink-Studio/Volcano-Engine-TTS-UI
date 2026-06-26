@@ -43,6 +43,7 @@ func OpenaiTTSHandler(w http.ResponseWriter, r *http.Request) {
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		if strings.Contains(err.Error(), "request body too large") {
+			http.Error(w, "Request body too large", http.StatusRequestEntityTooLarge)
 			return
 		}
 		http.Error(w, "Failed to read request body", http.StatusBadRequest)
@@ -88,7 +89,7 @@ func OpenaiTTSHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ttsStart := time.Now()
-	result, err := volcano.Synthesis(&setting.TTSConfig, volcanoClient, req.Input, speed)
+	result, err := volcano.Synthesis(&setting.TTSConfig, volcanoClient, req.Input, speed, req.Voice)
 	duration := time.Since(ttsStart)
 
 	if err != nil {

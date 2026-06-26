@@ -20,7 +20,8 @@ func InitAPIKeys() {
 		}
 		log.Printf("宸查厤缃?%d 涓湁鏁堢殑API瀵嗛挜", len(validAPIKeys))
 	} else {
-		log.Println("警告: OPENAI_TTS_API_KEY环境变量未设置，将拒绝所有请求?)
+		log.Println("警告: OPENAI_TTS_API_KEY环境变量未设置，所有请求将无需认证即可访问")
+		log.Println("如需启用API密钥验证，请设置 OPENAI_TTS_API_KEY 环境变量（多个密钥用逗号分隔）")
 	}
 }
 

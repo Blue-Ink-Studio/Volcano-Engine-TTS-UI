@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/volcano-tts/tts-api/common"
 	"github.com/volcano-tts/tts-api/dto"
 )
 
@@ -24,7 +23,6 @@ type HTTPClient struct {
 func NewHTTPClient() *HTTPClient {
 	return &HTTPClient{
 		client: &http.Client{
-			Timeout: common.DefaultTimeout,
 			Transport: &http.Transport{
 				MaxIdleConns:        100,
 				MaxIdleConnsPerHost: 20,
@@ -52,18 +50,24 @@ func (h *HTTPClient) PostStream(url string, headers map[string]string, body []by
 }
 
 func convertSpeedToSpeechRate(speed float64) int {
-	if speed <= 0.5 {
-		return -50
+	rate := int((speed - 1.0) * 100)
+	if rate < -200 {
+		rate = -200
 	}
-	if speed >= 2.0 {
-		return 100
+	if rate > 500 {
+		rate = 500
 	}
-	return int((speed - 1.0) * 100)
+	return rate
 }
 
-func Synthesis(config *dto.ByteDanceTTSConfig, httpClient *HTTPClient, text string, speed float64) (*dto.SynthesisResult, error) {
+func Synthesis(config *dto.ByteDanceTTSConfig, httpClient *HTTPClient, text string, speed float64, voice string) (*dto.SynthesisResult, error) {
 	reqID := uuid.NewString()
 	speechRate := convertSpeedToSpeechRate(speed)
+
+	speaker := config.Speaker
+	if voice != "" {
+		speaker = voice
+	}
 
 	params := map[string]interface{}{
 		"user": map[string]interface{}{
@@ -72,7 +76,7 @@ func Synthesis(config *dto.ByteDanceTTSConfig, httpClient *HTTPClient, text stri
 		"namespace": "BidirectionalTTS",
 		"req_params": map[string]interface{}{
 			"text":    text,
-			"speaker": config.Speaker,
+			"speaker": speaker,
 			"audio_params": map[string]interface{}{
 				"format":      "wav",
 				"sample_rate": 24000,
