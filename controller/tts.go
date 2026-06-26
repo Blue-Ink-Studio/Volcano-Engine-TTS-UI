@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -22,18 +23,32 @@ func InitController() {
 	volcanoClient = volcano.NewHTTPClient()
 }
 
+// truncateForLog 用于在日志中安全地展示请求内容（截断避免日志爆炸、控制不可打印字符）
+func truncateForLog(b []byte, max int) string {
+	if len(b) > max {
+		return string(b[:max]) + fmt.Sprintf("...(truncated, total %d bytes)", len(b))
+	}
+	return string(b)
+}
+
 func OpenaiTTSHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
+		log.Printf("警告: 错误的方法 - 方法=%s 期望=POST 路径=%s 客户端=%s",
+			r.Method, r.URL.Path, middleware.GetClientIP(r))
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
 	if !middleware.ValidateAPIKey(r) {
+		log.Printf("警告: API Key 鉴权失败 - 路径=%s 客户端=%s 远端=%s",
+			r.URL.Path, middleware.GetClientIP(r), r.RemoteAddr)
 		middleware.SendJSONError(w, http.StatusUnauthorized, "Invalid API key provided.", "invalid_request_error", "invalid_api_key")
 		return
 	}
 
 	if setting.TTSConfigErr != nil {
+		log.Printf("警告: TTS配置未就绪，拒绝请求 - 错误=%v 路径=%s 客户端=%s",
+			setting.TTSConfigErr, r.URL.Path, middleware.GetClientIP(r))
 		middleware.SendJSONError(w, http.StatusServiceUnavailable, "TTS service configuration error. Please check environment variables and restart the service.", "configuration_error", "service_unavailable")
 		return
 	}
@@ -42,36 +57,49 @@ func OpenaiTTSHandler(w http.ResponseWriter, r *http.Request) {
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		if strings.Contains(err.Error(), "request body too large") {
+			log.Printf("警告: 请求体过大 - 路径=%s 客户端=%s 限制=%d字节",
+				r.URL.Path, middleware.GetClientIP(r), common.MaxRequestBodySize)
 			http.Error(w, "Request body too large", http.StatusRequestEntityTooLarge)
 			return
 		}
+		log.Printf("警告: 读取请求体失败 - 路径=%s 客户端=%s 错误=%v",
+			r.URL.Path, middleware.GetClientIP(r), err)
 		http.Error(w, "Failed to read request body", http.StatusBadRequest)
 		return
 	}
 
 	var req dto.OpenAITTSRequest
 	if err := json.Unmarshal(body, &req); err != nil {
+		log.Printf("警告: JSON 解析失败 - 路径=%s 客户端=%s 错误=%v body前200字节=%q",
+			r.URL.Path, middleware.GetClientIP(r), err, truncateForLog(body, 200))
 		http.Error(w, "Invalid JSON", http.StatusBadRequest)
 		return
 	}
 
 	if req.Model != "" {
 		if len(req.Model) > common.MaxModelNameLength {
+			log.Printf("警告: Model 名过长 - 路径=%s 客户端=%s 长度=%d 限制=%d",
+				r.URL.Path, middleware.GetClientIP(r), len(req.Model), common.MaxModelNameLength)
 			http.Error(w, fmt.Sprintf("Model name too long (max %d characters)", common.MaxModelNameLength), http.StatusBadRequest)
 			return
 		}
 		if strings.ContainsAny(req.Model, "\x00\n\r\t") {
+			log.Printf("警告: Model 名含非法字符 - 路径=%s 客户端=%s model前50字节=%q",
+				r.URL.Path, middleware.GetClientIP(r), truncateForLog([]byte(req.Model), 50))
 			http.Error(w, "Model name contains invalid characters", http.StatusBadRequest)
 			return
 		}
 	}
 
 	if req.Input == "" {
+		log.Printf("警告: input 字段为空 - 路径=%s 客户端=%s", r.URL.Path, middleware.GetClientIP(r))
 		http.Error(w, "Input text is required", http.StatusBadRequest)
 		return
 	}
 
 	if len(req.Input) > common.MaxTextLength {
+		log.Printf("警告: input 文本过长 - 路径=%s 客户端=%s 长度=%d 限制=%d",
+			r.URL.Path, middleware.GetClientIP(r), len(req.Input), common.MaxTextLength)
 		http.Error(w, fmt.Sprintf("Input text too long (max %d characters)", common.MaxTextLength), http.StatusBadRequest)
 		return
 	}
@@ -93,6 +121,8 @@ func OpenaiTTSHandler(w http.ResponseWriter, r *http.Request) {
 
 	if err != nil {
 		service.GlobalStats.AddRequest(false, duration, err.Error())
+		log.Printf("警告: TTS 合成失败 - 路径=%s 客户端=%s 文本长度=%d 耗时=%v 错误=%v",
+			r.URL.Path, middleware.GetClientIP(r), len(req.Input), duration, err)
 		http.Error(w, "TTS synthesis failed", http.StatusInternalServerError)
 		return
 	}
