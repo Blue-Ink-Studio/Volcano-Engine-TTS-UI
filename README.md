@@ -73,6 +73,7 @@ tts_server.exe
 | `BYTEDANCE_TTS_TIMEOUT` | 请求超时时间 | `30s` |
 | `OPENAI_TTS_API_KEY` | OpenAI兼容接口的API密钥（逗号分隔支持多个） | 无 |
 | `PORT` | 服务监听端口 | `8080` |
+| `ALLOWED_ORIGINS` | 允许跨域请求的来源（多个用英文逗号分隔；调试可设为 `*`） | 无（不设则拒绝所有跨域） |
 
 ### Resource ID 说明
 
@@ -85,8 +86,33 @@ tts_server.exe
 | `seed-icl-1.0-concurr` | 声音复刻1.0并发版 |
 | `seed-icl-2.0` | 声音复刻2.0字符版 |
 
+> ⚠️ 上表为通用模型名。火山控制台实际显示的资源 ID 字符串格式通常是 `volc.megatts.default`、`volc.megatts.icl` 等（带版本号会形如 `volc.megatts.icl.2_0`），**以控制台资源管理页面显示的字符串为准**。资源 ID 与音色必须**同时在控制台开通**才能组合使用，否则 API 会返回 `code=55000000, message=resource ID is mismatched with speaker related resource`。
+
 **注意：** 1.0音色只能搭配 `seed-tts-1.0` Resource ID，2.0音色只能搭配 `seed-tts-2.0` Resource ID。
 
+## CORS 跨域配置
+
+跨域请求由 `ALLOWED_ORIGINS` 环境变量控制，按**完整 origin**（含协议 + 域名 + 端口）精确匹配：
+
+- ✅ `https://app.example.com` — 精确匹配一个来源
+- ✅ `https://a.com,https://b.com` — 多个来源英文逗号分隔
+- ✅ `*` — 允许所有来源（**不可与凭据请求共存**，需同时去掉 `Authorization` 头）
+- ❌ `app.example.com` — 缺协议头，**永远不会匹配**（服务端强制校验 `http://` / `https://` 开头）
+
+**典型坑**：
+
+1. 客户端 URL 是 `http://` 但服务端是 `https://`：浏览器按 `http://...` 的 origin 发请求，白名单里的 `https://...` 不会匹配 → 403。**客户端必须用 `https://` 开头**。
+2. `ALLOWED_ORIGINS=*` + 客户端带 `Authorization`：浏览器按规范会**直接拒绝预检**（凭据 + 通配符冲突），POST 根本发不出去。
+3. 同源请求（前端和 TTS 服务同域名）不受 CORS 限制，`ALLOWED_ORIGINS` 怎么配都不影响。
+
+诊断时打开浏览器 DevTools → Network → 看 OPTIONS 预检的响应头：
+
+```
+access-control-allow-origin: https://your-frontend.com
+access-control-allow-credentials: true
+```
+
+如果 OPTIONS 返回 403 但响应头里**没有** `access-control-allow-origin`，说明 origin 不在白名单，Zeabur 实时日志会输出 `CORS拦截: 来源=...`。
 ## API 使用说明
 
 ### OpenAI 兼容接口
@@ -198,7 +224,25 @@ PORT=8081 ./tts_server
 OPENAI_TTS_API_KEY=sk-key1,sk-key2,sk-key3
 ```
 
-### 4. 查看日志
+### 4. 出现 `code=55000000, message=resource ID is mismatched with speaker related resource` 怎么办？
+
+这是火山引擎 v3 API 返回的**资源/音色不匹配**错误，不是网络或超时问题。修复方法：
+
+1. 去**火山控制台** → 语音技术 → 你的应用 → 资源管理或音色库
+2. 用控制台的在线体验/调试试一下同一对 `BYTEDANCE_TTS_RESOURCE_ID` + 音色
+3. 控制台能合成的组合才是正确的
+4. 把控制台显示的**实际资源 ID 字符串**（通常是 `volc.megatts.*` 格式）填到 Zeabur 的 `BYTEDANCE_TTS_RESOURCE_ID`
+
+### 5. PowerShell 下 `curl` 命令被解释错
+
+PowerShell 里 `curl` 是 `Invoke-WebRequest` 的别名，参数完全不同（如 `-m` 会被当成歧义参数）。**必须写 `curl.exe`**：
+
+```powershell
+curl.exe -v -X POST "https://your-app.zeabur.app/v1/audio/speech" -H "Content-Type: application/json" -H "Authorization: Bearer YOUR_KEY" --data-binary "@body.json"
+```
+
+另外 PowerShell 里 `{"foo":"bar"}` 不加单引号会被当成脚本块解析，body 被吃掉所有引号。**要么用单引号包 JSON**，要么把 body 写到文件用 `--data-binary "@file.json"`。
+### 6. 查看日志
 
 服务启动后会输出详细日志，包括：
 - 服务启动信息
@@ -249,3 +293,6 @@ sudo systemctl start tts-server
 2. 网络是否能访问火山引擎TTS服务
 3. 鉴权信息是否有效
 4. Resource ID与Speaker是否匹配
+5. ALLOWED_ORIGINS 是否包含前端完整 origin（含 https://）
+6. 客户端请求 URL 是否以 https:// 开头
+7. 生产环境凭据是否定期轮换（API Key 明文出现在日志/对话中时立刻重置）
