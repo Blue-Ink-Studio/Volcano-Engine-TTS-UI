@@ -73,7 +73,7 @@ func Synthesis(config *dto.ByteDanceTTSConfig, httpClient *HTTPClient, text stri
 		"user": map[string]interface{}{
 			"uid": "uid",
 		},
-		"namespace": "BidirectionalTTS",
+		"namespace": "UnidirectionalTTS",
 		"req_params": map[string]interface{}{
 			"text":    text,
 			"speaker": speaker,
