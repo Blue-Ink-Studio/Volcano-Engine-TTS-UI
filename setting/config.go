@@ -79,6 +79,7 @@ func CheckEnvironmentVariables() map[string]interface{} {
 		"BYTEDANCE_TTS_TIMEOUT": os.Getenv("BYTEDANCE_TTS_TIMEOUT") != "",
 		"BYTEDANCE_TTS_MODEL":   os.Getenv("BYTEDANCE_TTS_MODEL") != "",
 		"OPENAI_TTS_API_KEY":    os.Getenv("OPENAI_TTS_API_KEY") != "",
+		"ALLOWED_ORIGINS":       os.Getenv("ALLOWED_ORIGINS") != "",
 		"PORT":                  os.Getenv("PORT") != "",
 	}
 
