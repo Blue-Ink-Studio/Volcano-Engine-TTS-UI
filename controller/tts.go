@@ -115,8 +115,14 @@ func OpenaiTTSHandler(w http.ResponseWriter, r *http.Request) {
 		speed = common.MaxSpeed
 	}
 
+	// 将 OpenAI response_format 映射为火山 API 支持的格式
+	var requestFormat string
+	if req.ResponseFormat != "" {
+		requestFormat = volcano.MapOpenAIFormat(req.ResponseFormat)
+	}
+
 	ttsStart := time.Now()
-	result, err := volcano.Synthesis(&setting.TTSConfig, volcanoClient, req.Input, speed, req.Voice)
+	result, err := volcano.Synthesis(&setting.TTSConfig, volcanoClient, req.Input, speed, req.Voice, requestFormat)
 	duration := time.Since(ttsStart)
 
 	if err != nil {
@@ -129,7 +135,7 @@ func OpenaiTTSHandler(w http.ResponseWriter, r *http.Request) {
 
 	service.GlobalStats.AddRequest(true, duration, "")
 
-	w.Header().Set("Content-Type", "audio/wav")
+	w.Header().Set("Content-Type", volcano.FormatContentType(result.Format))
 	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(result.AudioData)))
 	w.Header().Set("X-Request-Id", result.ReqID)
 	w.WriteHeader(http.StatusOK)

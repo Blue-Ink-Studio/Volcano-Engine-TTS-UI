@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -63,7 +64,80 @@ func convertSpeedToSpeechRate(speed float64) int {
 	return rate
 }
 
-func Synthesis(config *dto.ByteDanceTTSConfig, httpClient *HTTPClient, text string, speed float64, voice string) (*dto.SynthesisResult, error) {
+// resolveAPIFormat 根据用户期望的输出格式决定实际请求火山 API 的格式。
+// 文档明确指出：流式场景下传入 wav 会多次返回 wav header，建议使用 pcm。
+// 因此当用户要 wav 输出时，用 pcm 请求 API，最后由本端拼装完整 wav header。
+func resolveAPIFormat(desiredFormat string) (apiFormat string, needWavHeader bool) {
+	switch desiredFormat {
+	case "wav":
+		return "pcm", true
+	case "mp3", "ogg_opus", "pcm":
+		return desiredFormat, false
+	default:
+		return "mp3", false
+	}
+}
+
+// buildWavHeader 构造标准 44 字节 WAV 文件头（16-bit PCM, mono）。
+func buildWavHeader(dataLen int, sampleRate int) []byte {
+	header := make([]byte, 44)
+	byteRate := sampleRate * 2 // 16bit * 1channel / 8 * sampleRate
+	blockAlign := 2            // 16bit / 8 * 1channel
+
+	copy(header[0:4], "RIFF")
+	binary.LittleEndian.PutUint32(header[4:8], uint32(36+dataLen))
+	copy(header[8:12], "WAVE")
+	copy(header[12:16], "fmt ")
+	binary.LittleEndian.PutUint32(header[16:20], 16)       // SubChunk1Size
+	binary.LittleEndian.PutUint16(header[20:22], 1)        // PCM format
+	binary.LittleEndian.PutUint16(header[22:24], 1)        // NumChannels
+	binary.LittleEndian.PutUint32(header[24:28], uint32(sampleRate))
+	binary.LittleEndian.PutUint32(header[28:32], uint32(byteRate))
+	binary.LittleEndian.PutUint16(header[32:34], uint16(blockAlign))
+	binary.LittleEndian.PutUint16(header[34:36], 16)       // BitsPerSample
+	copy(header[36:40], "data")
+	binary.LittleEndian.PutUint32(header[40:44], uint32(dataLen))
+
+	return header
+}
+
+// FormatContentType 返回音频格式对应的 HTTP Content-Type。
+func FormatContentType(format string) string {
+	switch format {
+	case "mp3":
+		return "audio/mpeg"
+	case "wav":
+		return "audio/wav"
+	case "ogg_opus":
+		return "audio/ogg"
+	case "pcm":
+		return "audio/pcm"
+	default:
+		return "application/octet-stream"
+	}
+}
+
+// MapOpenAIFormat 将 OpenAI TTS response_format 映射为火山 API 支持的格式。
+// OpenAI 支持: mp3, opus, aac, flac, wav, pcm
+// 火山支持: mp3, ogg_opus, pcm, wav(流式不推荐)
+func MapOpenAIFormat(openaiFormat string) string {
+	switch openaiFormat {
+	case "mp3":
+		return "mp3"
+	case "opus":
+		return "ogg_opus"
+	case "wav":
+		return "wav"
+	case "pcm":
+		return "pcm"
+	case "aac", "flac":
+		return "mp3" // 火山不支持 aac/flac，降级到 mp3
+	default:
+		return "mp3"
+	}
+}
+
+func Synthesis(config *dto.ByteDanceTTSConfig, httpClient *HTTPClient, text string, speed float64, voice string, requestFormat string) (*dto.SynthesisResult, error) {
 	reqID := uuid.NewString()
 	speechRate := convertSpeedToSpeechRate(speed)
 
@@ -74,35 +148,54 @@ func Synthesis(config *dto.ByteDanceTTSConfig, httpClient *HTTPClient, text stri
 
 	model := config.Model
 	if model == "" {
-		model = "seed-tts-2.0-standard" // 文档默认值 复刻音色可设为 seed-tts-2.0-expressive
+		model = "seed-tts-2.0-standard"
 	}
 
-	// 请求体结构严格按火山 v3 单向流式 API 文档构造
-	// https://www.volcengine.com/docs/6561/2528925
-	// v3 鉴权只依赖 X-Api-Key 一个 header,不再需要业务集群参数
+	// 决定实际输出格式：优先用请求中指定的格式，否则用配置中的格式，最后默认 mp3
+	outputFormat := config.Format
+	if requestFormat != "" {
+		outputFormat = requestFormat
+	}
+	if outputFormat == "" {
+		outputFormat = "mp3"
+	}
+
+	// 根据输出格式确定 API 请求格式（wav → pcm + 封装 header）
+	apiFormat, needWavHeader := resolveAPIFormat(outputFormat)
+
+	sampleRate := config.SampleRate
+	if sampleRate == 0 {
+		sampleRate = 24000
+	}
+
+	// 按火山 v3 HTTP Chunked 单向流式 API 文档构造请求体
+	// https://www.volcengine.com/docs/6561/1598757
 	params := map[string]interface{}{
 		"user": map[string]interface{}{
-			"uid": reqID, // 文档要求随机字符串,这里复用请求级 UUID
+			"uid": reqID,
 		},
 		"namespace": "UnidirectionalTTS",
 		"req_params": map[string]interface{}{
 			"text":    text,
 			"speaker": speaker,
-			"model":   model, // 复刻音色必填
+			"model":   model,
 			"audio_params": map[string]interface{}{
-				"format":      "wav",
-				"sample_rate": 24000,
+				"format":      apiFormat,
+				"sample_rate": sampleRate,
 				"speech_rate": speechRate,
 			},
 		},
 	}
 
+	// 鉴权 header 按文档 v3 新版控制台方式
 	headers := map[string]string{
 		"Content-Type":      "application/json",
 		"Connection":        "keep-alive",
-		"X-Api-Resource-Id": config.ResourceId, // 模型路由（seed-tts-2.0 / seed-icl-2.0）
+		"X-Api-Resource-Id": config.ResourceId,
 		"X-Api-Request-Id":  reqID,
-		"X-Api-Key":         config.ApiKey, // v3 鉴权 key
+		"X-Api-Key":         config.ApiKey,
+		// 请求用量返回，使合成结束时携带 usage 字段
+		"X-Control-Require-Usage-Tokens-Return": "*",
 	}
 
 	bodyStr, err := json.Marshal(params)
@@ -144,29 +237,39 @@ func Synthesis(config *dto.ByteDanceTTSConfig, httpClient *HTTPClient, text stri
 			continue
 		}
 
+		// code=20000000 表示合成结束
 		if v3Resp.Code == 20000000 {
 			if v3Resp.Usage != nil {
 				log.Printf("TTS synthesis completed, usage: %+v", v3Resp.Usage)
 			}
+			// 跳过后续可能的空行
 			for scanner.Scan() {
 			}
 			break
 		}
 
+		// 非零 code 为错误
 		if v3Resp.Code != 0 {
-			log.Printf("TTS service error: code=%d, message=%s", v3Resp.Code, v3Resp.Message)
+			log.Printf("TTS service error: code=%d, message=%s, event=%s", v3Resp.Code, v3Resp.Message, v3Resp.Event)
 			return nil, fmt.Errorf("TTS service error: %s", v3Resp.Message)
 		}
 
-		if v3Resp.Data != "" {
-			chunk, err := base64.StdEncoding.DecodeString(v3Resp.Data)
-			if err != nil {
-				log.Printf("base64 decode fail: %v", err)
-				return nil, err
+		// 根据 event 字段分类处理
+		switch v3Resp.Event {
+		case "TTSSentenceStart":
+			log.Printf("Sentence start: sequence=%d, sentence=%s", v3Resp.Sequence, v3Resp.Sentence)
+		case "TTSSentenceEnd":
+			log.Printf("Sentence end: sequence=%d", v3Resp.Sequence)
+		default:
+			// 音频数据 chunk：data 字段为 base64 编码的音频片段
+			if v3Resp.Data != "" {
+				chunk, err := base64.StdEncoding.DecodeString(v3Resp.Data)
+				if err != nil {
+					log.Printf("base64 decode fail: %v", err)
+					return nil, err
+				}
+				audioData = append(audioData, chunk...)
 			}
-			audioData = append(audioData, chunk...)
-		} else if v3Resp.Sentence != "" {
-			log.Printf("Received sentence info (sequence %d): %s", v3Resp.Sequence, v3Resp.Sentence)
 		}
 	}
 
@@ -179,5 +282,14 @@ func Synthesis(config *dto.ByteDanceTTSConfig, httpClient *HTTPClient, text stri
 		return nil, fmt.Errorf("no audio data received")
 	}
 
-	return &dto.SynthesisResult{AudioData: audioData, ReqID: reqID}, nil
+	// 若输出格式为 wav，需要在 pcm 数据前拼装完整的 wav header
+	if needWavHeader {
+		wavHeader := buildWavHeader(len(audioData), sampleRate)
+		wavData := make([]byte, 0, len(wavHeader)+len(audioData))
+		wavData = append(wavData, wavHeader...)
+		wavData = append(wavData, audioData...)
+		audioData = wavData
+	}
+
+	return &dto.SynthesisResult{AudioData: audioData, ReqID: reqID, Format: outputFormat}, nil
 }
