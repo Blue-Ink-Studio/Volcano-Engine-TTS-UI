@@ -19,6 +19,10 @@ func InitTTSConfig() error {
 	apiKey := os.Getenv("BYTEDANCE_TTS_API_KEY")
 	resourceId := os.Getenv("BYTEDANCE_TTS_RESOURCE_ID")
 	speaker := os.Getenv("BYTEDANCE_TTS_SPEAKER")
+	model := os.Getenv("BYTEDANCE_TTS_MODEL")
+	if model == "" {
+		model = "seed-tts-2.0-standard" // 文档默认值 复刻音色可设为 seed-tts-2.0-expressive
+	}
 
 	missingVars := []string{}
 	if apiKey == "" {
@@ -50,6 +54,7 @@ func InitTTSConfig() error {
 		ApiKey:     apiKey,
 		ResourceId: resourceId,
 		Speaker:    speaker,
+		Model:      model,
 		URL:        url,
 		Timeout:    timeout,
 	}
@@ -72,6 +77,7 @@ func CheckEnvironmentVariables() map[string]interface{} {
 
 	optionalVars := map[string]bool{
 		"BYTEDANCE_TTS_TIMEOUT": os.Getenv("BYTEDANCE_TTS_TIMEOUT") != "",
+		"BYTEDANCE_TTS_MODEL":   os.Getenv("BYTEDANCE_TTS_MODEL") != "",
 		"OPENAI_TTS_API_KEY":    os.Getenv("OPENAI_TTS_API_KEY") != "",
 		"PORT":                  os.Getenv("PORT") != "",
 	}

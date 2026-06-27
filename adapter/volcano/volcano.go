@@ -49,13 +49,16 @@ func (h *HTTPClient) PostStream(url string, headers map[string]string, body []by
 	return h.client.Do(req)
 }
 
+// convertSpeedToSpeechRate 把 OpenAI 风格的 speed（倍率）转成火山 v3 的 speech_rate（百分比）。
+// 文档规定 speech_rate 范围 [-50, 100]，对应 0.5x ~ 2.0x 倍速。
+// 输入超出范围会被截断到边界值。
 func convertSpeedToSpeechRate(speed float64) int {
 	rate := int((speed - 1.0) * 100)
-	if rate < -200 {
-		rate = -200
+	if rate < -50 {
+		rate = -50
 	}
-	if rate > 500 {
-		rate = 500
+	if rate > 100 {
+		rate = 100
 	}
 	return rate
 }
@@ -69,14 +72,23 @@ func Synthesis(config *dto.ByteDanceTTSConfig, httpClient *HTTPClient, text stri
 		speaker = voice
 	}
 
+	model := config.Model
+	if model == "" {
+		model = "seed-tts-2.0-standard" // 文档默认值 复刻音色可设为 seed-tts-2.0-expressive
+	}
+
+	// 请求体结构严格按火山 v3 单向流式 API 文档构造
+	// https://www.volcengine.com/docs/6561/2528925
+	// v3 鉴权只依赖 X-Api-Key 一个 header,不再需要业务集群参数
 	params := map[string]interface{}{
 		"user": map[string]interface{}{
-			"uid": "uid",
+			"uid": reqID, // 文档要求随机字符串,这里复用请求级 UUID
 		},
 		"namespace": "UnidirectionalTTS",
 		"req_params": map[string]interface{}{
 			"text":    text,
 			"speaker": speaker,
+			"model":   model, // 复刻音色必填
 			"audio_params": map[string]interface{}{
 				"format":      "wav",
 				"sample_rate": 24000,
@@ -88,9 +100,9 @@ func Synthesis(config *dto.ByteDanceTTSConfig, httpClient *HTTPClient, text stri
 	headers := map[string]string{
 		"Content-Type":      "application/json",
 		"Connection":        "keep-alive",
-		"X-Api-Resource-Id": config.ResourceId,
+		"X-Api-Resource-Id": config.ResourceId, // 模型路由（seed-tts-2.0 / seed-icl-2.0）
 		"X-Api-Request-Id":  reqID,
-		"X-Api-Key":         config.ApiKey,
+		"X-Api-Key":         config.ApiKey, // v3 鉴权 key
 	}
 
 	bodyStr, err := json.Marshal(params)

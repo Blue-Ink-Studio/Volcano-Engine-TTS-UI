@@ -30,6 +30,7 @@ type ByteDanceTTSConfig struct {
 	ApiKey     string
 	ResourceId string
 	Speaker    string
+	Model      string // v3 声音复刻/语音大模型 子模型版本，复刻音色必填
 	URL        string
 	Timeout    time.Duration
 }

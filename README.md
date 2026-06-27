@@ -65,6 +65,7 @@ tts_server.exe
 | `BYTEDANCE_TTS_API_KEY` | 火山引擎新版控制台 API Key | `your_api_key_here` |
 | `BYTEDANCE_TTS_RESOURCE_ID` | 资源ID，决定模型版本 | `seed-tts-1.0` |
 | `BYTEDANCE_TTS_SPEAKER` | 发音人（音色）ID | `zh_female_qingxin` |
+| `BYTEDANCE_TTS_MODEL` | 模型子版本（复刻音色必填，不设默认 `seed-tts-2.0-standard`） | `seed-tts-2.0-standard` |
 
 ### 可选参数
 
@@ -89,6 +90,18 @@ tts_server.exe
 > ⚠️ 上表为通用模型名。火山控制台实际显示的资源 ID 字符串格式通常是 `volc.megatts.default`、`volc.megatts.icl` 等（带版本号会形如 `volc.megatts.icl.2_0`），**以控制台资源管理页面显示的字符串为准**。资源 ID 与音色必须**同时在控制台开通**才能组合使用，否则 API 会返回 `code=55000000, message=resource ID is mismatched with speaker related resource`。
 
 **注意：** 1.0音色只能搭配 `seed-tts-1.0` Resource ID，2.0音色只能搭配 `seed-tts-2.0` Resource ID。
+
+### v3 API 调用说明
+
+本项目按火山 v3 单向流式 TTS API 实现（[官方文档](https://www.volcengine.com/docs/6561/2528925)），相比 v1/v2 有以下关键差异：
+
+- **不再使用业务集群**（`cluster` 字段在 v3 已废弃），改用 `X-Api-Resource-Id` HTTP header 路由模型
+- **鉴权 header 只有** `X-Api-Key` 一个，无 `Authorization`，无 app 对象
+- **`req_params.model` 字段**：v3 必须显式传子模型版本。可选值：
+  - `seed-tts-2.0-standard`（默认，标准版，常规音色/复刻音色通用）
+  - `seed-tts-2.0-expressive`（表现力增强版，部分复刻音色推荐）
+  - 留空时会用 `seed-tts-2.0-standard` 作为兜底
+- **复刻音色（`S_` 开头的 speaker）必须显式传 model**，否则可能因默认模型与复刻音色不匹配返回 `55000000`
 
 ## CORS 跨域配置
 
@@ -232,6 +245,7 @@ OPENAI_TTS_API_KEY=sk-key1,sk-key2,sk-key3
 2. 用控制台的在线体验/调试试一下同一对 `BYTEDANCE_TTS_RESOURCE_ID` + 音色
 3. 控制台能合成的组合才是正确的
 4. 把控制台显示的**实际资源 ID 字符串**（通常是 `volc.megatts.*` 格式）填到 Zeabur 的 `BYTEDANCE_TTS_RESOURCE_ID`
+5. 如果你用的是**声音复刻**音色（speaker 以 `S_` 开头），同时确认设置了 `BYTEDANCE_TTS_MODEL`（推荐 `seed-tts-2.0-standard` 或 `seed-tts-2.0-expressive`）。复刻音色不传 `model` 字段是 55000000 的常见原因之一
 
 ### 5. PowerShell 下 `curl` 命令被解释错
 
@@ -334,3 +348,4 @@ sudo systemctl start tts-server
 5. ALLOWED_ORIGINS 是否包含前端完整 origin（含 https://）
 6. 客户端请求 URL 是否以 https:// 开头
 7. 生产环境凭据是否定期轮换（API Key 明文出现在日志/对话中时立刻重置）
+8. 复刻音色（speaker 以 `S_` 开头）是否设置了 `BYTEDANCE_TTS_MODEL`（默认 `seed-tts-2.0-standard`）
