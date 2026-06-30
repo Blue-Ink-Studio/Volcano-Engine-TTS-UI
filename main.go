@@ -23,17 +23,15 @@ func main() {
 	// 所有环境变量读取在 setting 包内集中完成,业务模块只读全局 Config。
 	setting.InitAllConfigs()
 
-	// 兼容旧调用顺序:rate limiter / 静态文件 / stats / controller 的初始化保持独立。
+	// 兼容旧调用顺序：rate limiter / 静态文件 / stats / controller 的初始化保持独立。
 	middleware.InitRateLimiter()
 	setting.CheckStaticFiles()
 	service.InitStats()
 	controller.InitController()
 
 	// 启动期一次性打印所有 Config 状态,便于运维核对。
+	// （必填项缺失的明确警告由 LogStartupSummary 自身负责,避免重复打印。）
 	setting.LogStartupSummary()
-	if setting.TTSConfigErr != nil {
-		log.Printf("警告: 服务将继续运行,但 TTS 功能不可用,请检查环境变量配置")
-	}
 
 	controller.SetStartTime(time.Now())
 

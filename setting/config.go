@@ -140,7 +140,7 @@ func InitTTSConfig() error {
 		if parsedTimeout, err := time.ParseDuration(timeoutStr); err == nil {
 			timeout = parsedTimeout
 		} else {
-			log.Printf("无效的超时设置 '%s'，使用默认值: %v", timeoutStr, timeout)
+			log.Printf("无效的超时设置 '%s',使用默认值: %v", timeoutStr, timeout)
 		}
 	}
 
@@ -154,12 +154,12 @@ func InitTTSConfig() error {
 	sampleRate := 24000
 	if srStr := os.Getenv("BYTEDANCE_TTS_SAMPLE_RATE"); srStr != "" {
 		if sr, err := fmt.Sscanf(srStr, "%d", &sampleRate); err != nil || sr != 1 {
-			log.Printf("无效的采样率设置 '%s'，使用默认值: 24000", srStr)
+			log.Printf("无效的采样率设置 '%s',使用默认值: 24000", srStr)
 			sampleRate = 24000
 		}
 		validRates := map[int]bool{8000: true, 16000: true, 22050: true, 24000: true, 32000: true, 44100: true, 48000: true}
 		if !validRates[sampleRate] {
-			log.Printf("不支持的采样率 %d，使用默认值: 24000", sampleRate)
+			log.Printf("不支持的采样率 %d,使用默认值: 24000", sampleRate)
 			sampleRate = 24000
 		}
 	}
@@ -179,14 +179,17 @@ func InitTTSConfig() error {
 
 // LogStartupSummary 在启动期打印所有 Config 的最终状态。
 // 调用时机:InitAllConfigs 之后,ListenAndServe 之前。
+// 必填项逐项输出,失败分支明确告知"v1/audio/speech 路由将 500"。
 func LogStartupSummary() {
 	log.Printf("=== 环境配置汇总 ===")
 	log.Printf("服务端口: %s", Server.Port)
+
 	if len(Auth.APIKeys) == 0 {
 		log.Printf("OPENAI_TTS_API_KEY: 未设置(所有请求无需鉴权)")
 	} else {
 		log.Printf("OPENAI_TTS_API_KEY: 已设置 %d 个有效密钥", len(Auth.APIKeys))
 	}
+
 	if CORS.AllowAll {
 		log.Printf("ALLOWED_ORIGINS: *(允许所有跨域,不可与凭据共用)")
 	} else if len(CORS.Origins) == 0 {
@@ -194,12 +197,52 @@ func LogStartupSummary() {
 	} else {
 		log.Printf("ALLOWED_ORIGINS: 已配置 %d 个允许的跨域来源白名单", len(CORS.Origins))
 	}
-	if TTSConfigErr != nil {
-		log.Printf("火山 TTS 配置: 初始化失败 - %v (TTS 功能不可用)", TTSConfigErr)
-	} else {
-		log.Printf("火山 TTS 配置: 初始化成功 (model=%s, format=%s, sample_rate=%d, timeout=%v)",
-			TTSConfig.Model, TTSConfig.Format, TTSConfig.SampleRate, TTSConfig.Timeout)
+
+	// 火山 TTS 必填项逐项状态:缺则 ❌,有则 ✓(API Key 脱敏,仅显示头尾各 4 字符)
+	log.Printf("火山 TTS 必填项状态:")
+	type ttsCheck struct {
+		name  string
+		value string
+		ok    bool
 	}
+	checks := []ttsCheck{
+		{"BYTEDANCE_TTS_API_KEY", maskAPIKey(TTSConfig.ApiKey), TTSConfig.ApiKey != ""},
+		{"BYTEDANCE_TTS_RESOURCE_ID", TTSConfig.ResourceId, TTSConfig.ResourceId != ""},
+		{"BYTEDANCE_TTS_SPEAKER", TTSConfig.Speaker, TTSConfig.Speaker != ""},
+	}
+	missingCount := 0
+	for _, c := range checks {
+		mark := "✓"
+		if !c.ok {
+			mark = "❌"
+			missingCount++
+		}
+		val := c.value
+		if val == "" {
+			val = "(未设置)"
+		}
+		log.Printf("  %s %s: %s", mark, c.name, val)
+	}
+
+	if TTSConfigErr != nil {
+		log.Printf("火山 TTS 整体: 初始化失败,%d 个必填项缺失,/v1/audio/speech 路由将全部返回 500", missingCount)
+	} else {
+		log.Printf("火山 TTS 可选项: model=%s, format=%s, sample_rate=%d, timeout=%v",
+			TTSConfig.Model, TTSConfig.Format, TTSConfig.SampleRate, TTSConfig.Timeout)
+		log.Printf("火山 TTS 整体: 初始化成功")
+	}
+}
+
+// maskAPIKey 对 API Key 脱敏,显示头 4 / 尾 4 字符,中间 * 号代替。
+// 短于等于 8 字符整体掩为 ****,空串原样返回。
+func maskAPIKey(key string) string {
+	if key == "" {
+		return ""
+	}
+	if len(key) <= 8 {
+		return "****"
+	}
+	return key[:4] + "****" + key[len(key)-4:]
 }
 
 // CheckEnvironmentVariables 返回环境变量状态,供 /health 端点使用。
