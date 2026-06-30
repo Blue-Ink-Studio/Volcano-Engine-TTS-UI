@@ -4,12 +4,10 @@ import (
 	"context"
 	"log"
 	"net/http"
-	"os"
 	"os/signal"
 	"syscall"
 	"time"
 
-	"github.com/volcano-tts/tts-api/common"
 	"github.com/volcano-tts/tts-api/controller"
 	"github.com/volcano-tts/tts-api/middleware"
 	"github.com/volcano-tts/tts-api/router"
@@ -21,32 +19,27 @@ func main() {
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
 	log.SetPrefix("[TTS-Server] ")
 
-	middleware.InitAPIKeys()
-	middleware.InitCORSConfig()
+	// 所有环境变量读取在 setting 包内集中完成,业务模块只读全局 Config。
+	setting.InitAllConfigs()
+
+	// 兼容旧调用顺序:rate limiter / 静态文件 / stats / controller 的初始化保持独立。
 	middleware.InitRateLimiter()
 	setting.CheckStaticFiles()
 	service.InitStats()
 	controller.InitController()
 
-	setting.TTSConfigErr = setting.InitTTSConfig()
+	// 启动期一次性打印所有 Config 状态,便于运维核对。
+	setting.LogStartupSummary()
 	if setting.TTSConfigErr != nil {
-		log.Printf("警告：配置初始化失败: %v", setting.TTSConfigErr)
-		log.Printf("服务将继续运行，但TTS功能不可用，请检查环境变量配置\n")
-	} else {
-		log.Printf("配置初始化成功\n")
+		log.Printf("警告: 服务将继续运行,但 TTS 功能不可用,请检查环境变量配置")
 	}
 
 	controller.SetStartTime(time.Now())
 
 	r := router.Setup()
 
-	port := os.Getenv("PORT")
-	if port == "" {
-		port = common.DefaultPort
-	}
-
 	server := &http.Server{
-		Addr:         ":" + port,
+		Addr:         ":" + setting.Server.Port,
 		Handler:      middleware.CORS(r),
 		ReadTimeout:  30 * time.Second,
 		WriteTimeout: 120 * time.Second,
@@ -58,9 +51,9 @@ func main() {
 
 	go func() {
 		log.Printf("Starting ByteDance TTS to OpenAI API Adapter Server")
-		log.Printf("Listening on port: %s", port)
-		log.Printf("OpenAI TTS endpoint: http://localhost:%s/v1/audio/speech", port)
-		log.Printf("Health check: http://localhost:%s/health", port)
+		log.Printf("Listening on port: %s", setting.Server.Port)
+		log.Printf("OpenAI TTS endpoint: http://localhost:%s/v1/audio/speech", setting.Server.Port)
+		log.Printf("Health check: http://localhost:%s/health", setting.Server.Port)
 		log.Printf("Using ByteDance v3 API")
 
 		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {

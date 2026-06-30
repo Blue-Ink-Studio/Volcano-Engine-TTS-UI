@@ -3,30 +3,21 @@ package middleware
 import (
 	"crypto/subtle"
 	"encoding/json"
-	"log"
 	"net/http"
-	"os"
 	"strings"
+
+	"github.com/volcano-tts/tts-api/setting"
 )
 
-var validAPIKeys []string
-
+// InitAPIKeys 已在 setting.InitAuthConfig 中完成,这里保留为 no-op 以维持现有调用顺序。
+// 实际鉴权逻辑直接读 setting.Auth.APIKeys。
 func InitAPIKeys() {
-	apiKey := os.Getenv("OPENAI_TTS_API_KEY")
-	if apiKey != "" {
-		validAPIKeys = strings.Split(apiKey, ",")
-		for i, k := range validAPIKeys {
-			validAPIKeys[i] = strings.TrimSpace(k)
-		}
-		log.Printf("已配置 %d 个有效的 API 密钥", len(validAPIKeys))
-	} else {
-		log.Println("警告: OPENAI_TTS_API_KEY环境变量未设置，所有请求将无需认证即可访问")
-		log.Println("如需启用API密钥验证，请设置 OPENAI_TTS_API_KEY 环境变量（多个密钥用逗号分隔）")
-	}
+	// 配置由 setting 包统一加载,日志也由 setting.LogStartupSummary 输出。
+	_ = setting.Auth
 }
 
 func ValidateAPIKey(r *http.Request) bool {
-	if len(validAPIKeys) == 0 {
+	if len(setting.Auth.APIKeys) == 0 {
 		return true
 	}
 
@@ -40,7 +31,7 @@ func ValidateAPIKey(r *http.Request) bool {
 	}
 
 	token := strings.TrimPrefix(authHeader, "Bearer ")
-	for _, validKey := range validAPIKeys {
+	for _, validKey := range setting.Auth.APIKeys {
 		if subtle.ConstantTimeCompare([]byte(token), []byte(validKey)) == 1 {
 			return true
 		}
