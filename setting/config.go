@@ -115,7 +115,7 @@ func InitTTSConfig() error {
 	speaker := os.Getenv("BYTEDANCE_TTS_SPEAKER")
 	model := os.Getenv("BYTEDANCE_TTS_MODEL")
 	if model == "" {
-		model = "seed-tts-2.0-standard" // 文档默认值 复刻音色可设为 seed-tts-2.0-expressive
+		model = "seed-icl-2.0" // 默认走音色复刻路由,匹配 X-Api-Resource-Id=seed-icl-2.0
 	}
 
 	missingVars := []string{}
@@ -263,7 +263,7 @@ func CheckEnvironmentVariables() map[string]interface{} {
 
 	optionalVars := map[string]bool{
 
-		"BYTEDANCE_TTS_MODEL":       TTSConfig.Model != "" && TTSConfig.Model != "seed-tts-2.0-standard",
+		"BYTEDANCE_TTS_MODEL":       TTSConfig.Model != "" && TTSConfig.Model != "seed-icl-2.0",
 		"BYTEDANCE_TTS_FORMAT":      TTSConfig.Format != "" && TTSConfig.Format != "mp3",
 		"BYTEDANCE_TTS_SAMPLE_RATE": TTSConfig.SampleRate != 24000,
 		"OPENAI_TTS_API_KEY":        len(Auth.APIKeys) > 0,

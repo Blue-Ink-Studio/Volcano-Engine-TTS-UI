@@ -179,7 +179,7 @@ func Synthesis(config *dto.ByteDanceTTSConfig, httpClient *HTTPClient, text stri
 
 	model := config.Model
 	if model == "" {
-		model = "seed-tts-2.0-standard" // 文档默认值,复刻音色可设为 seed-tts-2.0-expressive
+		model = "seed-icl-2.0" // 默认走音色复刻路由,匹配 X-Api-Resource-Id=seed-icl-2.0
 	}
 
 	// 决定实际输出格式:优先用请求中指定的格式,否则用配置中的格式,最后默认 mp3

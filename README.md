@@ -65,7 +65,7 @@ tts-api.exe
 
 | 变量名 | 说明 | 默认值 |
 |--------|------|--------|
-| `BYTEDANCE_TTS_MODEL` | 模型子版本（复刻音色必填） | `seed-tts-2.0-standard` |
+| `BYTEDANCE_TTS_MODEL` | `req_params.model` 子模型版本，默认 `seed-icl-2.0` 与 `BYTEDANCE_TTS_RESOURCE_ID` 音色复刻路由对齐 | `seed-icl-2.0` |
 | `BYTEDANCE_TTS_TIMEOUT` | 请求超时时间 | `30s` |
 | `BYTEDANCE_TTS_FORMAT` | 音频格式：`mp3` / `ogg_opus` / `pcm` / `wav` | `mp3` |
 | `BYTEDANCE_TTS_SAMPLE_RATE` | 采样率：8000/16000/22050/24000/32000/44100/48000 | `24000` |
@@ -110,10 +110,11 @@ tts-api.exe
 - **鉴权 header 只有** `X-Api-Key` 一个，无 `Authorization`，无 app 对象
 - **用量返回**：携带 `X-Control-Require-Usage-Tokens-Return: *` header，合成结束时响应中包含 `usage` 字段
 - **`req_params.model` 字段**：v3 必须显式传子模型版本。可选值：
-  - `seed-tts-2.0-standard`（默认，标准版，常规音色/复刻音色通用）
-  - `seed-tts-2.0-expressive`（表现力增强版，部分复刻音色推荐）
-  - 留空时会用 `seed-tts-2.0-standard` 作为兜底
-- **复刻音色（`S_` 开头的 speaker）必须显式传 model**，否则可能因默认模型与复刻音色不匹配返回 `55000000`
+  - `seed-icl-2.0`（默认，与 `X-Api-Resource-Id: seed-icl-2.0` 配套，专用于音色复刻路由，常规音色/复刻音色通用）
+  - `seed-tts-2.0-standard`（标准合成版，仅在把 `BYTEDANCE_TTS_RESOURCE_ID` 切到 `seed-tts-2.0` 时使用）
+  - `seed-tts-2.0-expressive`（表现力增强版，配合 `seed-tts-2.0` 资源使用）
+  - 留空时使用 `seed-icl-2.0` 作为兜底（与默认复刻路由对齐）
+- **复刻音色（`S_` 开头的 speaker）默认走 `seed-icl-2.0` 即可**，若用其他资源 ID 需同步调整该字段，否则会返回 `55000000`
 - **响应 event 字段**：`TTSSentenceStart`/`TTSSentenceEnd` 标记句子边界，音频数据在默认 event 中返回
 
 ## CORS 跨域配置
@@ -267,7 +268,7 @@ OPENAI_TTS_API_KEY=sk-key1,sk-key2,sk-key3
 2. 用控制台的在线体验/调试试一下同一对 `BYTEDANCE_TTS_RESOURCE_ID` + 音色
 3. 控制台能合成的组合才是正确的
 4. 把控制台显示的**实际资源 ID 字符串**（通常是 `volc.megatts.*` 格式）填到 `BYTEDANCE_TTS_RESOURCE_ID`
-5. 如果你用的是**声音复刻**音色（speaker 以 `S_` 开头），同时确认设置了 `BYTEDANCE_TTS_MODEL`（推荐 `seed-tts-2.0-standard` 或 `seed-tts-2.0-expressive`）。复刻音色不传 `model` 字段是 55000000 的常见原因之一
+5. 如果你用的是**声音复刻**音色（speaker 以 `S_` 开头），确认 `BYTEDANCE_TTS_RESOURCE_ID` 与 `BYTEDANCE_TTS_MODEL` 同属一个资源族（默认两者都用 `seed-icl-2.0`）。**复刻音色把 `model` 误填成 `seed-tts-2.0-standard` 是 55000000 的最常见原因**——`standard` 是 TTS 合成子模型，不属于复刻资源族
 
 ### 5. PowerShell 下 `curl` 命令被解释错
 
@@ -380,5 +381,5 @@ docker compose up -d
 5. ALLOWED_ORIGINS 是否包含前端完整 origin（含 https://）
 6. 客户端请求 URL 是否以 https:// 开头
 7. 生产环境凭据是否定期轮换（API Key 明文出现在日志/对话中时立刻重置）
-8. 复刻音色（speaker 以 `S_` 开头）是否设置了 `BYTEDANCE_TTS_MODEL`（默认 `seed-tts-2.0-standard`）
+8. 复刻音色（speaker 以 `S_` 开头）`BYTEDANCE_TTS_MODEL` 应保持默认 `seed-icl-2.0`，与 `BYTEDANCE_TTS_RESOURCE_ID` 同族；不要误填 `seed-tts-2.0-standard`（那是合成子模型）
 9. 音频格式是否匹配客户端解码能力（默认 mp3 兼容性最好）
