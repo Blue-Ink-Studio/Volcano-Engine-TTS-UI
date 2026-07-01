@@ -113,11 +113,6 @@ func InitTTSConfig() error {
 	apiKey := os.Getenv("BYTEDANCE_TTS_API_KEY")
 	resourceId := os.Getenv("BYTEDANCE_TTS_RESOURCE_ID")
 	speaker := os.Getenv("BYTEDANCE_TTS_SPEAKER")
-	model := os.Getenv("BYTEDANCE_TTS_MODEL")
-	if model == "" {
-		model = "seed-icl-2.0" // 默认走音色复刻路由,匹配 X-Api-Resource-Id=seed-icl-2.0
-	}
-
 	missingVars := []string{}
 	if apiKey == "" {
 		missingVars = append(missingVars, "BYTEDANCE_TTS_API_KEY")
@@ -144,35 +139,12 @@ func InitTTSConfig() error {
 		}
 	}
 
-	// 音频格式,默认 mp3(文档默认值,流式场景中 wav 会多次返回 header,不推荐)
-	format := os.Getenv("BYTEDANCE_TTS_FORMAT")
-	if format == "" {
-		format = "mp3"
-	}
-
-	// 采样率,默认 24000
-	sampleRate := 24000
-	if srStr := os.Getenv("BYTEDANCE_TTS_SAMPLE_RATE"); srStr != "" {
-		if sr, err := fmt.Sscanf(srStr, "%d", &sampleRate); err != nil || sr != 1 {
-			log.Printf("无效的采样率设置 '%s',使用默认值: 24000", srStr)
-			sampleRate = 24000
-		}
-		validRates := map[int]bool{8000: true, 16000: true, 22050: true, 24000: true, 32000: true, 44100: true, 48000: true}
-		if !validRates[sampleRate] {
-			log.Printf("不支持的采样率 %d,使用默认值: 24000", sampleRate)
-			sampleRate = 24000
-		}
-	}
-
 	TTSConfig = dto.ByteDanceTTSConfig{
 		ApiKey:     apiKey,
 		ResourceId: resourceId,
 		Speaker:    speaker,
-		Model:      model,
 		URL:        url,
 		Timeout:    timeout,
-		Format:     format,
-		SampleRate: sampleRate,
 	}
 	return nil
 }
@@ -227,8 +199,6 @@ func LogStartupSummary() {
 	if TTSConfigErr != nil {
 		log.Printf("火山 TTS 整体: 初始化失败,%d 个必填项缺失,/v1/audio/speech 路由将全部返回 500", missingCount)
 	} else {
-		log.Printf("火山 TTS 可选项: model=%s, format=%s, sample_rate=%d, timeout=%v",
-			TTSConfig.Model, TTSConfig.Format, TTSConfig.SampleRate, TTSConfig.Timeout)
 		log.Printf("火山 TTS 整体: 初始化成功")
 	}
 }
@@ -263,9 +233,6 @@ func CheckEnvironmentVariables() map[string]interface{} {
 
 	optionalVars := map[string]bool{
 
-		"BYTEDANCE_TTS_MODEL":       TTSConfig.Model != "" && TTSConfig.Model != "seed-icl-2.0",
-		"BYTEDANCE_TTS_FORMAT":      TTSConfig.Format != "" && TTSConfig.Format != "mp3",
-		"BYTEDANCE_TTS_SAMPLE_RATE": TTSConfig.SampleRate != 24000,
 		"OPENAI_TTS_API_KEY":        len(Auth.APIKeys) > 0,
 		"ALLOWED_ORIGINS":           CORS.AllowAll || len(CORS.Origins) > 0,
 		"PORT":                      Server.Port != common.DefaultPort,

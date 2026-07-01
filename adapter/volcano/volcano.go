@@ -5,7 +5,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
-	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -19,9 +18,7 @@ import (
 
 // 火山引擎 TTS v3 HTTP 单向流式 API 客户端。
 // 官方文档:https://www.volcengine.com/docs/6561/1598757
-// 官方 Go 示例:请求体仅含 req_params;本实现按 commit 4aed966 经验额外带上
-// user.uid 和 namespace="UnidirectionalTTS"(早期用其它 namespace 出现过兼容性
-// 问题,显式指定最稳)。复刻音色场景额外带 req_params.model。
+// 官方 Go 示例:请求体仅含 req_params;严格按单文件参考实现的请求结构。
 
 type HTTPClient struct {
 	client *http.Client
@@ -71,7 +68,6 @@ type ttsUser struct {
 type ttsReqParams struct {
 	Text        string         `json:"text"`
 	Speaker     string         `json:"speaker"`
-	Model       string         `json:"model"`
 	AudioParams ttsAudioParams `json:"audio_params"`
 }
 
@@ -94,122 +90,20 @@ func convertSpeedToSpeechRate(speed float64) int {
 	}
 	return rate
 }
-
-// resolveAPIFormat 根据用户期望的输出格式决定实际请求火山 API 的格式。
-// 文档明确指出：流式场景下传入 wav 会多次返回 wav header，建议使用 pcm。
-// 因此当用户要 wav 输出时，用 pcm 请求 API，最后由本端拼装完整 wav header。
-func resolveAPIFormat(desiredFormat string) (apiFormat string, needWavHeader bool) {
-	switch desiredFormat {
-	case "wav":
-		return "pcm", true
-	case "mp3", "ogg_opus", "pcm":
-		return desiredFormat, false
-	default:
-		return "mp3", false
-	}
-}
-
-// buildWavHeader 构造标准 44 字节 WAV 文件头（16-bit PCM, mono）。
-func buildWavHeader(dataLen int, sampleRate int) []byte {
-	header := make([]byte, 44)
-	byteRate := sampleRate * 2 // 16bit * 1channel / 8 * sampleRate
-	blockAlign := 2            // 16bit / 8 * 1channel
-
-	copy(header[0:4], "RIFF")
-	binary.LittleEndian.PutUint32(header[4:8], uint32(36+dataLen))
-	copy(header[8:12], "WAVE")
-	copy(header[12:16], "fmt ")
-	binary.LittleEndian.PutUint32(header[16:20], 16) // SubChunk1Size
-	binary.LittleEndian.PutUint16(header[20:22], 1)  // PCM format
-	binary.LittleEndian.PutUint16(header[22:24], 1)  // NumChannels
-	binary.LittleEndian.PutUint32(header[24:28], uint32(sampleRate))
-	binary.LittleEndian.PutUint32(header[28:32], uint32(byteRate))
-	binary.LittleEndian.PutUint16(header[32:34], uint16(blockAlign))
-	binary.LittleEndian.PutUint16(header[34:36], 16) // BitsPerSample
-	copy(header[36:40], "data")
-	binary.LittleEndian.PutUint32(header[40:44], uint32(dataLen))
-
-	return header
-}
-
-// FormatContentType 返回音频格式对应的 HTTP Content-Type。
-func FormatContentType(format string) string {
-	switch format {
-	case "mp3":
-		return "audio/mpeg"
-	case "wav":
-		return "audio/wav"
-	case "ogg_opus":
-		return "audio/ogg"
-	case "pcm":
-		return "audio/pcm"
-	default:
-		return "application/octet-stream"
-	}
-}
-
-// MapOpenAIFormat 将 OpenAI TTS response_format 映射为火山 API 支持的格式。
-// OpenAI 支持: mp3, opus, aac, flac, wav, pcm
-// 火山支持: mp3, ogg_opus, pcm, wav(流式不推荐)
-func MapOpenAIFormat(openaiFormat string) string {
-	switch openaiFormat {
-	case "mp3":
-		return "mp3"
-	case "opus":
-		return "ogg_opus"
-	case "wav":
-		return "wav"
-	case "pcm":
-		return "pcm"
-	case "aac", "flac":
-		return "mp3" // 火山不支持 aac/flac，降级到 mp3
-	default:
-		return "mp3"
-	}
-}
-
-func Synthesis(config *dto.ByteDanceTTSConfig, httpClient *HTTPClient, text string, speed float64, voice string, requestFormat string) (*dto.SynthesisResult, error) {
+func Synthesis(config *dto.ByteDanceTTSConfig, httpClient *HTTPClient, text string, speed float64) (*dto.SynthesisResult, error) {
 	reqID := uuid.NewString()
 	speechRate := convertSpeedToSpeechRate(speed)
 
-	speaker := config.Speaker
-	if voice != "" {
-		speaker = voice
-	}
-
-	model := config.Model
-	if model == "" {
-		model = "seed-icl-2.0" // 默认走音色复刻路由,匹配 X-Api-Resource-Id=seed-icl-2.0
-	}
-
-	// 决定实际输出格式:优先用请求中指定的格式,否则用配置中的格式,最后默认 mp3
-	outputFormat := config.Format
-	if requestFormat != "" {
-		outputFormat = requestFormat
-	}
-	if outputFormat == "" {
-		outputFormat = "mp3"
-	}
-
-	// 根据输出格式确定 API 请求格式(wav → pcm + 本端封装 header)
-	apiFormat, needWavHeader := resolveAPIFormat(outputFormat)
-
-	sampleRate := config.SampleRate
-	if sampleRate == 0 {
-		sampleRate = 24000
-	}
-
 	// 构造请求体:严格按 v3 API 文档 JSON 结构
 	req := ttsRequest{
-		User:      ttsUser{UID: reqID},
-		Namespace: "UnidirectionalTTS",
+		User:      ttsUser{UID: "uid"},
+		Namespace: "BidirectionalTTS",
 		ReqParams: ttsReqParams{
 			Text:    text,
-			Speaker: speaker,
-			Model:   model,
+			Speaker: config.Speaker,
 			AudioParams: ttsAudioParams{
-				Format:     apiFormat,
-				SampleRate: sampleRate,
+				Format:     "wav",
+				SampleRate: 24000,
 				SpeechRate: speechRate,
 			},
 		},
@@ -220,17 +114,16 @@ func Synthesis(config *dto.ByteDanceTTSConfig, httpClient *HTTPClient, text stri
 		return nil, fmt.Errorf("marshal TTS request: %w", err)
 	}
 	// 诊断日志:记录实际发到上游的请求体(去 model/speaker/resource 关键字段)
-	log.Printf("TTS upstream request: X-Api-Resource-Id=%s speaker=%s model=%s namespace=UnidirectionalTTS body=%s",
-		config.ResourceId, speaker, model, string(body))
+	log.Printf("TTS upstream request: X-Api-Resource-Id=%s speaker=%s namespace=BidirectionalTTS body=%s",
+		config.ResourceId, config.Speaker, string(body))
 
 	// 鉴权 header 按 v3 新版控制台方式(Connection 由 Go http 默认 keep-alive)
 	headers := map[string]string{
-		"Content-Type": "application/json",
-		// 请求用量返回,合成结束时响应中携带 usage 字段
-		"X-Control-Require-Usage-Tokens-Return": "*",
-		"X-Api-Resource-Id":                     config.ResourceId, // 模型路由(seed-tts-2.0 / seed-icl-2.0)
-		"X-Api-Request-Id":                      reqID,
-		"X-Api-Key":                             config.ApiKey, // v3 鉴权 key
+		"Content-Type":      "application/json",
+		"Connection":        "keep-alive",
+		"X-Api-Resource-Id": config.ResourceId,
+		"X-Api-Request-Id":  reqID,
+		"X-Api-Key":         config.ApiKey,
 	}
 
 	resp, err := httpClient.PostStream(config.URL, headers, body, config.Timeout)
@@ -309,14 +202,5 @@ func Synthesis(config *dto.ByteDanceTTSConfig, httpClient *HTTPClient, text stri
 		return nil, fmt.Errorf("no audio data received from TTS service")
 	}
 
-	// 若输出格式为 wav,需要在 pcm 数据前拼装完整的 wav header
-	if needWavHeader {
-		wavHeader := buildWavHeader(len(audioData), sampleRate)
-		wavData := make([]byte, 0, len(wavHeader)+len(audioData))
-		wavData = append(wavData, wavHeader...)
-		wavData = append(wavData, audioData...)
-		audioData = wavData
-	}
-
-	return &dto.SynthesisResult{AudioData: audioData, ReqID: reqID, Format: outputFormat}, nil
+	return &dto.SynthesisResult{AudioData: audioData, ReqID: reqID, Format: "wav"}, nil
 }

@@ -65,10 +65,7 @@ tts-api.exe
 
 | 变量名 | 说明 | 默认值 |
 |--------|------|--------|
-| `BYTEDANCE_TTS_MODEL` | `req_params.model` 子模型版本，默认 `seed-icl-2.0` 与 `BYTEDANCE_TTS_RESOURCE_ID` 音色复刻路由对齐 | `seed-icl-2.0` |
 | `BYTEDANCE_TTS_TIMEOUT` | 请求超时时间 | `30s` |
-| `BYTEDANCE_TTS_FORMAT` | 音频格式：`mp3` / `ogg_opus` / `pcm` / `wav` | `mp3` |
-| `BYTEDANCE_TTS_SAMPLE_RATE` | 采样率：8000/16000/22050/24000/32000/44100/48000 | `24000` |
 | `OPENAI_TTS_API_KEY` | OpenAI兼容接口的API密钥（逗号分隔支持多个） | 无 |
 | `PORT` | 服务监听端口 | `8080` |
 | `ALLOWED_ORIGINS` | 允许跨域请求的来源（多个用英文逗号分隔；调试可设为 `*`） | 无（不设则拒绝所有跨域） |
@@ -90,16 +87,7 @@ tts-api.exe
 
 ### 音频格式说明
 
-本项目使用火山 v3 **HTTP Chunked 单向流式** API（[官方文档](https://www.volcengine.com/docs/6561/1598757)），支持以下音频格式：
-
-| 格式 | Content-Type | 说明 |
-|------|-------------|------|
-| `mp3` | `audio/mpeg` | 默认格式，API原生支持，推荐使用 |
-| `ogg_opus` | `audio/ogg` | OGG Opus格式，API原生支持 |
-| `pcm` | `audio/pcm` | 原始PCM数据，API原生支持 |
-| `wav` | `audio/wav` | 本端用PCM请求API后封装WAV header（流式场景下API的wav会多次返回header，所以内部用pcm再拼装） |
-
-> 流式场景下直接请求 wav 格式，API每个chunk都会返回一个完整的 wav header，导致拼接后的音频损坏。因此当用户选择 wav 输出时，适配器自动用 pcm 格式请求 API，最后在客户端拼装标准 44 字节 WAV 文件头。
+本项目按参考实现硬编码请求 `wav` / `24000Hz` 格式，HTTP 响应 `Content-Type` 固定为 `audio/wav`。
 
 ### v3 API 调用说明
 
@@ -108,14 +96,6 @@ tts-api.exe
 - **协议**：HTTP Chunked 流式，请求路径 `https://openspeech.bytedance.com/api/v3/tts/unidirectional`
 - **不再使用业务集群**（`cluster` 字段在 v3 已废弃），改用 `X-Api-Resource-Id` HTTP header 路由模型
 - **鉴权 header 只有** `X-Api-Key` 一个，无 `Authorization`，无 app 对象
-- **用量返回**：携带 `X-Control-Require-Usage-Tokens-Return: *` header，合成结束时响应中包含 `usage` 字段
-- **`req_params.model` 字段**：v3 必须显式传子模型版本。可选值：
-  - `seed-icl-2.0`（默认，与 `X-Api-Resource-Id: seed-icl-2.0` 配套，专用于音色复刻路由，常规音色/复刻音色通用）
-  - `seed-tts-2.0-standard`（标准合成版，仅在把 `BYTEDANCE_TTS_RESOURCE_ID` 切到 `seed-tts-2.0` 时使用）
-  - `seed-tts-2.0-expressive`（表现力增强版，配合 `seed-tts-2.0` 资源使用）
-  - 留空时使用 `seed-icl-2.0` 作为兜底（与默认复刻路由对齐）
-- **复刻音色（`S_` 开头的 speaker）默认走 `seed-icl-2.0` 即可**，若用其他资源 ID 需同步调整该字段，否则会返回 `55000000`
-- **响应 event 字段**：`TTSSentenceStart`/`TTSSentenceEnd` 标记句子边界，音频数据在默认 event 中返回
 
 ## CORS 跨域配置
 
@@ -268,7 +248,7 @@ OPENAI_TTS_API_KEY=sk-key1,sk-key2,sk-key3
 2. 用控制台的在线体验/调试试一下同一对 `BYTEDANCE_TTS_RESOURCE_ID` + 音色
 3. 控制台能合成的组合才是正确的
 4. 把控制台显示的**实际资源 ID 字符串**（通常是 `volc.megatts.*` 格式）填到 `BYTEDANCE_TTS_RESOURCE_ID`
-5. 如果你用的是**声音复刻**音色（speaker 以 `S_` 开头），确认 `BYTEDANCE_TTS_RESOURCE_ID` 与 `BYTEDANCE_TTS_MODEL` 同属一个资源族（默认两者都用 `seed-icl-2.0`）。**复刻音色把 `model` 误填成 `seed-tts-2.0-standard` 是 55000000 的最常见原因**——`standard` 是 TTS 合成子模型，不属于复刻资源族
+5. 如果你用的是**声音复刻**音色（speaker 以 `S_` 开头），确认 `BYTEDANCE_TTS_RESOURCE_ID` 已在火山控制台开通，并且和音色 ID 在同一个资源族下。55000000 通常是资源族不匹配
 
 ### 5. PowerShell 下 `curl` 命令被解释错
 
@@ -381,5 +361,5 @@ docker compose up -d
 5. ALLOWED_ORIGINS 是否包含前端完整 origin（含 https://）
 6. 客户端请求 URL 是否以 https:// 开头
 7. 生产环境凭据是否定期轮换（API Key 明文出现在日志/对话中时立刻重置）
-8. 复刻音色（speaker 以 `S_` 开头）`BYTEDANCE_TTS_MODEL` 应保持默认 `seed-icl-2.0`，与 `BYTEDANCE_TTS_RESOURCE_ID` 同族；不要误填 `seed-tts-2.0-standard`（那是合成子模型）
+8. 复刻音色（speaker 以 `S_` 开头）确保 `BYTEDANCE_TTS_RESOURCE_ID` 在控制台和音色 ID 同族（参考 `seed-icl-2.0` 等表）
 9. 音频格式是否匹配客户端解码能力（默认 mp3 兼容性最好）
