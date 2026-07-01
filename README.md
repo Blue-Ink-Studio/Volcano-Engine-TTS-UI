@@ -285,21 +285,6 @@ curl.exe -v -X POST "http://localhost:8080/v1/audio/speech" -H "Content-Type: ap
 
 ### 7. 查看日志
 
-
-****启动期环境配置汇总**（每次启动打印一次，便于核对环境变量是否生效）：
-
-```
-[TTS-Server] main.go:31: === 环境配置汇总 ===
-[TTS-Server] main.go:32: 服务端口: 8080
-[TTS-Server] main.go:35: OPENAI_TTS_API_KEY: 已设置 1 个有效密钥
-[TTS-Server] main.go:41: ALLOWED_ORIGINS: 已配置 1 个允许的跨域来源白名单
-[TTS-Server] main.go:46: 火山 TTS 配置: 初始化成功 (model=seed-tts-2.0-standard, format=mp3, sample_rate=24000, timeout=30s)
-```
-
-TTS 必填项缺失时会改为打印 `火山 TTS 配置: 初始化失败 - 缺少必需的环境变量: [BYTEDANCE_TTS_API_KEY] (TTS 功能不可用)`,服务继续运行但 `/v1/audio/speech` 路由会返回 500。
-
-所有环境变量由 `setting` 包集中读取(其它包不允许直接 `os.Getenv`),`/health` 端点的 `ConfigStatus` 字段直接读全局 Config 状态,不存在重复读取。
-
 服务启动后输出到 stdout/stderr。常见日志关键字：
 
 **中间件层拒绝**（有专门日志）：

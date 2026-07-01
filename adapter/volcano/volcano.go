@@ -219,6 +219,9 @@ func Synthesis(config *dto.ByteDanceTTSConfig, httpClient *HTTPClient, text stri
 	if err != nil {
 		return nil, fmt.Errorf("marshal TTS request: %w", err)
 	}
+	// 诊断日志:记录实际发到上游的请求体(去 model/speaker/resource 关键字段)
+	log.Printf("TTS upstream request: X-Api-Resource-Id=%s speaker=%s model=%s namespace=UnidirectionalTTS body=%s",
+		config.ResourceId, speaker, model, string(body))
 
 	// 鉴权 header 按 v3 新版控制台方式(Connection 由 Go http 默认 keep-alive)
 	headers := map[string]string{
