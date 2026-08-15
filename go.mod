@@ -1,4 +1,4 @@
-﻿module github.com/volcano-tts/tts-api
+module github.com/volcano-tts/tts-api
 
 go 1.26
 

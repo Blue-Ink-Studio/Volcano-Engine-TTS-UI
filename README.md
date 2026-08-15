@@ -1,4 +1,4 @@
-﻿﻿# 字节跳动火山引擎TTS v3 API 转 OpenAI 兼容接口
+# 字节跳动火山引擎TTS v3 API 转 OpenAI 兼容接口
 
 ## 项目简介
 
