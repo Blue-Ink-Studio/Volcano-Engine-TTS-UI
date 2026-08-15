@@ -1,4 +1,4 @@
-﻿package middleware
+package middleware
 
 // 本文件提供带 metrics 埋点的限流 / 并发中间件版本;
 // 由于原 ratelimit_middleware.go 在本仓库的云盘同步下被永久占用,

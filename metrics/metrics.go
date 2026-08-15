@@ -1,4 +1,4 @@
-﻿// Package metrics 集中声明本服务所有埋点指标,并提供 telemetry.Meter 的全局访问入口。
+// Package metrics 集中声明本服务所有埋点指标,并提供 telemetry.Meter 的全局访问入口。
 //
 // 设计:
 //   - 启动期 Init() 一次性注册所有指标;Panic 表示有重名 bug,应立即暴露。

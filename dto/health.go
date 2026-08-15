@@ -1,4 +1,4 @@
-﻿package dto
+package dto
 
 // HealthResponse 是 /health 端点的 JSON 响应。
 // 数值类信息(请求统计、错误)迁移到 /metrics 端点,
