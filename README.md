@@ -20,7 +20,7 @@
 
 ### 前置要求
 
-- Go 1.19 或更高版本
+- Go 1.26 或更高版本
 - 火山引擎账号并开通TTS服务
 
 ### 1. 编译程序
@@ -66,6 +66,14 @@ tts-api.exe
 | 变量名 | 说明 | 默认值 |
 |--------|------|--------|
 | `BYTEDANCE_TTS_TIMEOUT` | 请求超时时间 | `30s` |
+| `BYTEDANCE_TTS_FORMAT` | 上游实际请求的音频格式（mp3 / pcm / ogg_opus）；客户端要求 wav 时内部自动转 pcm + 本地拼 WAV 头 | `mp3` |
+| `BYTEDANCE_TTS_SAMPLE_RATE` | 上游采样率（8000 / 16000 / 22050 / 24000 / 32000 / 44100 / 48000） | `24000` |
+| `BYTEDANCE_TTS_BIT_RATE` | MP3 比特率，仅 mp3 格式生效 | 无 |
+| `BYTEDANCE_TTS_MODEL` | 复刻 2.0 子模型（如 `seed-tts-2.0-standard`、`seed-tts-2.0-expressive`） | 控制台默认 |
+| `BYTEDANCE_TTS_MODEL_TYPE` | 复刻 2.0 模型类型（4=ICL V2, 5=ICL V3） | 无 |
+| `BYTEDANCE_TTS_EXPLICIT_LANGUAGE` | 非中文/英文合成时指定语种（zh-cn / en / ja / es-mx / id / pt-br / ko） | 无 |
+| `BYTEDANCE_TTS_ENABLE_SUBTITLE` | 复刻 2.0 启用字级时间戳 | `false` |
+| `BYTEDANCE_TTS_DEBUG` | 设为 `true` 启用调试日志（sentence 事件、上游请求详情、CORS 拦截等） | `false` |
 | `OPENAI_TTS_API_KEY` | OpenAI兼容接口的API密钥（逗号分隔支持多个） | 无 |
 | `PORT` | 服务监听端口 | `8080` |
 | `ALLOWED_ORIGINS` | 允许跨域请求的来源（多个用英文逗号分隔；调试可设为 `*`） | 无（不设则拒绝所有跨域） |
@@ -87,7 +95,7 @@ tts-api.exe
 
 ### 音频格式说明
 
-本项目按参考实现硬编码请求 `wav` / `24000Hz` 格式，HTTP 响应 `Content-Type` 固定为 `audio/wav`。
+上游请求格式由 `BYTEDANCE_TTS_FORMAT` 控制（默认 `mp3`），采样率由 `BYTEDANCE_TTS_SAMPLE_RATE` 控制（默认 `24000`）。客户端要求 `wav` 时，内部自动请求 `pcm` 格式并本地拼装 WAV 文件头。HTTP 响应 `Content-Type` 根据最终输出格式动态设置（`audio/mpeg`、`audio/wav`、`audio/ogg` 等）。
 
 ### v3 API 调用说明
 
@@ -268,7 +276,7 @@ curl.exe -v -X POST "http://localhost:8080/v1/audio/speech" -H "Content-Type: ap
 
 服务启动后输出到 stdout/stderr。常见日志关键字：
 
-**中间件层拒绝**（有专门日志）：
+**中间件层拒绝**（速率/并发警告始终可见；CORS 拦截需 BYTEDANCE_TTS_DEBUG=true）：
 
 ```
 CORS拦截: 来源="https://..." 路径=/v1/audio/speech 方法=POST 客户端=...
@@ -292,12 +300,26 @@ CORS拦截: 来源="https://..." 路径=/v1/audio/speech 方法=POST 客户端=.
 警告: TTS 合成失败 - 路径=... 文本长度=50 耗时=114ms 错误=...
 ```
 
-**适配器层日志**：
+**适配器层日志**（默认静默，设置 `BYTEDANCE_TTS_DEBUG=true` 后可见）：
 
 ```
+TTS upstream: resource_id=... speaker=... model=... format=... sample_rate=... speech_rate=... additions=...
 Sentence start: sequence=0, sentence=...
 Sentence end: sequence=0
-TTS synthesis completed, usage: &{TextWords:5}
+TTS 合成结束, usage: text_words=5
+volcano: 忽略未识别事件 event=... sequence=...
+```
+
+**合成结果日志**（每个请求都有）：
+
+```
+TTS 合成成功 - 音色=... 格式=mp3 文本=50字 音频=12345字节 分片=3 耗时=1.2s
+```
+
+或失败时：
+
+```
+警告: TTS 合成失败 - 路径=/v1/audio/speech 客户端=... 文本长度=50 耗时=114ms 错误=...
 ```
 
 **请求结束通用日志**（每个请求都有，由 Logger 中间件输出）：
