@@ -1,4 +1,4 @@
-package middleware
+﻿package middleware
 
 import (
 	"log"
@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/volcano-tts/tts-api/common"
+	"github.com/volcano-tts/tts-api/metrics"
 )
 
 type RateLimiter struct {
@@ -55,6 +56,7 @@ func (rl *RateLimiter) Allow(key string) bool {
 
 	if len(valid) >= rl.limit {
 		rl.requests[key] = valid
+		metrics.RateLimitRejected.Inc(nil)
 		return false
 	}
 
@@ -90,7 +92,6 @@ func (rl *RateLimiter) cleanup() {
 	}
 }
 
-// 私有网络 CIDR 范围：仅在直连来源属于这些范围时才信任代理头
 var privateCIDRs []*net.IPNet
 
 func init() {
@@ -125,9 +126,6 @@ func isPrivateIP(ipStr string) bool {
 	return false
 }
 
-// GetClientIP 提取客户端真实 IP。
-// 仅当直连来源为私有网络（本地代理、Docker 网桥等）时才信任 X-Forwarded-For / X-Real-IP，
-// 防止公网直连场景下攻击者伪造代理头绕过速率限制。
 func GetClientIP(r *http.Request) string {
 	directIP, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {

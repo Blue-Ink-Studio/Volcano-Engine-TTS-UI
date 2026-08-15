@@ -1,4 +1,4 @@
-# 字节跳动火山引擎TTS v3 API 转 OpenAI 兼容接口
+﻿﻿# 字节跳动火山引擎TTS v3 API 转 OpenAI 兼容接口
 
 ## 项目简介
 
@@ -306,6 +306,58 @@ TTS synthesis completed, usage: &{TextWords:5}
 POST /v1/audio/speech 1.2.3.4:56789 200 245ms
 POST /v1/audio/speech 1.2.3.4:56789 400 1ms
 ```
+
+
+## 观测 / Metrics
+
+服务内置 Prometheus 文本格式的 `/metrics` 端点,**不鉴权**(与 `/health` 一致),
+可直接被 Prometheus 抓取或浏览器查看。Go 进程内埋点,零外部依赖,实现位于 `telemetry/` 与 `metrics/` 包。
+
+### 主要指标
+
+| 指标名 | 类型 | 标签 | 说明 |
+|---|---|---|---|
+| `tts_request_total` | counter | status, format, speaker, model | /v1/audio/speech 请求数 |
+| `tts_request_duration_seconds` | histogram | status, format | 端到端延迟 |
+| `tts_upstream_total` | counter | status, format, model, speaker | 上游调用数 |
+| `tts_upstream_duration_seconds` | histogram | status, format | 上游调用耗时 |
+| `tts_upstream_first_byte_seconds` | histogram | format | TTFB |
+| `tts_upstream_chunks_total` | counter | format | 收到的音频 chunk 数 |
+| `tts_upstream_audio_bytes_total` | counter | format | 实际返回字节数 |
+| `tts_upstream_errors_total` | counter | code | 上游错误(code 聚合到 transport/client/server/upstream) |
+| `tts_usage_text_words_total` | counter | model | 上游计费字符数 |
+| `tts_concurrency_active` | gauge |  | 当前在飞请求数 |
+| `tts_concurrency_rejected_total` | counter |  | 并发上限拒绝数 |
+| `tts_ratelimit_rejected_total` | counter |  | 速率限制拒绝数 |
+| `tts_auth_failed_total` | counter |  | API Key 鉴权失败数 |
+
+### Prometheus 抓取示例
+
+```yaml
+scrape_configs:
+  - job_name: tts-api
+    static_configs:
+      - targets: ['localhost:8080']
+```
+
+### 仪表盘
+
+`/dashboard` 仍展示服务状态 + 内存 + 配置信息,并内嵌 `/metrics` 的预览;
+Grafana 等工具可直接基于上面指标做面板。
+
+## 架构
+
+| 包 | 职责 |
+|---|---|
+| `main.go` | 启动入口,信号处理 |
+| `telemetry/` | Counter / Gauge / Histogram + Prometheus 文本导出(零依赖) |
+| `metrics/` | TTS 业务指标注册,火山适配器埋点适配 |
+| `adapter/volcano/` | 火山 v3 HTTP Chunked 客户端(client/request/response/audio/errors/synthesis) |
+| `controller/` | /v1/audio/speech、/health 处理器 |
+| `middleware/` | SecurityHeaders、CORS、鉴权、限流、并发、日志、客户端 IP 提取 |
+| `setting/` | 单一环境变量入口 + 启动汇总 |
+| `common/`、`dto/` | 常量、请求/响应类型 |
+| `router/` | 路由注册 |
 
 ## 部署建议
 

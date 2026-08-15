@@ -1,4 +1,4 @@
-package main
+﻿package main
 
 import (
 	"context"
@@ -10,9 +10,9 @@ import (
 	"time"
 
 	"github.com/volcano-tts/tts-api/controller"
+	"github.com/volcano-tts/tts-api/metrics"
 	"github.com/volcano-tts/tts-api/middleware"
 	"github.com/volcano-tts/tts-api/router"
-	"github.com/volcano-tts/tts-api/service"
 	"github.com/volcano-tts/tts-api/setting"
 )
 
@@ -20,17 +20,11 @@ func main() {
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
 	log.SetPrefix("[TTS-Server] ")
 
-	// 所有环境变量读取在 setting 包内集中完成,业务模块只读全局 Config。
 	setting.InitAllConfigs()
-
-	// 兼容旧调用顺序：rate limiter / 静态文件 / stats / controller 的初始化保持独立。
+	metrics.Init()
 	middleware.InitRateLimiter()
 	setting.CheckStaticFiles()
-	service.InitStats()
 	controller.InitController()
-
-	// 启动期一次性打印所有 Config 状态,便于运维核对。
-	// （必填项缺失的明确警告由 LogStartupSummary 自身负责,避免重复打印。）
 	setting.LogStartupSummary()
 
 	controller.SetStartTime(time.Now())
@@ -53,6 +47,7 @@ func main() {
 		log.Printf("Listening on port: %s", setting.Server.Port)
 		log.Printf("OpenAI TTS endpoint: http://localhost:%s/v1/audio/speech", setting.Server.Port)
 		log.Printf("Health check: http://localhost:%s/health", setting.Server.Port)
+		log.Printf("Metrics: http://localhost:%s/metrics", setting.Server.Port)
 		log.Printf("Using ByteDance v3 API")
 
 		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {

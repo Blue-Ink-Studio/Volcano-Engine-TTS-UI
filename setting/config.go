@@ -1,22 +1,27 @@
-package setting
+﻿﻿package setting
 
 import (
 	"fmt"
 	"log"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
+	"github.com/volcano-tts/tts-api/adapter/volcano"
 	"github.com/volcano-tts/tts-api/common"
 	"github.com/volcano-tts/tts-api/dto"
 )
 
 // 全部环境变量读取的单一入口:其它包不允许直接 os.Getenv,只读这里的全局 Config。
 
-// TTSConfig 上游火山 TTS 配置(由 InitTTSConfig 填充)。
+// TTSOptions 是火山 v3 TTS 调用的完整参数集合,启动期由 InitTTSConfig 填充。
+// 业务侧(controller)直接读取并传入 volcano.Synthesis。
 var (
-	TTSConfig    dto.ByteDanceTTSConfig
+	TTSOptions   volcano.Options
 	TTSConfigErr error
+	// TTSTimeout 单次合成请求的超时;controller 用来派生 context。
+	TTSTimeout time.Duration = common.DefaultTimeout
 )
 
 // AuthConfig OpenAI 兼容接口的客户端 API Key 鉴权配置。
@@ -42,8 +47,6 @@ type ServerConfig struct {
 var Server ServerConfig
 
 // InitAllConfigs 集中初始化所有配置,启动期调用一次。
-// 返回 TTSConfigErr(火山 TTS 必填项缺失时为非 nil);其它 Config 缺失时不返回 error,
-// 各自有合理兜底(Auth 放行 / CORS 拒绝跨域 / Server 默认 8080)。
 func InitAllConfigs() {
 	InitServerConfig()
 	InitAuthConfig()
@@ -51,7 +54,6 @@ func InitAllConfigs() {
 	TTSConfigErr = InitTTSConfig()
 }
 
-// InitServerConfig 读取 PORT,缺省 common.DefaultPort。
 func InitServerConfig() {
 	Server.Port = os.Getenv("PORT")
 	if Server.Port == "" {
@@ -59,8 +61,6 @@ func InitServerConfig() {
 	}
 }
 
-// InitAuthConfig 读取 OPENAI_TTS_API_KEY,支持逗号分隔多个 key。
-// 留空时 Auth.APIKeys 为空,ValidateAPIKey 会放行所有请求。
 func InitAuthConfig() {
 	raw := os.Getenv("OPENAI_TTS_API_KEY")
 	if raw == "" {
@@ -78,8 +78,6 @@ func InitAuthConfig() {
 	Auth.APIKeys = keys
 }
 
-// InitCORSConfig 读取 ALLOWED_ORIGINS,按逗号分隔;支持 * 通配(AllowAll=true)。
-// 留空时 CORS.Origins 为空,跨域请求会被拒绝。
 func InitCORSConfig() {
 	raw := os.Getenv("ALLOWED_ORIGINS")
 	CORS.Origins = nil
@@ -100,58 +98,142 @@ func InitCORSConfig() {
 	}
 }
 
-// normalizeOrigin 复制自原 middleware/cors.go:小写 + 去尾斜杠。
 func normalizeOrigin(origin string) string {
 	origin = strings.TrimSpace(origin)
 	origin = strings.TrimRight(origin, "/")
 	return strings.ToLower(origin)
 }
 
-// InitTTSConfig 读取火山 TTS 必填和可选配置,填充 TTSConfig。
-// 必填项缺失时返回 error,服务可继续运行但 TTS 功能不可用。
+// InitTTSConfig 读取火山 TTS 必填和可选配置,填充 TTSOptions 与 TTSTimeout。
+// 必填项缺失时返回 error,/v1/audio/speech 路由会拒绝请求。
 func InitTTSConfig() error {
 	apiKey := os.Getenv("BYTEDANCE_TTS_API_KEY")
 	resourceId := os.Getenv("BYTEDANCE_TTS_RESOURCE_ID")
 	speaker := os.Getenv("BYTEDANCE_TTS_SPEAKER")
-	missingVars := []string{}
+	missing := []string{}
 	if apiKey == "" {
-		missingVars = append(missingVars, "BYTEDANCE_TTS_API_KEY")
+		missing = append(missing, "BYTEDANCE_TTS_API_KEY")
 	}
 	if resourceId == "" {
-		missingVars = append(missingVars, "BYTEDANCE_TTS_RESOURCE_ID")
+		missing = append(missing, "BYTEDANCE_TTS_RESOURCE_ID")
 	}
 	if speaker == "" {
-		missingVars = append(missingVars, "BYTEDANCE_TTS_SPEAKER")
+		missing = append(missing, "BYTEDANCE_TTS_SPEAKER")
+	}
+	if len(missing) > 0 {
+		return fmt.Errorf("缺少必需的环境变量: %v", missing)
 	}
 
-	if len(missingVars) > 0 {
-		return fmt.Errorf("缺少必需的环境变量: %v", missingVars)
-	}
+	model := os.Getenv("BYTEDANCE_TTS_MODEL")
+	format := getEnvDefault("BYTEDANCE_TTS_FORMAT", "mp3")
+	sampleRate := getEnvInt("BYTEDANCE_TTS_SAMPLE_RATE", 24000)
+	bitRate := getEnvInt("BYTEDANCE_TTS_BIT_RATE", 0)
+	modelType := getEnvInt("BYTEDANCE_TTS_MODEL_TYPE", 0)
+	explicitLanguage := os.Getenv("BYTEDANCE_TTS_EXPLICIT_LANGUAGE")
+	enableSubtitle := getEnvBool("BYTEDANCE_TTS_ENABLE_SUBTITLE", false)
 
-	url := "https://openspeech.bytedance.com/api/v3/tts/unidirectional"
-
-	timeout := common.DefaultTimeout
-	if timeoutStr := os.Getenv("BYTEDANCE_TTS_TIMEOUT"); timeoutStr != "" {
-		if parsedTimeout, err := time.ParseDuration(timeoutStr); err == nil {
-			timeout = parsedTimeout
-		} else {
-			log.Printf("无效的超时设置 '%s',使用默认值: %v", timeoutStr, timeout)
+	var adds *volcano.Additions
+	if modelType != 0 || explicitLanguage != "" {
+		adds = &volcano.Additions{}
+		if modelType != 0 {
+			v := modelType
+			adds.ModelType = &v
+		}
+		if explicitLanguage != "" {
+			adds.ExplicitLanguage = explicitLanguage
 		}
 	}
 
-	TTSConfig = dto.ByteDanceTTSConfig{
-		ApiKey:     apiKey,
-		ResourceId: resourceId,
-		Speaker:    speaker,
-		URL:        url,
-		Timeout:    timeout,
+	TTSTimeout = common.DefaultTimeout
+	if ts := os.Getenv("BYTEDANCE_TTS_TIMEOUT"); ts != "" {
+		if d, err := time.ParseDuration(ts); err == nil {
+			TTSTimeout = d
+		} else {
+			log.Printf("无效的超时设置 %q,使用默认值 %v", ts, TTSTimeout)
+		}
+	}
+
+	TTSOptions = volcano.Options{
+		APIKey:         apiKey,
+		ResourceID:     resourceId,
+		UID:            "uid",
+		Speaker:        speaker,
+		Model:          model,
+		Format:         format,
+		SampleRate:     sampleRate,
+		BitRate:        bitRate,
+		SpeechRate:     0,
+		LoudnessRate:   0,
+		EnableSubtitle: enableSubtitle,
+		Additions:      adds,
 	}
 	return nil
 }
 
-// LogStartupSummary 在启动期打印所有 Config 的最终状态。
-// 调用时机:InitAllConfigs 之后,ListenAndServe 之前。
-// 必填项逐项输出,失败分支明确告知"v1/audio/speech 路由将 500"。
+func getEnvDefault(name, def string) string {
+	if v := os.Getenv(name); v != "" {
+		return v
+	}
+	return def
+}
+
+func getEnvInt(name string, def int) int {
+	v := os.Getenv(name)
+	if v == "" {
+		return def
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil {
+		log.Printf("环境变量 %s=%q 不是合法整数,使用默认 %d", name, v, def)
+		return def
+	}
+	return n
+}
+
+func getEnvBool(name string, def bool) bool {
+	v := os.Getenv(name)
+	if v == "" {
+		return def
+	}
+	b, err := strconv.ParseBool(v)
+	if err != nil {
+		log.Printf("环境变量 %s=%q 不是合法 bool,使用默认 %v", name, v, def)
+		return def
+	}
+	return b
+}
+
+// CheckEnvironmentVariables 返回 /health 用的环境变量状态快照。
+func CheckEnvironmentVariables() map[string]interface{} {
+	required := map[string]bool{
+		"BYTEDANCE_TTS_API_KEY":     TTSOptions.APIKey != "",
+		"BYTEDANCE_TTS_RESOURCE_ID": TTSOptions.ResourceID != "",
+		"BYTEDANCE_TTS_SPEAKER":     TTSOptions.Speaker != "",
+	}
+	missing := []string{}
+	for k, ok := range required {
+		if !ok {
+			missing = append(missing, k)
+		}
+	}
+	optional := map[string]bool{
+		"BYTEDANCE_TTS_MODEL":             TTSOptions.Model != "",
+		"BYTEDANCE_TTS_FORMAT":            TTSOptions.Format != "mp3",
+		"BYTEDANCE_TTS_SAMPLE_RATE":       TTSOptions.SampleRate != 24000,
+		"BYTEDANCE_TTS_EXPLICIT_LANGUAGE": TTSOptions.Additions != nil && TTSOptions.Additions.ExplicitLanguage != "",
+		"OPENAI_TTS_API_KEY":              len(Auth.APIKeys) > 0,
+		"ALLOWED_ORIGINS":                 CORS.AllowAll || len(CORS.Origins) > 0,
+		"PORT":                            Server.Port != common.DefaultPort,
+	}
+	return map[string]interface{}{
+		"all_required_vars_set": len(missing) == 0,
+		"missing_required_vars": missing,
+		"required_vars_set":     required,
+		"optional_vars_set":     optional,
+	}
+}
+
+// LogStartupSummary 启动期一次性打印所有 Config 状态。
 func LogStartupSummary() {
 	log.Printf("=== 环境配置汇总 ===")
 	log.Printf("服务端口: %s", Server.Port)
@@ -163,14 +245,13 @@ func LogStartupSummary() {
 	}
 
 	if CORS.AllowAll {
-		log.Printf("ALLOWED_ORIGINS: *(允许所有跨域,不可与凭据共用)")
+		log.Printf("ALLOWED_ORIGINS: *(允许所有跨域;不可与鉴权共用)")
 	} else if len(CORS.Origins) == 0 {
 		log.Printf("ALLOWED_ORIGINS: 未设置(跨域请求将被拒绝)")
 	} else {
 		log.Printf("ALLOWED_ORIGINS: 已配置 %d 个允许的跨域来源白名单", len(CORS.Origins))
 	}
 
-	// 火山 TTS 必填项逐项状态:缺则 ❌,有则 ✓(API Key 脱敏,仅显示头尾各 4 字符)
 	log.Printf("火山 TTS 必填项状态:")
 	type ttsCheck struct {
 		name  string
@@ -178,15 +259,15 @@ func LogStartupSummary() {
 		ok    bool
 	}
 	checks := []ttsCheck{
-		{"BYTEDANCE_TTS_API_KEY", maskAPIKey(TTSConfig.ApiKey), TTSConfig.ApiKey != ""},
-		{"BYTEDANCE_TTS_RESOURCE_ID", TTSConfig.ResourceId, TTSConfig.ResourceId != ""},
-		{"BYTEDANCE_TTS_SPEAKER", TTSConfig.Speaker, TTSConfig.Speaker != ""},
+		{"BYTEDANCE_TTS_API_KEY", maskAPIKey(TTSOptions.APIKey), TTSOptions.APIKey != ""},
+		{"BYTEDANCE_TTS_RESOURCE_ID", TTSOptions.ResourceID, TTSOptions.ResourceID != ""},
+		{"BYTEDANCE_TTS_SPEAKER", TTSOptions.Speaker, TTSOptions.Speaker != ""},
 	}
 	missingCount := 0
 	for _, c := range checks {
 		mark := "✓"
 		if !c.ok {
-			mark = "❌"
+			mark = "✗"
 			missingCount++
 		}
 		val := c.value
@@ -197,14 +278,12 @@ func LogStartupSummary() {
 	}
 
 	if TTSConfigErr != nil {
-		log.Printf("火山 TTS 整体: 初始化失败,%d 个必填项缺失,/v1/audio/speech 路由将全部返回 500", missingCount)
+		log.Printf("火山 TTS 整体: 初始化失败(%d 个必填项缺失),/v1/audio/speech 路由将全部返回 500", missingCount)
 	} else {
 		log.Printf("火山 TTS 整体: 初始化成功")
 	}
 }
 
-// maskAPIKey 对 API Key 脱敏,显示头 4 / 尾 4 字符,中间 * 号代替。
-// 短于等于 8 字符整体掩为 ****,空串原样返回。
 func maskAPIKey(key string) string {
 	if key == "" {
 		return ""
@@ -215,40 +294,13 @@ func maskAPIKey(key string) string {
 	return key[:4] + "****" + key[len(key)-4:]
 }
 
-// CheckEnvironmentVariables 返回环境变量状态,供 /health 端点使用。
-// 不再直接 os.Getenv,改为读已初始化的全局 Config(单一数据源)。
-func CheckEnvironmentVariables() map[string]interface{} {
-	requiredVars := map[string]bool{
-		"BYTEDANCE_TTS_API_KEY":     TTSConfig.ApiKey != "",
-		"BYTEDANCE_TTS_RESOURCE_ID": TTSConfig.ResourceId != "",
-		"BYTEDANCE_TTS_SPEAKER":     TTSConfig.Speaker != "",
-	}
-
-	missingVars := []string{}
-	for varName, isSet := range requiredVars {
-		if !isSet {
-			missingVars = append(missingVars, varName)
-		}
-	}
-
-	optionalVars := map[string]bool{
-
-		"OPENAI_TTS_API_KEY":        len(Auth.APIKeys) > 0,
-		"ALLOWED_ORIGINS":           CORS.AllowAll || len(CORS.Origins) > 0,
-		"PORT":                      Server.Port != common.DefaultPort,
-	}
-
-	return map[string]interface{}{
-		"all_required_vars_set": len(missingVars) == 0,
-		"missing_required_vars": missingVars,
-		"required_vars_set":     requiredVars,
-		"optional_vars_set":     optionalVars,
-	}
-}
-
-// CheckStaticFiles 静态文件存在性检查,/dashboard 路由需要 health.html。
+// CheckStaticFiles 检查 /dashboard 路由依赖的 health.html 是否存在。
 func CheckStaticFiles() {
 	if _, err := os.Stat("health.html"); os.IsNotExist(err) {
 		log.Println("警告: health.html 不存在,/dashboard 路由将返回 404")
 	}
 }
+
+// 保留 dto.ByteDanceTTSConfig 引用避免 import 警告;
+// 新代码不应再使用这个类型,设置已在 TTSOptions 中。
+var _ = dto.ByteDanceTTSConfig{}

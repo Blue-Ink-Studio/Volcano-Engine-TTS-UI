@@ -1,5 +1,8 @@
-package dto
+﻿package dto
 
+// HealthResponse 是 /health 端点的 JSON 响应。
+// 数值类信息(请求统计、错误)迁移到 /metrics 端点,
+// 这里只保留运行期最关键的状态。
 type HealthResponse struct {
 	Status       string                 `json:"status"`
 	Service      string                 `json:"service"`
@@ -7,22 +10,7 @@ type HealthResponse struct {
 	Uptime       string                 `json:"uptime"`
 	StartTime    string                 `json:"start_time"`
 	Memory       map[string]interface{} `json:"memory"`
-	APIStats     APIStatsResponse       `json:"api_stats"`
-	Errors       ErrorResponse          `json:"errors"`
 	ConfigStatus ConfigStatusResponse   `json:"config_status"`
-}
-
-type APIStatsResponse struct {
-	TotalRequests         int       `json:"total_requests"`
-	SuccessfulRequests    int64     `json:"successful_requests"`
-	FailedRequests        int64     `json:"failed_requests"`
-	ErrorRatePercent      string    `json:"error_rate_percent"`
-	AvgResponseTimeMs     string    `json:"avg_response_time_ms"`
-	RecentResponseTimesMs []float64 `json:"recent_response_times_ms"`
-}
-
-type ErrorResponse struct {
-	RecentErrorsCount int `json:"recent_errors_count"`
 }
 
 type ConfigStatusResponse struct {
