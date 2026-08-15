@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/volcano-tts/tts-api/common"
 	"github.com/volcano-tts/tts-api/setting"
 )
 
@@ -70,8 +71,10 @@ func CORS(next http.Handler) http.Handler {
 		if !matched {
 			// Origin 不在白名单:拒绝请求(预检和非预检均拒绝),
 			// 防止不匹配的请求穿透到后端浪费 TTS 资源
-			log.Printf("CORS拦截: 来源=%q 路径=%s 方法=%s 客户端=%s",
-				origin, r.URL.Path, r.Method, GetClientIP(r))
+			if common.DebugLog {
+				log.Printf("CORS拦截: 来源=%q 路径=%s 方法=%s 客户端=%s",
+					origin, r.URL.Path, r.Method, GetClientIP(r))
+			}
 			w.WriteHeader(http.StatusForbidden)
 			return
 		}

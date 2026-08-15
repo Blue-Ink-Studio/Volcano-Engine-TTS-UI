@@ -10,6 +10,7 @@ import (
 	"log"
 	"time"
 
+	"github.com/volcano-tts/tts-api/common"
 	"github.com/volcano-tts/tts-api/dto"
 )
 
@@ -40,7 +41,9 @@ func ParseStream(body io.Reader, started time.Time) (*ParsedStream, error) {
 		}
 		var resp dto.V3TTSResponse
 		if err := json.Unmarshal(line, &resp); err != nil {
-			log.Printf("volcano: 解析响应行失败: %v, line=%q", err, truncateForLog(line, 200))
+			if common.DebugLog {
+				log.Printf("volcano: 解析响应行失败: %v, line=%q", err, truncateForLog(line, 200))
+			}
 			continue
 		}
 
@@ -56,7 +59,9 @@ func ParseStream(body io.Reader, started time.Time) (*ParsedStream, error) {
 			if resp.Usage != nil {
 				out.TextWords = resp.Usage.TextWords
 				out.HasUsage = true
-				log.Printf("TTS 合成结束, usage: text_words=%d", out.TextWords)
+				if common.DebugLog {
+					log.Printf("TTS 合成结束, usage: text_words=%d", out.TextWords)
+				}
 			}
 			for scanner.Scan() {
 			}
@@ -66,9 +71,13 @@ func ParseStream(body io.Reader, started time.Time) (*ParsedStream, error) {
 		// 事件分发:显式匹配已知事件,绝不把未知事件当作音频。
 		switch resp.Event {
 		case "TTSSentenceStart":
-			log.Printf("Sentence start: sequence=%d, sentence=%s", resp.Sequence, resp.Sentence)
+			if common.DebugLog {
+				log.Printf("Sentence start: sequence=%d, sentence=%s", resp.Sequence, resp.Sentence)
+			}
 		case "TTSSentenceEnd":
-			log.Printf("Sentence end: sequence=%d", resp.Sequence)
+			if common.DebugLog {
+				log.Printf("Sentence end: sequence=%d", resp.Sequence)
+			}
 		case "TTSSubtitle":
 			if resp.Data != "" {
 				out.Subtitles = append(out.Subtitles, dto.SubtitleEntry{
@@ -98,7 +107,9 @@ func ParseStream(body io.Reader, started time.Time) (*ParsedStream, error) {
 		case "":
 			// 传输帧,跳过
 		default:
-			log.Printf("volcano: 忽略未识别事件 event=%q sequence=%d", resp.Event, resp.Sequence)
+			if common.DebugLog {
+				log.Printf("volcano: 忽略未识别事件 event=%q sequence=%d", resp.Event, resp.Sequence)
+			}
 		}
 	}
 

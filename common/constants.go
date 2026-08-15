@@ -2,6 +2,9 @@ package common
 
 import "time"
 
+// DebugLog 控制非必要日志输出;由 setting 包在启动时通过 BYTEDANCE_TTS_DEBUG 环境变量设置。
+var DebugLog bool
+
 const (
 	DefaultPort           = "8080"
 	DefaultTimeout        = 30 * time.Second

@@ -12,7 +12,7 @@ func SecurityHeaders(next http.Handler) http.Handler {
 		w.Header().Set("X-XSS-Protection", "1; mode=block")
 		w.Header().Set("Referrer-Policy", "strict-origin-when-cross-origin")
 
-		if strings.HasPrefix(r.URL.Path, "/v1/") || r.URL.Path == "/health" {
+		if strings.HasPrefix(r.URL.Path, "/v1/") || r.URL.Path == "/health" || r.URL.Path == "/dashboard" || r.URL.Path == "/metrics" {
 			w.Header().Set("Cache-Control", "no-store")
 		}
 

@@ -162,7 +162,7 @@ func OpenaiTTSHandler(w http.ResponseWriter, r *http.Request) {
 		metrics.RequestDuration.Observe(duration.Seconds(), telemetry.Labels{"status": finalLabels["status"], "format": clientFormat})
 		log.Printf("警告: TTS 合成失败 - 路径=%s 客户端=%s 文本长度=%d 耗时=%v 错误=%v",
 			r.URL.Path, middleware.GetClientIP(r), len(req.Input), duration, err)
-		http.Error(w, "TTS synthesis failed", http.StatusInternalServerError)
+		middleware.SendJSONError(w, http.StatusInternalServerError, "TTS synthesis failed.", "server_error", "synthesis_failed")
 		return
 	}
 

@@ -153,6 +153,11 @@ func InitTTSConfig() error {
 		}
 	}
 
+	common.DebugLog = getEnvBool("BYTEDANCE_TTS_DEBUG", false)
+	if common.DebugLog {
+		log.Println("调试日志已启用 BYTEDANCE_TTS_DEBUG")
+	}
+
 	TTSOptions = volcano.Options{
 		APIKey:         apiKey,
 		ResourceID:     resourceId,
