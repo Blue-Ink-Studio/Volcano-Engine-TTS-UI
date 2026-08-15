@@ -85,13 +85,11 @@ tts-api.exe
 | `seed-tts-1.0` | 豆包语音合成模型1.0字符版 |
 | `seed-tts-1.0-concurr` | 豆包语音合成模型1.0并发版 |
 | `seed-tts-2.0` | 豆包语音合成模型2.0字符版 |
-| `seed-icl-1.0` | 声音复刻1.0字符版 |
-| `seed-icl-1.0-concurr` | 声音复刻1.0并发版 |
 | `seed-icl-2.0` | 声音复刻2.0字符版 |
 
 > 上表为通用模型名。火山控制台实际显示的资源 ID 字符串格式通常是 `volc.megatts.default`、`volc.megatts.icl` 等（带版本号会形如 `volc.megatts.icl.2_0`），**以控制台资源管理页面显示的字符串为准**。资源 ID 与音色必须**同时在控制台开通**才能组合使用，否则 API 会返回 `code=55000000, message=resource ID is mismatched with speaker related resource`。
 
-**注意：** 1.0音色只能搭配 `seed-tts-1.0` Resource ID，2.0音色只能搭配 `seed-tts-2.0` Resource ID。
+**注意：** 复刻音色（speaker 以 `S_` 开头）必须搭配对应的 Resource ID 使用，否则 API 会返回 resource mismatched 错误。
 
 ### 音频格式说明
 
