@@ -29,6 +29,15 @@ func (nopMetrics) UpstreamFinished(string, string, string, string, time.Duration
 func (nopMetrics) UpstreamUsage(string, int) {}
 
 // Synthesis 调用火山 v3 一次,返回组装好的结果。
+//
+// 入参:
+//   - ctx:超时控制
+//   - client:复用的 HTTPClient
+//   - opts:从 setting 构造的完整参数(text 字段会被 text 覆盖)
+//   - text:本次合成的实际文本
+//   - clientFormat:客户端期望的最终格式,"wav" 内部转 pcm 后本地拼 wav 头
+//   - speed:OpenAI 风格的 speed(倍率,0.5~2.0)
+//   - mtr:可选埋点;传 nil 等价于 nopMetrics
 func Synthesis(
 	ctx context.Context,
 	client *HTTPClient,
@@ -142,13 +151,13 @@ func newRequestID() string {
 
 // extractAdditionsForLog 从已编码的请求体里取 additions 字段值,便于日志展示。
 func extractAdditionsForLog(body []byte) string {
-	const key = `"additions":"`
+	const key = "\"additions\":\""
 	idx := bytesIndex(body, key)
 	if idx < 0 {
 		return ""
 	}
 	rest := body[idx+len(key):]
-	end := bytesIndex(rest, []byte{'"'})
+	end := bytesIndex(rest, "\"")
 	if end < 0 {
 		return ""
 	}
