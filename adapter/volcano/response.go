@@ -105,28 +105,7 @@ func ParseStream(body io.Reader, started time.Time) (*ParsedStream, error) {
 				gotFirstChunk = true
 			}
 		case "":
-			// 上游 v3 有时会省略 event 字段,音频数据直接出现在无 event 的行里;
-			// 只要 data 非空就当作音频帧解码收集。
-			if resp.Data != "" {
-				chunk, err := base64.StdEncoding.DecodeString(resp.Data)
-				if err != nil {
-					return nil, &UpstreamError{
-						Code:    resp.Code,
-						Message: fmt.Sprintf("decode audio chunk: %v", err),
-						Stage:   "stream",
-						Wrapped: err,
-					}
-				}
-				out.AudioData = append(out.AudioData, chunk...)
-				out.Chunks++
-				if !gotFirstChunk {
-					out.FirstChunk = time.Since(started)
-					gotFirstChunk = true
-				}
-			} else if common.DebugLog && resp.Code == 0 {
-				// 元数据行(无 data 无 event),debug 模式打印便于排查
-				log.Printf("volcano: 无 event 字段 code=%d sequence=%d sentence=%s data_len=%d", resp.Code, resp.Sequence, resp.SentenceText(), len(resp.Data))
-			}
+			// 传输帧,跳过
 		default:
 			if common.DebugLog {
 				log.Printf("volcano: 忽略未识别事件 event=%q sequence=%d sentence=%s data_len=%d", resp.Event, resp.Sequence, resp.SentenceText(), len(resp.Data))
