@@ -85,7 +85,9 @@ func ParseStream(body io.Reader, started time.Time) (*ParsedStream, error) {
 					Sequence: resp.Sequence,
 				})
 			}
-		case "sentence":
+		case "sentence", "":
+			// HTTP 单向协议下,音频帧的 event 字段可能是空也可能是 "sentence";
+			// 两种都当音频处理。
 			if resp.Data == "" {
 				continue
 			}
@@ -104,8 +106,6 @@ func ParseStream(body io.Reader, started time.Time) (*ParsedStream, error) {
 				out.FirstChunk = time.Since(started)
 				gotFirstChunk = true
 			}
-		case "":
-			// 传输帧,跳过
 		default:
 			if common.DebugLog {
 				log.Printf("volcano: 忽略未识别事件 event=%q sequence=%d sentence=%s data_len=%d", resp.Event, resp.Sequence, resp.SentenceText(), len(resp.Data))
