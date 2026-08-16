@@ -110,7 +110,6 @@ func ParseStream(body io.Reader, started time.Time) (*ParsedStream, error) {
 			if common.DebugLog && resp.Code == 0 {
 				log.Printf("volcano: 无 event 字段 code=%d sequence=%d sentence=%s data_len=%d", resp.Code, resp.Sequence, resp.SentenceText(), len(resp.Data))
 			}
-		}
 		default:
 			if common.DebugLog {
 				log.Printf("volcano: 忽略未识别事件 event=%q sequence=%d sentence=%s data_len=%d", resp.Event, resp.Sequence, resp.SentenceText(), len(resp.Data))
