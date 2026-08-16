@@ -51,7 +51,7 @@ func buildRequest(opts Options) ([]byte, error) {
 
 	body := requestBody{
 		User:      ttsUser{UID: opts.UID},
-		Namespace: "BidirectionalTTS",
+		Namespace: "UnidirectionalTTS",
 		ReqParams: ttsReqParams{
 			Text:    opts.Text,
 			Speaker: opts.Speaker,
