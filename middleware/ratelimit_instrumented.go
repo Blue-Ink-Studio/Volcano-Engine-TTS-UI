@@ -9,6 +9,7 @@ package middleware
 import (
 	"log"
 	"net/http"
+	"strings"
 
 	"github.com/volcano-tts/tts-api/metrics"
 )
@@ -16,6 +17,11 @@ import (
 // RateLimitWithMetrics 是 middleware.RateLimit 的可埋点版本。
 func RateLimitWithMetrics(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// 仅对 /v1/ 下的业务请求限流,/health /metrics /dashboard 等监控路径不限流
+		if !strings.HasPrefix(r.URL.Path, "/v1/") {
+			next.ServeHTTP(w, r)
+			return
+		}
 		clientIP := GetClientIP(r)
 		if !GlobalRateLimiter.Allow(clientIP) {
 			log.Printf("警告: 已超过IP速率限制，拒绝请求 - 客户端IP: %s", clientIP)
@@ -29,6 +35,11 @@ func RateLimitWithMetrics(next http.Handler) http.Handler {
 // ConcurrencyLimitWithMetrics 是 middleware.ConcurrencyLimit 的可埋点版本。
 func ConcurrencyLimitWithMetrics(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// 仅对 /v1/ 下的业务请求统计并发和加锁,监控路径不占用并发槽位
+		if !strings.HasPrefix(r.URL.Path, "/v1/") {
+			next.ServeHTTP(w, r)
+			return
+		}
 		select {
 		case ConcurrencySem <- struct{}{}:
 			metrics.ConcurrencyActive.Inc(nil)
