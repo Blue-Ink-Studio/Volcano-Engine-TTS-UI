@@ -72,7 +72,7 @@ func ParseStream(body io.Reader, started time.Time) (*ParsedStream, error) {
 		switch resp.Event {
 		case "TTSSentenceStart":
 			if common.DebugLog {
-				log.Printf("Sentence start: sequence=%d, sentence=%s", resp.Sequence, resp.Sentence)
+				log.Printf("Sentence start: sequence=%d, sentence=%s", resp.Sequence, resp.SentenceText())
 			}
 		case "TTSSentenceEnd":
 			if common.DebugLog {
@@ -81,7 +81,7 @@ func ParseStream(body io.Reader, started time.Time) (*ParsedStream, error) {
 		case "TTSSubtitle":
 			if resp.Data != "" {
 				out.Subtitles = append(out.Subtitles, dto.SubtitleEntry{
-					Text:     resp.Sentence,
+					Text:     resp.SentenceText(),
 					Sequence: resp.Sequence,
 				})
 			}
@@ -105,10 +105,15 @@ func ParseStream(body io.Reader, started time.Time) (*ParsedStream, error) {
 				gotFirstChunk = true
 			}
 		case "":
-			// 传输帧,跳过
+			// 无 event 字段的元数据行(上游 TTSSentenceStart 偶发省略 event),
+			// debug 模式打印便于排查;正常情况静默跳过。
+			if common.DebugLog && resp.Code == 0 {
+				log.Printf("volcano: 无 event 字段 code=%d sequence=%d sentence=%s data_len=%d", resp.Code, resp.Sequence, resp.SentenceText(), len(resp.Data))
+			}
+		}
 		default:
 			if common.DebugLog {
-				log.Printf("volcano: 忽略未识别事件 event=%q sequence=%d", resp.Event, resp.Sequence)
+				log.Printf("volcano: 忽略未识别事件 event=%q sequence=%d sentence=%s data_len=%d", resp.Event, resp.Sequence, resp.SentenceText(), len(resp.Data))
 			}
 		}
 	}
