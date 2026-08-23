@@ -1,0 +1,9 @@
+*.exe
+*.md
+.env
+.env.example
+.git
+.gitignore
+tts_api_architecture.html
+代码审查报告.md
+fix_list.md

@@ -1,0 +1,668 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TTS 服务监控</title>
+    <script src="https://cdn.bootcdn.net/ajax/libs/vue/3.4.21/vue.global.prod.js"></script>
+    <script src="https://cdn.bootcdn.net/ajax/libs/axios/1.6.7/axios.min.js"></script>
+    <style>
+        :root {
+            --bg: #0b0f1a;
+            --bg-card: #131826;
+            --bg-elev: #1a2138;
+            --border: #232b42;
+            --text: #e4e7ee;
+            --text-dim: #8a92a6;
+            --text-mute: #5a6275;
+            --accent: #00d4ff;
+            --accent-2: #7b2ff7;
+            --success: #22c55e;
+            --warning: #f59e0b;
+            --danger: #ef4444;
+        }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+            background: var(--bg); color: var(--text);
+            min-height: 100vh; padding: 24px; font-size: 14px;
+            background-image:
+                radial-gradient(ellipse 80% 50% at 50% -20%, rgba(0,212,255,0.08), transparent),
+                radial-gradient(ellipse 60% 40% at 80% 100%, rgba(123,47,247,0.06), transparent);
+        }
+        #app { max-width: 1280px; margin: 0 auto; }
+
+        .header {
+            display: flex; align-items: center; justify-content: space-between;
+            margin-bottom: 24px; flex-wrap: wrap; gap: 16px;
+        }
+        .header-left { display: flex; align-items: center; gap: 16px; }
+        .logo {
+            width: 44px; height: 44px; border-radius: 12px;
+            background: linear-gradient(135deg, var(--accent), var(--accent-2));
+            display: flex; align-items: center; justify-content: center;
+            font-weight: 700; font-size: 18px; color: #fff; box-shadow: 0 4px 20px rgba(0,212,255,0.3);
+        }
+        .header h1 { font-size: 20px; font-weight: 600; }
+        .header .sub { font-size: 12px; color: var(--text-dim); margin-top: 2px; }
+        .status-badge {
+            display: inline-flex; align-items: center; gap: 6px;
+            padding: 4px 10px; border-radius: 999px; font-size: 12px; font-weight: 500;
+        }
+        .status-badge.ok { background: rgba(34,197,94,0.15); color: var(--success); }
+        .status-badge.error { background: rgba(239,68,68,0.15); color: var(--danger); }
+        .status-dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+        .status-dot.live { animation: pulse 2s infinite; }
+        @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.3; } }
+
+        .btn {
+            background: var(--bg-elev); border: 1px solid var(--border); color: var(--text);
+            padding: 8px 16px; border-radius: 8px; cursor: pointer; font-size: 13px;
+            transition: all 0.2s; display: inline-flex; align-items: center; gap: 6px;
+        }
+        .btn:hover { border-color: var(--accent); }
+        .btn-primary { background: var(--accent); color: #00121a; border-color: var(--accent); font-weight: 500; }
+        .btn-primary:hover { background: #33ddff; }
+
+        .stats {
+            display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+            gap: 12px; margin-bottom: 20px;
+        }
+        .stat-card {
+            background: var(--bg-card); border: 1px solid var(--border); border-radius: 12px;
+            padding: 18px; transition: all 0.2s;
+        }
+        .stat-card:hover { border-color: rgba(0,212,255,0.4); transform: translateY(-1px); }
+        .stat-label { font-size: 12px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.5px; }
+        .stat-value { font-size: 28px; font-weight: 700; margin-top: 6px; color: var(--text); }
+        .stat-value.accent { color: var(--accent); }
+        .stat-value.success { color: var(--success); }
+        .stat-value.warning { color: var(--warning); }
+        .stat-value.danger { color: var(--danger); }
+        .stat-foot { font-size: 11px; color: var(--text-mute); margin-top: 4px; }
+
+        .section { margin-bottom: 20px; }
+        .section-title {
+            font-size: 13px; font-weight: 600; color: var(--text-dim);
+            text-transform: uppercase; letter-spacing: 1px; margin-bottom: 12px;
+            display: flex; align-items: center; gap: 8px;
+        }
+        .section-title::before {
+            content: ""; width: 3px; height: 14px; background: var(--accent); border-radius: 2px;
+        }
+
+        .grid-2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(420px, 1fr)); gap: 16px; }
+        .card {
+            background: var(--bg-card); border: 1px solid var(--border); border-radius: 12px; padding: 20px;
+        }
+        .card-head {
+            display: flex; align-items: center; justify-content: space-between;
+            margin-bottom: 14px; padding-bottom: 12px; border-bottom: 1px solid var(--border);
+        }
+        .card-title { font-size: 14px; font-weight: 600; }
+        .card-desc { font-size: 11px; color: var(--text-mute); margin-top: 2px; }
+
+        .table { width: 100%; border-collapse: collapse; }
+        .table th, .table td {
+            text-align: left; padding: 8px 10px; font-size: 12px;
+            border-bottom: 1px solid var(--border);
+        }
+        .table th { color: var(--text-dim); font-weight: 500; font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; }
+        .table tr:last-child td { border-bottom: none; }
+        .table td.num { font-family: "SF Mono", Monaco, "Cascadia Code", monospace; text-align: right; color: var(--accent); font-weight: 500; }
+        .table td.num.success { color: var(--success); }
+        .table td.num.warning { color: var(--warning); }
+        .table td.num.danger { color: var(--danger); }
+        .table td.label-cell { color: var(--text-dim); font-family: "SF Mono", Monaco, monospace; font-size: 11px; }
+        .table td.name { color: var(--text); font-family: "SF Mono", Monaco, monospace; }
+
+        .tag {
+            display: inline-block; padding: 2px 6px; border-radius: 4px;
+            background: var(--bg-elev); color: var(--text-dim);
+            font-size: 10px; font-family: "SF Mono", Monaco, monospace;
+            margin-right: 4px; border: 1px solid var(--border);
+        }
+        .tag.status-ok { background: rgba(34,197,94,0.12); color: var(--success); border-color: rgba(34,197,94,0.3); }
+        .tag.status-error { background: rgba(239,68,68,0.12); color: var(--danger); border-color: rgba(239,68,68,0.3); }
+        .tag.format-mp3 { background: rgba(0,212,255,0.12); color: var(--accent); border-color: rgba(0,212,255,0.3); }
+        .empty { color: var(--text-mute); font-size: 12px; text-align: center; padding: 20px; }
+        .refresh-time { color: var(--text-mute); font-size: 11px; }
+
+        .error-box {
+            background: rgba(239,68,68,0.1); border: 1px solid rgba(239,68,68,0.3);
+            border-radius: 8px; padding: 12px 16px; color: var(--danger);
+            margin-bottom: 16px; font-size: 13px;
+        }
+
+        .row-flex { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+    </style>
+</head>
+<body>
+    <div id="app">
+        <div class="header">
+            <div class="header-left">
+                <div class="logo">TTS</div>
+                <div>
+                    <h1>火山 TTS 服务监控</h1>
+                    <div class="sub">{{ health.service || '' }} · {{ health.version || '' }}</div>
+                </div>
+            </div>
+            <div class="row-flex">
+                <span class="status-badge" :class="health.status === 'ok' ? 'ok' : 'error'">
+                    <span class="status-dot" :class="{ live: health.status === 'ok' }"></span>
+                    {{ health.status === 'ok' ? '运行中' : (health.status || '加载中') }}
+                </span>
+                <button class="btn btn-primary" @click="refresh" :disabled="loading">
+                    {{ loading ? "刷新中..." : "刷新" }}
+                </button>
+                <span class="refresh-time">{{ lastRefresh }}</span>
+            </div>
+        </div>
+
+        <div v-if="error" class="error-box">{{ error }}</div>
+
+        <div class="stats">
+            <div class="stat-card">
+                <div class="stat-label">运行时长</div>
+                <div class="stat-value">{{ formatUptime(health.uptime) }}</div>
+                <div class="stat-foot">启动于 {{ formatTime(health.start_time) }}</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">总请求数</div>
+                <div class="stat-value accent">{{ totalRequests }}</div>
+                <div class="stat-foot">自启动以来</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">成功率</div>
+                <div class="stat-value" :class="successRateClass">{{ successRate }}</div>
+                <div class="stat-foot">{{ okRequests }} 成功 / {{ errRequests }} 失败</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">当前并发</div>
+                <div class="stat-value">{{ concurrencyActive }}</div>
+                <div class="stat-foot">在飞请求数</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">Goroutines</div>
+                <div class="stat-value">{{ health.memory?.goroutines || 0 }}</div>
+                <div class="stat-foot">Go 运行时</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">堆内存</div>
+                <div class="stat-value">{{ formatBytes(health.memory?.heap_alloc) }}</div>
+                <div class="stat-foot">已分配 / 容量 {{ formatBytes(health.memory?.heap_inuse) }}</div>
+            </div>
+        </div>
+
+        <div class="section">
+            <div class="section-title">请求 & 流量</div>
+            <div class="grid-2">
+                <div class="card">
+                    <div class="card-head">
+                        <div>
+                            <div class="card-title">请求数</div>
+                            <div class="card-desc">tts_request_total · 按 status / format / speaker 拆分</div>
+                        </div>
+                    </div>
+                    <table class="table" v-if="requestRows.length">
+                        <thead><tr><th>状态</th><th>格式</th><th>音色</th><th>次数</th></tr></thead>
+                        <tbody>
+                            <tr v-for="r in requestRows" :key="r.key">
+                                <td><span class="tag" :class="r.statusClass">{{ r.status }}</span></td>
+                                <td><span class="tag" v-if="r.format" :class="`format-${r.format}`">{{ r.format }}</span><span v-else class="tag">-</span></td>
+                                <td class="label-cell">{{ r.speaker || "-" }}</td>
+                                <td class="num" :class="r.statusClass">{{ r.value }}</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                    <div v-else class="empty">暂无数据</div>
+                </div>
+
+                <div class="card">
+                    <div class="card-head">
+                        <div>
+                            <div class="card-title">端到端延迟</div>
+                            <div class="card-desc">tts_request_duration_seconds · 50/95/99 百分位</div>
+                        </div>
+                    </div>
+                    <table class="table" v-if="durationRows.length">
+                        <thead><tr><th>状态</th><th>格式</th><th>p50</th><th>p95</th><th>p99</th></tr></thead>
+                        <tbody>
+                            <tr v-for="r in durationRows" :key="r.key">
+                                <td><span class="tag" :class="r.statusClass">{{ r.status }}</span></td>
+                                <td><span class="tag" v-if="r.format" :class="`format-${r.format}`">{{ r.format }}</span><span v-else class="tag">-</span></td>
+                                <td class="num">{{ r.p50 }}</td>
+                                <td class="num">{{ r.p95 }}</td>
+                                <td class="num warning">{{ r.p99 }}</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                    <div v-else class="empty">暂无数据</div>
+                </div>
+            </div>
+        </div>
+
+        <div class="section">
+            <div class="section-title">上游火山 API</div>
+            <div class="grid-2">
+                <div class="card">
+                    <div class="card-head">
+                        <div>
+                            <div class="card-title">上游调用</div>
+                            <div class="card-desc">tts_upstream_total · 按 status / format 拆分</div>
+                        </div>
+                    </div>
+                    <table class="table" v-if="upstreamRows.length">
+                        <thead><tr><th>状态</th><th>格式</th><th>次数</th></tr></thead>
+                        <tbody>
+                            <tr v-for="r in upstreamRows" :key="r.key">
+                                <td><span class="tag" :class="r.statusClass">{{ r.status }}</span></td>
+                                <td><span class="tag" v-if="r.format" :class="`format-${r.format}`">{{ r.format }}</span><span v-else class="tag">-</span></td>
+                                <td class="num" :class="r.statusClass">{{ r.value }}</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                    <div v-else class="empty">暂无数据</div>
+                </div>
+
+                <div class="card">
+                    <div class="card-head">
+                        <div>
+                            <div class="card-title">首字节耗时 (TTFB)</div>
+                            <div class="card-desc">tts_upstream_first_byte_seconds · 按格式拆分</div>
+                        </div>
+                    </div>
+                    <table class="table" v-if="ttfbRows.length">
+                        <thead><tr><th>格式</th><th>p50</th><th>p95</th><th>p99</th></tr></thead>
+                        <tbody>
+                            <tr v-for="r in ttfbRows" :key="r.format">
+                                <td><span class="tag" :class="`format-${r.format}`">{{ r.format }}</span></td>
+                                <td class="num">{{ r.p50 }}</td>
+                                <td class="num">{{ r.p95 }}</td>
+                                <td class="num warning">{{ r.p99 }}</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                    <div v-else class="empty">暂无数据</div>
+                </div>
+
+                <div class="card">
+                    <div class="card-head">
+                        <div>
+                            <div class="card-title">流量统计</div>
+                            <div class="card-desc">chunks & 音频字节数</div>
+                        </div>
+                    </div>
+                    <table class="table" v-if="trafficRows.length">
+                        <thead><tr><th>格式</th><th>音频分片</th><th>音频字节</th></tr></thead>
+                        <tbody>
+                            <tr v-for="r in trafficRows" :key="r.format">
+                                <td><span class="tag" :class="`format-${r.format}`">{{ r.format }}</span></td>
+                                <td class="num">{{ r.chunks }}</td>
+                                <td class="num success">{{ r.audioBytes }}</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                    <div v-else class="empty">暂无数据</div>
+                </div>
+
+                <div class="card">
+                    <div class="card-head">
+                        <div>
+                            <div class="card-title">上游错误</div>
+                            <div class="card-desc">tts_upstream_errors_total · 按错误码聚合</div>
+                        </div>
+                    </div>
+                    <table class="table" v-if="errorRows.length">
+                        <thead><tr><th>错误码</th><th>次数</th></tr></thead>
+                        <tbody>
+                            <tr v-for="r in errorRows" :key="r.code">
+                                <td class="label-cell">{{ r.code }}</td>
+                                <td class="num danger">{{ r.value }}</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                    <div v-else class="empty">暂无错误</div>
+                </div>
+            </div>
+        </div>
+
+        <div class="section">
+            <div class="section-title">限流 & 计费</div>
+            <div class="grid-2">
+                <div class="card">
+                    <div class="card-head">
+                        <div>
+                            <div class="card-title">被拒请求</div>
+                            <div class="card-desc">限流 / 并发 / 鉴权失败</div>
+                        </div>
+                    </div>
+                    <table class="table">
+                        <tbody>
+                            <tr>
+                                <td class="label-cell">tts_ratelimit_rejected_total</td>
+                                <td class="num" :class="{ danger: rateLimitRejected > 0 }">{{ rateLimitRejected }}</td>
+                            </tr>
+                            <tr>
+                                <td class="label-cell">tts_concurrency_rejected_total</td>
+                                <td class="num" :class="{ danger: concurrencyRejected > 0 }">{{ concurrencyRejected }}</td>
+                            </tr>
+                            <tr>
+                                <td class="label-cell">tts_auth_failed_total</td>
+                                <td class="num" :class="{ danger: authFailed > 0 }">{{ authFailed }}</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+
+                <div class="card">
+                    <div class="card-head">
+                        <div>
+                            <div class="card-title">计费字符</div>
+                            <div class="card-desc">tts_usage_text_words_total · 按模型拆分</div>
+                        </div>
+                    </div>
+                    <table class="table" v-if="usageRows.length">
+                        <thead><tr><th>模型</th><th>字符数</th></tr></thead>
+                        <tbody>
+                            <tr v-for="r in usageRows" :key="r.model">
+                                <td class="label-cell">{{ r.model }}</td>
+                                <td class="num success">{{ r.value }}</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                    <div v-else class="empty">暂无数据</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+    const { createApp, ref, computed, onMounted } = Vue;
+
+    function parseProm(text) {
+        const out = {};
+        text.split("\n").forEach(line => {
+            line = line.trim();
+            if (!line || line.startsWith("#")) return;
+            const m = line.match(/^([a-zA-Z_:][a-zA-Z0-9_:]*)(\{([^}]*)\})?\s+(.+)$/);
+            if (!m) return;
+            const name = m[1];
+            const labels = {};
+            if (m[3]) {
+                m[3].split(",").forEach(p => {
+                    const kv = p.match(/^(\w+)="([^"]*)"$/);
+                    if (kv) labels[kv[1]] = kv[2];
+                });
+            }
+            const value = parseFloat(m[4]);
+            if (!out[name]) out[name] = [];
+            out[name].push({ labels, value });
+        });
+        return out;
+    }
+
+    function histogramStats(samples) {
+        // bucket le="+Inf" 的值是总数
+        let total = 0;
+        const buckets = [];
+        for (const s of samples) {
+            if (s.labels.le === "+Inf") total = s.value;
+            else buckets.push({ le: parseFloat(s.labels.le), count: s.value });
+        }
+        buckets.sort((a, b) => a.le - b.le);
+        function quantile(q) {
+            if (!total) return 0;
+            const target = total * q;
+            let prevCount = 0;
+            let prevLe = 0;
+            for (const b of buckets) {
+                if (b.count >= target) {
+                    if (b.count === prevCount) return prevLe;
+                    return prevLe + (b.le - prevLe) * (target - prevCount) / (b.count - prevCount);
+                }
+                prevCount = b.count;
+                prevLe = b.le;
+            }
+            return buckets.length ? buckets[buckets.length - 1].le : 0;
+        }
+        return { p50: quantile(0.5), p95: quantile(0.95), p99: quantile(0.99) };
+    }
+
+    function statusClass(status) {
+        if (status === "ok" || !status) return "status-ok";
+        if (status.includes("error") || status.includes("reject") || status === "internal_error") return "status-error";
+        return "status-error";
+    }
+
+    function fmtNum(n) {
+        if (n === undefined || n === null) return "-";
+        if (n >= 1e6) return (n / 1e6).toFixed(1) + "M";
+        if (n >= 1e3) return (n / 1e3).toFixed(1) + "k";
+        return String(Math.round(n));
+    }
+    function fmtSec(s) {
+        if (!s || s === 0) return "0s";
+        if (s < 1) return (s * 1000).toFixed(0) + "ms";
+        return s.toFixed(2) + "s";
+    }
+    function fmtBytes(b) {
+        if (!b) return "0 B";
+        const k = 1024, sizes = ["B", "KB", "MB", "GB"];
+        const i = Math.floor(Math.log(b) / Math.log(k));
+        return (b / Math.pow(k, i)).toFixed(1) + " " + sizes[i];
+    }
+
+    createApp({
+        setup() {
+            const health = ref({});
+            const metrics = ref({});
+            const loading = ref(false);
+            const error = ref(null);
+            const lastRefresh = ref("-");
+
+            const totalRequests = computed(() => {
+                const arr = metrics.value["tts_request_total"] || [];
+                return fmtNum(arr.reduce((a, b) => a + b.value, 0));
+            });
+            const okRequests = computed(() => {
+                const arr = metrics.value["tts_request_total"] || [];
+                return fmtNum(arr.filter(s => s.labels.status === "ok").reduce((a, b) => a + b.value, 0));
+            });
+            const errRequests = computed(() => {
+                const arr = metrics.value["tts_request_total"] || [];
+                return fmtNum(arr.filter(s => s.labels.status !== "ok").reduce((a, b) => a + b.value, 0));
+            });
+            const successRate = computed(() => {
+                const total = (metrics.value["tts_request_total"] || []).reduce((a, b) => a + b.value, 0);
+                if (!total) return "-";
+                const ok = (metrics.value["tts_request_total"] || []).filter(s => s.labels.status === "ok").reduce((a, b) => a + b.value, 0);
+                return (ok / total * 100).toFixed(1) + "%";
+            });
+            const successRateClass = computed(() => {
+                const total = (metrics.value["tts_request_total"] || []).reduce((a, b) => a + b.value, 0);
+                if (!total) return "";
+                const ok = (metrics.value["tts_request_total"] || []).filter(s => s.labels.status === "ok").reduce((a, b) => a + b.value, 0);
+                const r = ok / total;
+                if (r >= 0.95) return "success";
+                if (r >= 0.8) return "warning";
+                return "danger";
+            });
+            const concurrencyActive = computed(() => {
+                const arr = metrics.value["tts_concurrency_active"] || [];
+                return fmtNum(arr.reduce((a, b) => a + b.value, 0));
+            });
+            const rateLimitRejected = computed(() => {
+                const arr = metrics.value["tts_ratelimit_rejected_total"] || [];
+                return fmtNum(arr.reduce((a, b) => a + b.value, 0));
+            });
+            const concurrencyRejected = computed(() => {
+                const arr = metrics.value["tts_concurrency_rejected_total"] || [];
+                return fmtNum(arr.reduce((a, b) => a + b.value, 0));
+            });
+            const authFailed = computed(() => {
+                const arr = metrics.value["tts_auth_failed_total"] || [];
+                return fmtNum(arr.reduce((a, b) => a + b.value, 0));
+            });
+
+            const requestRows = computed(() => {
+                const arr = metrics.value["tts_request_total"] || [];
+                return arr
+                    .map(s => ({
+                        key: JSON.stringify(s.labels),
+                        status: s.labels.status || "-",
+                        format: s.labels.format || "",
+                        speaker: s.labels.speaker || "",
+                        value: fmtNum(s.value),
+                        statusClass: statusClass(s.labels.status)
+                    }))
+                    .sort((a, b) => parseFloat(b.value) - parseFloat(a.value));
+            });
+
+            const durationRows = computed(() => {
+                const groups = {};
+                (metrics.value["tts_request_duration_seconds"] || []).forEach(s => {
+                    const key = `${s.labels.status || "-"}|${s.labels.format || ""}`;
+                    if (!groups[key]) groups[key] = { status: s.labels.status, format: s.labels.format, samples: [] };
+                    groups[key].samples.push(s);
+                });
+                return Object.values(groups).map(g => {
+                    const stats = histogramStats(g.samples);
+                    return {
+                        key: `${g.status}|${g.format}`,
+                        status: g.status || "-",
+                        format: g.format || "",
+                        p50: fmtSec(stats.p50),
+                        p95: fmtSec(stats.p95),
+                        p99: fmtSec(stats.p99),
+                        statusClass: statusClass(g.status)
+                    };
+                }).sort((a, b) => a.format.localeCompare(b.format));
+            });
+
+            const upstreamRows = computed(() => {
+                const arr = metrics.value["tts_upstream_total"] || [];
+                return arr.map(s => ({
+                    key: JSON.stringify(s.labels),
+                    status: s.labels.status || "-",
+                    format: s.labels.format || "",
+                    value: fmtNum(s.value),
+                    statusClass: statusClass(s.labels.status)
+                })).sort((a, b) => parseFloat(b.value) - parseFloat(a.value));
+            });
+
+            const ttfbRows = computed(() => {
+                const groups = {};
+                (metrics.value["tts_upstream_first_byte_seconds"] || []).forEach(s => {
+                    const key = s.labels.format || "-";
+                    if (!groups[key]) groups[key] = { format: s.labels.format, samples: [] };
+                    groups[key].samples.push(s);
+                });
+                return Object.values(groups).map(g => {
+                    const stats = histogramStats(g.samples);
+                    return { format: g.format || "-", p50: fmtSec(stats.p50), p95: fmtSec(stats.p95), p99: fmtSec(stats.p99) };
+                }).sort((a, b) => a.format.localeCompare(b.format));
+            });
+
+            const trafficRows = computed(() => {
+                const groups = {};
+                (metrics.value["tts_upstream_chunks_total"] || []).forEach(s => {
+                    const key = s.labels.format || "-";
+                    if (!groups[key]) groups[key] = { format: s.labels.format, chunks: 0, audioBytes: 0 };
+                    groups[key].chunks += s.value;
+                });
+                (metrics.value["tts_upstream_audio_bytes_total"] || []).forEach(s => {
+                    const key = s.labels.format || "-";
+                    if (!groups[key]) groups[key] = { format: s.labels.format, chunks: 0, audioBytes: 0 };
+                    groups[key].audioBytes += s.value;
+                });
+                return Object.values(groups).map(g => ({
+                    format: g.format || "-",
+                    chunks: fmtNum(g.chunks),
+                    audioBytes: fmtBytes(g.audioBytes)
+                })).sort((a, b) => a.format.localeCompare(b.format));
+            });
+
+            const errorRows = computed(() => {
+                const arr = metrics.value["tts_upstream_errors_total"] || [];
+                return arr.map(s => ({ code: s.labels.code || "-", value: fmtNum(s.value) }))
+                    .sort((a, b) => parseFloat(b.value) - parseFloat(a.value));
+            });
+
+            const usageRows = computed(() => {
+                const arr = metrics.value["tts_usage_text_words_total"] || [];
+                return arr.map(s => ({ model: s.labels.model || "-", value: fmtNum(s.value) }))
+                    .sort((a, b) => parseFloat(b.value) - parseFloat(a.value));
+            });
+
+            const fetchHealth = async () => {
+                try {
+                    const r = await axios.get("/health");
+                    health.value = r.data;
+                } catch (e) {
+                    error.value = "无法获取健康状态: " + (e.message || "未知错误");
+                }
+            };
+
+            const fetchMetrics = async () => {
+                try {
+                    const r = await axios.get("/metrics");
+                    metrics.value = parseProm(r.data);
+                } catch (e) {
+                    // 不覆盖 error,让 health 错误更显眼
+                    console.warn("metrics fetch failed:", e.message);
+                }
+            };
+
+            const refresh = async () => {
+                loading.value = true;
+                await Promise.all([fetchHealth(), fetchMetrics()]);
+                loading.value = false;
+                lastRefresh.value = new Date().toLocaleTimeString("zh-CN", { hour12: false });
+                error.value = null;
+            };
+
+            const formatTime = (iso) => {
+                if (!iso) return "-";
+                try {
+                    const d = new Date(iso);
+                    return d.toLocaleString("zh-CN", { hour12: false });
+                } catch { return iso; }
+            };
+
+            const formatUptime = (s) => {
+                if (!s) return "-";
+                const sec = parseInt(s);
+                if (isNaN(sec)) return s;
+                const d = Math.floor(sec / 86400);
+                const h = Math.floor((sec % 86400) / 3600);
+                const m = Math.floor((sec % 3600) / 60);
+                if (d > 0) return `${d}d ${h}h`;
+                if (h > 0) return `${h}h ${m}m`;
+                return `${m}m`;
+            };
+
+            const formatBytes = (b) => {
+                if (!b) return "0 B";
+                const k = 1024, sizes = ["B", "KB", "MB", "GB"];
+                const i = Math.floor(Math.log(b) / Math.log(k));
+                return (b / Math.pow(k, i)).toFixed(1) + " " + sizes[i];
+            };
+
+            onMounted(() => {
+                refresh();
+                setInterval(refresh, 10000);
+            });
+
+            return {
+                health, metrics, loading, error, lastRefresh,
+                totalRequests, okRequests, errRequests, successRate, successRateClass,
+                concurrencyActive, rateLimitRejected, concurrencyRejected, authFailed,
+                requestRows, durationRows, upstreamRows, ttfbRows, trafficRows, errorRows, usageRows,
+                refresh, formatBytes, formatUptime, formatTime
+            };
+        }
+    }).mount("#app");
+    </script>
+</body>
+</html>
