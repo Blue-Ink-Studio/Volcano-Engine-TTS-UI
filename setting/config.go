@@ -46,6 +46,12 @@ type ServerConfig struct {
 
 var Server ServerConfig
 
+// TrustedProxyHops 由 middleware.InitRateLimiter 在启动期写入,
+// 表示当前 XFF 解析模式:0=启发式,N>0=精确 N 跳。
+// setting.LogStartupSummary 读这个字段以展示运行期配置,
+// 不直接调用 middleware(避免循环 import)。
+var TrustedProxyHops int
+
 // InitAllConfigs 集中初始化所有配置,启动期调用一次。
 func InitAllConfigs() {
 	InitServerConfig()
@@ -255,6 +261,12 @@ func LogStartupSummary() {
 		log.Printf("ALLOWED_ORIGINS: 未设置(跨域请求将被拒绝)")
 	} else {
 		log.Printf("ALLOWED_ORIGINS: 已配置 %d 个允许的跨域来源白名单", len(CORS.Origins))
+	}
+
+	if h := TrustedProxyHops; h == 0 {
+		log.Printf("TRUSTED_PROXY_HOPS: 启发式模式(默认,XFF 链尾第一个公网 IP)")
+	} else {
+		log.Printf("TRUSTED_PROXY_HOPS: 精确模式,信任 %d 跳反代", h)
 	}
 
 	log.Printf("火山 TTS 必填项状态:")
