@@ -17,3 +17,6 @@ Thumbs.db
 .env
 .env.*
 !.env.example
+
+# Local-only working notes (use task board for shared tracking)
+TODO.md
