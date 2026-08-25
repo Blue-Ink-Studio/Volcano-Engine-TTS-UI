@@ -1,4 +1,4 @@
-﻿# Go build cache
+# Go build cache
 .gocache/
 *.exe
 *.test
@@ -12,3 +12,8 @@ Thumbs.db
 
 # Logs
 *.log
+
+# Secrets (do NOT commit local .env files; keep .env.example tracked as template)
+.env
+.env.*
+!.env.example

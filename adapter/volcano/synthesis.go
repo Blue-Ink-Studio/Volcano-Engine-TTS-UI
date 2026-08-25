@@ -116,7 +116,14 @@ func Synthesis(
 	duration := time.Since(started)
 
 	finalData := parsed.AudioData
+	// finalFormat 反映真实输出格式(用于 controller 写 Content-Type):
+	//   - wav 走 pcm 上游 + 本地拼头,对外仍是 wav
+	//   - aac/flac 在上方已被上游降级为 mp3,真实输出也是 mp3
+	//   - 其余与 clientFormat 一致
 	finalFormat := clientFormat
+	if clientFormat != "wav" {
+		finalFormat = opts.Format
+	}
 	sampleRate := opts.SampleRate
 	if clientFormat == "wav" {
 		wav, wrapErr := WrapWAVHeader(parsed.AudioData, opts.SampleRate)
