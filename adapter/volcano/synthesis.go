@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"log"
+	"strings"
 	"time"
 
 	"github.com/volcano-tts/tts-api/common"
@@ -94,10 +95,13 @@ func Synthesis(
 
 	if resp.StatusCode != 200 {
 		rawBody := ReadErrorBody(resp.Body)
+		// rawBody 来自上游响应体,可能是攻击者控制的恶意内容(例如包含
+		// \n 伪造日志行)。转义后再嵌入错误消息。
+		safeBody := strings.NewReplacer("\n", "\\n", "\r", "\\r").Replace(rawBody)
 		mtr.UpstreamFinished(opts.Speaker, opts.Model, opts.Format, fmt.Sprintf("http_%d", resp.StatusCode), time.Since(started), 0, 0, 0, resp.StatusCode)
 		return nil, &UpstreamError{
 			Code:    resp.StatusCode,
-			Message: fmt.Sprintf("upstream http %d: %s", resp.StatusCode, rawBody),
+			Message: fmt.Sprintf("upstream http %d: %s", resp.StatusCode, safeBody),
 			Stage:   "http",
 		}
 	}
