@@ -131,7 +131,10 @@ func (AdapterRecorder) UpstreamFinished(speaker, model, format, status string, d
 	if audioBytes > 0 {
 		UpstreamBytes.Add(float64(audioBytes), telemetry.Labels{"format": format})
 	}
-	if errCode != 0 {
+	// 上游调用只要 status != "ok" 即视为错误。原版 if errCode != 0 会漏掉
+	// errCode=0 的 request_error / transport_error / wrap_error / stream_error
+	// (code=0 的流错误) 等场景,导致 transport 类错误在 /metrics 上完全不可见。
+	if status != "ok" {
 		UpstreamErrors.Inc(telemetry.Labels{"code": codeLabel(errCode)})
 	}
 }
