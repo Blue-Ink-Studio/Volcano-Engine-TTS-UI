@@ -79,7 +79,7 @@ tts-api.exe
 
 | 变量名 | 说明 | 默认值 |
 |--------|------|--------|
-| `OPENAI_TTS_API_KEY` | OpenAI 兼容接口的 API Key(逗号分隔支持多个) | 无(不鉴权) |
+| `OPENAI_TTS_API_KEY` | 🔴 **公网必设** OpenAI 兼容接口的 API Key(逗号分隔支持多个);**未设置时鉴权完全关闭** | 无(不鉴权) |
 | `TRUSTED_PROXY_HOPS` | X-Forwarded-For 解析模式(0=启发式/默认,>0=精确 N 跳) | `0`(启发式) |
 | `PORT` | 服务监听端口 | `8080` |
 | `ALLOWED_ORIGINS` | CORS 跨域白名单(逗号分隔,调试可设 `*`;空则拒绝所有跨域) | 无 |
@@ -243,6 +243,8 @@ CORS拦截: 来源="https://..." 路径=/v1/audio/speech 方法=POST 客户端=.
 
 ## API 使用说明
 
+> ⚠️ **公网部署前必读**:如果你的服务暴露在公网,**必须**设置 `OPENAI_TTS_API_KEY` 或由前置反代(nginx / caddy)承担鉴权。未设置时 `Authorization` 头完全跳过校验,任何能访问 `:8080` 的人都能调用 TTS 合成,消耗你的火山额度。详见[部署 → 公网安全清单](#公网部署安全清单)。
+
 ### OpenAI 兼容接口
 
 **端点:** `POST /v1/audio/speech`
@@ -358,6 +360,40 @@ scrape_configs:
 
 `/dashboard` 展示服务状态 + 内存 + 配置信息,并内嵌 `/metrics` 预览;Grafana 等工具可直接基于上面指标做面板。
 
+### ⚠️ 公网部署:监控端点无鉴权
+
+`/metrics`、`/health`、`/dashboard` **均不鉴权**,这是对齐 Prometheus 抓取场景的设计权衡:
+
+| 端点 | 暴露内容 | 风险 |
+|---|---|---|
+| `/metrics` | 业务标签(speaker/model/format)、运行指标、错误计数 | 侦察面:可推断使用量、技术栈、错误模式 |
+| `/health` | 服务状态、版本号、运行时长、内存 | 侦察面:版本号可用于匹配已知 CVE |
+| `/dashboard` | 配置检查结果(含 `TTSConfigErr` 状态) | 信息泄露:可确认配置是否就绪 |
+
+**部署建议**:
+
+- **内网 / 反代后**:无影响,符合预期
+- **公网直接暴露**:在前置反代(nginx / caddy)上保护这些端点,示例 nginx 配置:
+
+  ```nginx
+  location /metrics {
+      auth_basic "metrics";
+      auth_basic_user_file /etc/nginx/.htpasswd;
+      allow 10.0.0.0/8;        # 仅允许 Prometheus 服务器网段
+      deny all;
+  }
+  location /dashboard {
+      auth_basic "admin";
+      auth_basic_user_file /etc/nginx/.htpasswd;
+  }
+  location /health {
+      allow 10.0.0.0/8;        # 或保留给监控系统访问
+      deny all;
+  }
+  ```
+
+- **最简方案**:反代层直接限制 `/metrics` 只能从 Prometheus 服务器 IP 访问,无需 basic auth
+
 ## 架构
 
 | 包 | 职责 |
@@ -409,6 +445,34 @@ docker compose up -d
 ```
 
 环境变量通过 `.env` 或 `docker-compose.yml` 传入。
+
+### 公网部署安全清单
+
+公网直接暴露(`:8080` 可被互联网任意访问)时,**至少满足以下两条之一**,否则视为不安全的部署:
+
+1. **设置 `OPENAI_TTS_API_KEY`**(推荐,最简单)
+   ```bash
+   # .env
+   OPENAI_TTS_API_KEY=<32+ 位随机字符串>
+   ```
+   客户端请求时带 `Authorization: Bearer <那个字符串>`。
+
+2. **前置反代承担鉴权**(nginx / caddy / Cloudflare Access)
+   - 反代层做 basic auth、mTLS、Cloudflare Access 等任一方案
+   - 反代**仅**把鉴权后的请求转发到 `:8080`,Go 服务本身保持"无鉴权"
+   - 此时 `OPENAI_TTS_API_KEY` 可不设
+
+**两个端点还需要单独保护**(无论上面哪种方案):
+
+- `/metrics`:暴露业务标签与运行指标,详见[观测 / Metrics → 公网部署](#公网部署监控端点无鉴权)
+- `/dashboard`:暴露配置检查结果,同上
+
+**未做保护的典型风险**:
+- 任意人 curl `POST /v1/audio/speech` → 消耗你火山账号的字符额度
+- 任意人 `GET /metrics` → 推断你的使用量、技术栈、错误模式
+- 任意人 `GET /dashboard` → 确认你 TTS 配置就绪状态
+
+**内网部署 / 私网反代后**:这些警示不适用,直接用就行。
 
 ## 常见问题
 
