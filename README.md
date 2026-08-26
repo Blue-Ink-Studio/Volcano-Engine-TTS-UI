@@ -63,7 +63,7 @@ tts-api.exe
 |--------|------|--------|
 | `BYTEDANCE_TTS_TIMEOUT` | 单次合成超时 | `30s` |
 | `BYTEDANCE_TTS_FORMAT` | 上游实际请求的音频格式(mp3 / pcm / ogg_opus);客户端要求 wav 时内部自动转 pcm + 本地拼 WAV 头 | `mp3` |
-| `BYTEDANCE_TTS_SAMPLE_RATE` | 上游采样率(8000 / 16000 / 22050 / 24000 / 32000 / 44100 / 48000) | `24000` |
+| `BYTEDANCE_TTS_SAMPLE_RATE` | 上游采样率(8000 / 16000 / 22050 / 24000 / 32000 / 44100 / 48000);**此值直接写入 WAV 头,需与上游实际 PCM 采样率一致,否则音频变速变调** | `24000` |
 | `BYTEDANCE_TTS_BIT_RATE` | MP3 比特率,仅 mp3 生效 | 无 |
 
 ### 复刻 2.0 扩展参数
@@ -270,7 +270,7 @@ CORS拦截: 来源="https://..." 路径=/v1/audio/speech 方法=POST 客户端=.
 - `input` — 要合成的文本
 - `voice` — 发音人(OpenAI 兼容,实际用 `BYTEDANCE_TTS_SPEAKER`)
 - `response_format` — 输出格式:`mp3`(默认)/ `opus`(映射 ogg_opus)/ `wav` / `pcm` / `aac` / `flac`(降级到 mp3)
-- `speed` — 语速,0.25 ~ 4.0(火山侧转换为 speech_rate [-50, 100])
+- `speed` — 语速倍率,客户端接受范围 0.25 ~ 4.0;**火山实际生效范围 0.5 ~ 2.0**(speech_rate [-50, 100]),超出范围会被静默截断,客户端无感反馈
 
 **格式映射:**
 
