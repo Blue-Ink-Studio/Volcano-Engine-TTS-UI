@@ -58,15 +58,6 @@ type V3Usage struct {
 	TextWords int `json:"text_words"`
 }
 
-// ByteDanceTTSConfig 是 setting 包的全局 TTS 配置,目前只承载鉴权 / URL / 超时;
-// 完整的合成参数见 adapter/volcano.Options。
-type ByteDanceTTSConfig struct {
-	ApiKey     string
-	ResourceId string
-	URL        string
-	Timeout    time.Duration
-}
-
 // SynthesisResult 是火山适配器向 controller 返回的最终结果。
 // Format 与 AudioData 的实际编码一致;controller 据此设置响应 Content-Type。
 type SynthesisResult struct {

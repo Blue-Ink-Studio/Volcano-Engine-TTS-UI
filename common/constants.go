@@ -15,8 +15,6 @@ const (
 	MaxRequestBodySize    = 1024 * 1024
 	RateLimitRequests     = 100
 	RateLimitWindow       = time.Minute
-	MaxResponseTimes      = 100
-	MaxErrors             = 10
 	MaxConcurrentRequests = 10
 	CleanupInterval       = time.Hour
 	MaxModelNameLength    = 64

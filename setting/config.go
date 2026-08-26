@@ -10,7 +10,6 @@ import (
 
 	"github.com/volcano-tts/tts-api/adapter/volcano"
 	"github.com/volcano-tts/tts-api/common"
-	"github.com/volcano-tts/tts-api/dto"
 )
 
 // 全部环境变量读取的单一入口:其它包不允许直接 os.Getenv,只读这里的全局 Config。
@@ -317,7 +316,3 @@ func CheckStaticFiles() {
 		log.Println("警告: health.html 不存在,/dashboard 路由将返回 404")
 	}
 }
-
-// 保留 dto.ByteDanceTTSConfig 引用避免 import 警告;
-// 新代码不应再使用这个类型,设置已在 TTSOptions 中。
-var _ = dto.ByteDanceTTSConfig{}

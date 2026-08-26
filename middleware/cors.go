@@ -13,13 +13,6 @@ var (
 	corsMaxAgeHeader = "86400"
 )
 
-// InitCORSConfig 已在 setting.InitCORSConfig 中完成,这里保留为 no-op 以维持现有调用顺序。
-// 实际 CORS 匹配逻辑直接读 setting.CORS.Origins / setting.CORS.AllowAll。
-func InitCORSConfig() {
-	// 配置由 setting 包统一加载,日志也由 setting.LogStartupSummary 输出。
-	_ = setting.CORS
-}
-
 func isValidOrigin(origin string) bool {
 	if origin == "" || origin == "null" || origin == "nil" {
 		return false

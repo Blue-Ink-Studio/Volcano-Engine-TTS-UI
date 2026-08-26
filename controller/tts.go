@@ -46,9 +46,6 @@ func resolveClientFormat(reqFmt string) string {
 		}
 		return strings.ToLower(reqFmt)
 	}
-	if reqFmt == "" {
-		return setting.TTSOptions.Format
-	}
 	return setting.TTSOptions.Format
 }
 

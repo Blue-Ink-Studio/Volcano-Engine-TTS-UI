@@ -9,13 +9,6 @@ import (
 	"github.com/volcano-tts/tts-api/setting"
 )
 
-// InitAPIKeys 已在 setting.InitAuthConfig 中完成,这里保留为 no-op 以维持现有调用顺序。
-// 实际鉴权逻辑直接读 setting.Auth.APIKeys。
-func InitAPIKeys() {
-	// 配置由 setting 包统一加载,日志也由 setting.LogStartupSummary 输出。
-	_ = setting.Auth
-}
-
 func ValidateAPIKey(r *http.Request) bool {
 	if len(setting.Auth.APIKeys) == 0 {
 		return true
