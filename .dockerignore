@@ -1,7 +1,8 @@
 *.exe
 *.md
 .env
-.env.example
+.env.*
+!.env.example
 .git
 .gitignore
 tts_api_architecture.html

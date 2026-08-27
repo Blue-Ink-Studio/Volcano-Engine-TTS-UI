@@ -18,6 +18,7 @@ import (
 	"github.com/volcano-tts/tts-api/middleware"
 	"github.com/volcano-tts/tts-api/setting"
 	"github.com/volcano-tts/tts-api/telemetry"
+	"github.com/volcano-tts/tts-api/version"
 )
 
 var (
@@ -45,9 +46,6 @@ func resolveClientFormat(reqFmt string) string {
 			return "ogg_opus"
 		}
 		return strings.ToLower(reqFmt)
-	}
-	if reqFmt == "" {
-		return setting.TTSOptions.Format
 	}
 	return setting.TTSOptions.Format
 }
@@ -232,7 +230,8 @@ func HealthHandler(w http.ResponseWriter, r *http.Request) {
 	resp := dto.HealthResponse{
 		Status:    status,
 		Service:   "ByteDance TTS to OpenAI API Adapter",
-		Version:   "2.0.0 (v3 API)",
+		Version:   version.Version,
+		Commit:    version.Commit,
 		Uptime:    fmt.Sprintf("%.0f seconds", time.Since(startTime).Seconds()),
 		StartTime: startTime.Format(time.RFC3339),
 		Memory:    collectMemorySnapshot(),

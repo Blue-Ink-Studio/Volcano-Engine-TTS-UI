@@ -7,7 +7,15 @@ RUN go mod download
 
 COPY . .
 
-RUN CGO_ENABLED=0 GOOS=linux go build -o tts-api .
+# VERSION 由 CI/CD 传入,通常为 `git describe --tags --always --dirty` 的输出
+# COMMIT 为 `git rev-parse --short HEAD`
+# 本地默认 dev
+ARG VERSION=dev
+ARG COMMIT=dev
+RUN CGO_ENABLED=0 GOOS=linux go build \
+    -ldflags "-X github.com/volcano-tts/tts-api/version.Version=${VERSION} \
+              -X github.com/volcano-tts/tts-api/version.Commit=${COMMIT}" \
+    -o tts-api .
 
 FROM alpine:3.21
 

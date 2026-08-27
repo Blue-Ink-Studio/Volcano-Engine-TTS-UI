@@ -10,7 +10,6 @@ import (
 
 	"github.com/volcano-tts/tts-api/adapter/volcano"
 	"github.com/volcano-tts/tts-api/common"
-	"github.com/volcano-tts/tts-api/dto"
 )
 
 // 全部环境变量读取的单一入口:其它包不允许直接 os.Getenv,只读这里的全局 Config。
@@ -45,6 +44,12 @@ type ServerConfig struct {
 }
 
 var Server ServerConfig
+
+// TrustedProxyHops 由 middleware.InitRateLimiter 在启动期写入,
+// 表示当前 XFF 解析模式:0=启发式,N>0=精确 N 跳。
+// setting.LogStartupSummary 读这个字段以展示运行期配置,
+// 不直接调用 middleware(避免循环 import)。
+var TrustedProxyHops int
 
 // InitAllConfigs 集中初始化所有配置,启动期调用一次。
 func InitAllConfigs() {
@@ -257,6 +262,12 @@ func LogStartupSummary() {
 		log.Printf("ALLOWED_ORIGINS: 已配置 %d 个允许的跨域来源白名单", len(CORS.Origins))
 	}
 
+	if h := TrustedProxyHops; h == 0 {
+		log.Printf("TRUSTED_PROXY_HOPS: 启发式模式(默认,XFF 链尾第一个公网 IP)")
+	} else {
+		log.Printf("TRUSTED_PROXY_HOPS: 精确模式,信任 %d 跳反代", h)
+	}
+
 	log.Printf("火山 TTS 必填项状态:")
 	type ttsCheck struct {
 		name  string
@@ -305,7 +316,3 @@ func CheckStaticFiles() {
 		log.Println("警告: health.html 不存在,/dashboard 路由将返回 404")
 	}
 }
-
-// 保留 dto.ByteDanceTTSConfig 引用避免 import 警告;
-// 新代码不应再使用这个类型,设置已在 TTSOptions 中。
-var _ = dto.ByteDanceTTSConfig{}

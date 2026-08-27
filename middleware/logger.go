@@ -3,6 +3,7 @@ package middleware
 import (
 	"log"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -23,6 +24,9 @@ func Logger(next http.Handler) http.Handler {
 		next.ServeHTTP(rec, r)
 		duration := time.Since(start)
 
-		log.Printf("%s %s %s %d %v", r.Method, r.RequestURI, r.RemoteAddr, rec.statusCode, duration)
+		// r.RequestURI 是未经解析的原始请求行,攻击者可在 URL 中注入
+		// \n / \r 伪造日志行。转义为可见字符后再记录。
+		uri := strings.NewReplacer("\n", "\\n", "\r", "\\r").Replace(r.RequestURI)
+		log.Printf("%s %s %s %d %v", r.Method, uri, r.RemoteAddr, rec.statusCode, duration)
 	})
 }

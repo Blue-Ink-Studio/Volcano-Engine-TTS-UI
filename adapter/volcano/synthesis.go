@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"log"
+	"strings"
 	"time"
 
 	"github.com/volcano-tts/tts-api/common"
@@ -94,10 +95,13 @@ func Synthesis(
 
 	if resp.StatusCode != 200 {
 		rawBody := ReadErrorBody(resp.Body)
+		// rawBody 来自上游响应体,可能是攻击者控制的恶意内容(例如包含
+		// \n 伪造日志行)。转义后再嵌入错误消息。
+		safeBody := strings.NewReplacer("\n", "\\n", "\r", "\\r").Replace(rawBody)
 		mtr.UpstreamFinished(opts.Speaker, opts.Model, opts.Format, fmt.Sprintf("http_%d", resp.StatusCode), time.Since(started), 0, 0, 0, resp.StatusCode)
 		return nil, &UpstreamError{
 			Code:    resp.StatusCode,
-			Message: fmt.Sprintf("upstream http %d: %s", resp.StatusCode, rawBody),
+			Message: fmt.Sprintf("upstream http %d: %s", resp.StatusCode, safeBody),
 			Stage:   "http",
 		}
 	}
@@ -116,7 +120,14 @@ func Synthesis(
 	duration := time.Since(started)
 
 	finalData := parsed.AudioData
+	// finalFormat 反映真实输出格式(用于 controller 写 Content-Type):
+	//   - wav 走 pcm 上游 + 本地拼头,对外仍是 wav
+	//   - aac/flac 在上方已被上游降级为 mp3,真实输出也是 mp3
+	//   - 其余与 clientFormat 一致
 	finalFormat := clientFormat
+	if clientFormat != "wav" {
+		finalFormat = opts.Format
+	}
 	sampleRate := opts.SampleRate
 	if clientFormat == "wav" {
 		wav, wrapErr := WrapWAVHeader(parsed.AudioData, opts.SampleRate)
