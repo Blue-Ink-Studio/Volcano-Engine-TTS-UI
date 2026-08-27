@@ -7,6 +7,7 @@ type HealthResponse struct {
 	Status       string                 `json:"status"`
 	Service      string                 `json:"service"`
 	Version      string                 `json:"version"`
+	Commit       string                 `json:"commit"`
 	Uptime       string                 `json:"uptime"`
 	StartTime    string                 `json:"start_time"`
 	Memory       map[string]interface{} `json:"memory"`
