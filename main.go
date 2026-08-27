@@ -23,7 +23,6 @@ func main() {
 	setting.InitAllConfigs()
 	metrics.Init()
 	middleware.InitRateLimiter()
-	setting.CheckStaticFiles()
 	controller.InitController()
 	setting.LogStartupSummary()
 

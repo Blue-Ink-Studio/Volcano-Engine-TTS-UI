@@ -20,3 +20,6 @@ Thumbs.db
 
 # Local-only working notes (use task board for shared tracking)
 TODO.md
+
+# Release artifacts (build output)
+release/

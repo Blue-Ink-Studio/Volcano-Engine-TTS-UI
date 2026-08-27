@@ -25,7 +25,7 @@ RUN apk --no-cache add ca-certificates tzdata \
 WORKDIR /app
 
 COPY --from=builder /app/tts-api .
-COPY --from=builder /app/health.html .
+# health.html 已通过 //go:embed 嵌入 binary,无需单独复制
 
 RUN chown -R appuser:appgroup /app
 

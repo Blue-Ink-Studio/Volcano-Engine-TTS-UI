@@ -20,7 +20,8 @@ func Setup() *mux.Router {
 	r.HandleFunc("/v1/audio/speech", controller.OpenaiTTSHandler).Methods("POST", "OPTIONS")
 	r.HandleFunc("/health", controller.HealthHandler).Methods("GET")
 	r.HandleFunc("/dashboard", func(w http.ResponseWriter, r *http.Request) {
-		http.ServeFile(w, r, "health.html")
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Write(dashboardHTML)
 	}).Methods("GET")
 	r.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/dashboard", http.StatusFound)

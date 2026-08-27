@@ -309,10 +309,3 @@ func maskAPIKey(key string) string {
 	}
 	return key[:4] + "****" + key[len(key)-4:]
 }
-
-// CheckStaticFiles 检查 /dashboard 路由依赖的 health.html 是否存在。
-func CheckStaticFiles() {
-	if _, err := os.Stat("health.html"); os.IsNotExist(err) {
-		log.Println("警告: health.html 不存在,/dashboard 路由将返回 404")
-	}
-}
