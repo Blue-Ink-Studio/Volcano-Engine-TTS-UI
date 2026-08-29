@@ -158,7 +158,7 @@ TRUSTED_PROXY_HOPS 未设置,使用默认启发式模式(XFF 链尾第一个公�
 已配置 TRUSTED_PROXY_HOPS=2(精确模式,信任 2 跳反代)
 ```
 
-也可在 `GetClientIP` 临时加 `log.Printf` 打印解析结果,或写一个 Go 测试用例(参见 DEBT-1 单元测试任务)来覆盖不同 XFF 链场景。生产环境不要保留 debug 日志。
+也可在 `GetClientIP` 临时加 `log.Printf` 打印解析结果,或参考已有的 `middleware/ratelimit_test.go`(24 个 XFF 表驱动用例)来扩展更多 XFF 链场景。生产环境不要保留 debug 日志。
 
 ### Resource ID 说明
 

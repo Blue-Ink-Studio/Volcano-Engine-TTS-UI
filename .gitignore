@@ -4,6 +4,9 @@
 *.test
 *.out
 
+# Go test sources (prevent accidental commit; tests live outside the repo by policy)
+*_test.go
+
 # Editor / OS
 .vscode/
 .idea/
