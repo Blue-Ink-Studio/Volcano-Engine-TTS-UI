@@ -155,6 +155,7 @@
             <div class="tabs">
                 <div class="tab" :class="{active: tab==='dashboard'}" @click="tab='dashboard'">仪表盘</div>
                 <div class="tab" :class="{active: tab==='voices'}" @click="tab='voices'">音色</div>
+                <div class="tab" :class="{active: tab==='settings'}" @click="tab='settings'">设置</div>
             </div>
 
             <!-- Dashboard -->
@@ -224,6 +225,64 @@
                 </div>
             </div>
 
+            <!-- Settings -->
+            <div v-if="tab==='settings'">
+                <div class="card">
+                    <div class="card-title">火山 TTS 凭证</div>
+                    <div class="card-desc" style="color: var(--text-dim); font-size: 12px; margin-bottom: 16px;">改完点保存,立即生效,无需重启服务。</div>
+
+                    <div class="field">
+                        <label>API Key (打码显示: <span style="color: var(--accent); font-family: monospace;">{{ settings.api_key || '(未设置)' }}</span>)</label>
+                        <div style="display: flex; gap: 8px;">
+                            <input type="password" v-model="apiKeyInput" :placeholder="settings.api_key_set ? '不改留空' : '输入新 API Key'" style="flex: 1;">
+                            <button class="btn btn-primary" @click="saveApiKey" :disabled="!apiKeyInput">更新 Key</button>
+                        </div>
+                        <div class="hint">独立端点 /api/settings/api-key,与其他字段分开传输</div>
+                    </div>
+
+                    <div style="height: 1px; background: var(--border); margin: 20px 0;"></div>
+
+                    <div class="card-title" style="font-size: 13px;">路由与格式</div>
+                    <div class="field">
+                        <label>默认资源 ID</label>
+                        <input v-model="settingsForm.default_resource_id" placeholder="volc.megatts.default">
+                    </div>
+                    <div class="field">
+                        <label>默认音色 (name)</label>
+                        <select v-model="settingsForm.default_speaker">
+                            <option value="">—</option>
+                            <option v-for="v in voices" :key="v.name" :value="v.name">{{ v.name }} ({{ v.speaker }})</option>
+                        </select>
+                        <div class="hint">未传 voice 时使用。必须是"音色" tab 里存在的 name</div>
+                    </div>
+                    <div class="field">
+                        <label>默认输出格式</label>
+                        <select v-model="settingsForm.default_format">
+                            <option value="mp3">mp3</option>
+                            <option value="wav">wav</option>
+                            <option value="opus">opus (ogg_opus)</option>
+                            <option value="pcm">pcm</option>
+                            <option value="aac">aac</option>
+                            <option value="flac">flac</option>
+                        </select>
+                    </div>
+                    <div class="field">
+                        <label>采样率 (Hz)</label>
+                        <input type="number" v-model.number="settingsForm.sample_rate" min="8000" max="48000" step="1000">
+                    </div>
+                    <div class="field">
+                        <label>Model (可选)</label>
+                        <input v-model="settingsForm.model" placeholder="seed-tts-2.0-standard">
+                    </div>
+                    <div v-if="settingsErr" class="err">{{ settingsErr }}</div>
+                    <div v-if="settingsOk" class="ok" style="color: var(--success); font-size: 12px; margin-top: 8px;">✓ 已保存,运行时已 reload</div>
+                    <div style="margin-top: 16px;">
+                        <button class="btn btn-primary" @click="saveSettings" :disabled="savingSettings">{{ savingSettings ? '保存中...' : '保存设置' }}</button>
+                        <button class="btn" @click="resetSettingsForm" style="margin-left: 8px;">重置</button>
+                    </div>
+                </div>
+            </div>
+
             <div v-if="actionErr" class="err" style="margin-top: 16px;">⚠ {{ actionErr }}</div>
         </div>
 
@@ -268,6 +327,14 @@
             const addErr = ref('');
             const form = ref({ name: '', speaker: '', resource_id: 'volc.megatts.icl', model: 'seed-tts-2.0-standard', language: '', description: '' });
 
+            // 设置页 (M3)
+            const settings = ref({});
+            const settingsForm = ref({ default_resource_id: '', default_speaker: '', default_format: 'mp3', sample_rate: 24000, model: '' });
+            const apiKeyInput = ref('');
+            const savingSettings = ref(false);
+            const settingsErr = ref('');
+            const settingsOk = ref(false);
+
             const http = axios.create({ baseURL: '/api' });
             http.interceptors.request.use(c => {
                 if (apiKey.value) c.headers.Authorization = 'Bearer ' + apiKey.value;
@@ -281,7 +348,7 @@
                 return Promise.reject(err);
             });
 
-            watch(tab, v => { location.hash = v; });
+            watch(tab, v => { location.hash = v; if (v === 'settings') loadSettings(); });
             window.addEventListener('hashchange', () => { tab.value = location.hash.slice(1) || 'dashboard'; });
 
             const login = async () => {
@@ -307,7 +374,55 @@
                     voices.value = r.data.voices || [];
                 } catch (e) { actionErr.value = '加载音色失败: ' + e.message; }
             };
+            const loadSettings = async () => {
+                try {
+                    const r = await http.get('/settings');
+                    settings.value = r.data;
+                    settingsForm.value = {
+                        default_resource_id: r.data.default_resource_id || '',
+                        default_speaker: r.data.default_speaker || '',
+                        default_format: r.data.default_format || 'mp3',
+                        sample_rate: r.data.sample_rate || 24000,
+                        model: r.data.model || '',
+                    };
+                    settingsOk.value = false;
+                } catch (e) { settingsErr.value = '加载设置失败: ' + (e.response?.data?.error?.message || e.message); }
+            };
             const reloadAll = () => { loadOverview(); loadVoices(); };
+
+            const saveSettings = async () => {
+                settingsErr.value = ''; settingsOk.value = false;
+                savingSettings.value = true;
+                try {
+                    await http.put('/settings', {
+                        default_resource_id: settingsForm.value.default_resource_id,
+                        default_speaker: settingsForm.value.default_speaker,
+                        default_format: settingsForm.value.default_format,
+                        sample_rate: settingsForm.value.sample_rate,
+                        model: settingsForm.value.model,
+                    });
+                    await loadSettings();
+                    await loadOverview();
+                    settingsOk.value = true;
+                    setTimeout(() => settingsOk.value = false, 3000);
+                } catch (e) {
+                    settingsErr.value = e.response?.data?.error?.message || e.message;
+                } finally { savingSettings.value = false; }
+            };
+            const saveApiKey = async () => {
+                settingsErr.value = ''; settingsOk.value = false;
+                if (!apiKeyInput.value) { settingsErr.value = 'API Key 不能为空'; return; }
+                try {
+                    await http.put('/settings/api-key', { api_key: apiKeyInput.value });
+                    apiKeyInput.value = '';
+                    await loadSettings();
+                    settingsOk.value = true;
+                    setTimeout(() => settingsOk.value = false, 3000);
+                } catch (e) {
+                    settingsErr.value = e.response?.data?.error?.message || e.message;
+                }
+            };
+            const resetSettingsForm = () => { loadSettings(); };
 
             const openAdd = () => {
                 form.value = { name: '', speaker: '', resource_id: 'volc.megatts.icl', model: 'seed-tts-2.0-standard', language: '', description: '' };
@@ -351,6 +466,8 @@
 
             return { apiKey, keyInput, loginErr, login, logout, tab, overview, voices, actionErr,
                 showAdd, form, addErr, adding, openAdd, submitAdd, toggle, remove,
+                settings, settingsForm, apiKeyInput, savingSettings, settingsErr, settingsOk,
+                loadSettings, saveSettings, saveApiKey, resetSettingsForm,
                 formatUptime, shortPath, reloadAll };
         },
     }).mount('#app');

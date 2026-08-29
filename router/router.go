@@ -80,6 +80,11 @@ func Setup() *mux.Router {
 	r.Handle("/api/voices/{name}", middleware.RequireAdmin(http.HandlerFunc(controller.AdminVoiceDeleteHandler))).Methods("DELETE")
 	r.Handle("/api/voices/{name}/toggle", middleware.RequireAdmin(http.HandlerFunc(controller.AdminVoiceToggleHandler))).Methods("PATCH")
 
+	// /api/settings 全局设置 (鉴权) — M3
+	r.Handle("/api/settings", middleware.RequireAdmin(http.HandlerFunc(controller.SettingsGetHandler))).Methods("GET")
+	r.Handle("/api/settings", middleware.RequireAdmin(http.HandlerFunc(controller.SettingsUpdateHandler))).Methods("PUT")
+	r.Handle("/api/settings/api-key", middleware.RequireAdmin(http.HandlerFunc(controller.SettingsAPIKeyHandler))).Methods("PUT")
+
 	// 业务路由
 	r.HandleFunc("/v1/audio/speech", controller.OpenaiTTSHandler).Methods("POST", "OPTIONS")
 	r.HandleFunc("/health", controller.HealthHandler).Methods("GET")

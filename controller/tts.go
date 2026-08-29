@@ -18,6 +18,7 @@ import (
 	"github.com/volcano-tts/tts-api/metrics"
 	"github.com/volcano-tts/tts-api/middleware"
 	"github.com/volcano-tts/tts-api/setting"
+	"github.com/volcano-tts/tts-api/store"
 	"github.com/volcano-tts/tts-api/telemetry"
 	"github.com/volcano-tts/tts-api/version"
 )
@@ -152,6 +153,44 @@ func OpenaiTTSHandler(w http.ResponseWriter, r *http.Request) {
 
 	opts := setting.TTSOptions
 	opts.Text = req.Input
+
+	// M3: voice 路由
+	//   - voice 为空 → 用 setting.TTSOptions.Speaker (即 store 里的 default_speaker)
+	//   - voice 非空 → 查 voices 表,替换 opts.Speaker / ResourceID / Model
+	//   - 命中但 enabled=0 → 仍可用(用户显式传 voice 即覆盖 enabled 状态;若想禁用在 admin UI 关掉就行)
+	//   - 未命中 → 400 "unknown voice: <name>"
+	if req.Voice != "" {
+		s := GetAdminStore()
+		if s == nil {
+			log.Printf("警告: voice=%s 路由但 store 未初始化 - 路径=%s", req.Voice, r.URL.Path)
+			middleware.SendJSONError(w, http.StatusServiceUnavailable,
+				"voice routing requires database; not initialized",
+				"configuration_error", "db_not_ready")
+			return
+		}
+		v, err := s.VoiceGetByName(req.Voice)
+		if err != nil {
+			if err == store.ErrNotFound {
+				log.Printf("警告: 未知 voice=%s - 路径=%s 客户端=%s", req.Voice, r.URL.Path, middleware.GetClientIP(r))
+				middleware.SendJSONError(w, http.StatusBadRequest,
+					fmt.Sprintf("unknown voice: %s", req.Voice),
+					"invalid_request_error", "unknown_voice")
+				return
+			}
+			log.Printf("警告: voice 查库失败 - 错误=%v voice=%s", err, req.Voice)
+			middleware.SendJSONError(w, http.StatusInternalServerError,
+				"voice lookup failed", "server_error", "db_read_failed")
+			return
+		}
+		// 覆盖 opts(API key / UID 保留自 setting.TTSOptions)
+		opts.Speaker = v.Speaker
+		opts.ResourceID = v.ResourceID
+		if v.Model != "" {
+			opts.Model = v.Model
+		}
+		log.Printf("[tts] voice=%s 命中 (speaker=%s resource=%s model=%s) - 客户端=%s",
+			req.Voice, v.Speaker, v.ResourceID, v.Model, middleware.GetClientIP(r))
+	}
 
 	ctx, cancel := context.WithTimeout(r.Context(), setting.TTSTimeout)
 	defer cancel()

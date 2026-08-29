@@ -17,7 +17,7 @@ import (
 
 // 全部环境变量读取的单一入口:其它包不允许直接 os.Getenv,只读这里的全局 Config。
 
-// TTSOptions 是火山 v3 TTS 调用的完整参数集合,启动期由 InitTTSConfig 填充。
+// TTSOptions 是火山 v3 TTS 调用的完整参数集合,启动期由 LoadRuntimeConfig 从 store 填充。
 // 业务侧(controller)直接读取并传入 volcano.Synthesis。
 var (
 	TTSOptions   volcano.Options
@@ -74,7 +74,7 @@ func InitAllConfigs() {
 	InitAuthConfig()
 	InitCORSConfig()
 	InitSetupToken()
-	TTSConfigErr = InitTTSConfig()
+	// InitTTSConfig 不再这里调 — 改为启动期从 store 加载(LoadRuntimeConfig)。
 }
 
 func InitServerConfig() {
@@ -127,33 +127,62 @@ func normalizeOrigin(origin string) string {
 	return strings.ToLower(origin)
 }
 
-// InitTTSConfig 读取火山 TTS 必填和可选配置,填充 TTSOptions 与 TTSTimeout。
-// 必填项缺失时返回 error,/v1/audio/speech 路由会拒绝请求。
-func InitTTSConfig() error {
-	apiKey := os.Getenv("BYTEDANCE_TTS_API_KEY")
-	resourceId := os.Getenv("BYTEDANCE_TTS_RESOURCE_ID")
-	speaker := os.Getenv("BYTEDANCE_TTS_SPEAKER")
-	missing := []string{}
-	if apiKey == "" {
-		missing = append(missing, "BYTEDANCE_TTS_API_KEY")
-	}
-	if resourceId == "" {
-		missing = append(missing, "BYTEDANCE_TTS_RESOURCE_ID")
-	}
-	if speaker == "" {
-		missing = append(missing, "BYTEDANCE_TTS_SPEAKER")
-	}
-	if len(missing) > 0 {
-		return fmt.Errorf("缺少必需的环境变量: %v", missing)
+// LoadRuntimeConfig 从 store 加载 TTS 全局配置到 TTSOptions / TTSTimeout 内存。
+// 启动期(master 模式)调一次,或 PUT /api/settings 后调一次(改完立即生效)。
+//
+// 与原 InitTTSConfig 的区别:
+//   - 不再读 BYTEDANCE_TTS_* env;全部从 store.Settings 读
+//   - 必填项(api_key / default_resource_id / default_speaker)缺失时返 error
+//   - 失败时 TTSConfigErr 被设置,/v1/audio/speech 路由会返 503
+//   - 成功时清空 TTSConfigErr
+//
+// 字段映射(原 env → store key):
+//   BYTEDANCE_TTS_API_KEY        → api_key
+//   BYTEDANCE_TTS_RESOURCE_ID    → default_resource_id
+//   BYTEDANCE_TTS_SPEAKER        → default_speaker
+//   BYTEDANCE_TTS_MODEL          → model
+//   BYTEDANCE_TTS_FORMAT         → default_format (默认 mp3)
+//   BYTEDANCE_TTS_SAMPLE_RATE    → sample_rate (默认 24000)
+//   BYTEDANCE_TTS_BIT_RATE       → bit_rate (默认 0)
+//   BYTEDANCE_TTS_MODEL_TYPE     → model_type (默认 0)
+//   BYTEDANCE_TTS_EXPLICIT_LANGUAGE → explicit_language
+//   BYTEDANCE_TTS_ENABLE_SUBTITLE   → enable_subtitle (默认 false)
+//   BYTEDANCE_TTS_TIMEOUT        → TTSTimeout (默认 30s)
+func LoadRuntimeConfig(s Store) error {
+	all, err := s.SettingsGetAll()
+	if err != nil {
+		TTSConfigErr = fmt.Errorf("read settings failed: %w", err)
+		return TTSConfigErr
 	}
 
-	model := os.Getenv("BYTEDANCE_TTS_MODEL")
-	format := getEnvDefault("BYTEDANCE_TTS_FORMAT", "mp3")
-	sampleRate := getEnvInt("BYTEDANCE_TTS_SAMPLE_RATE", 24000)
-	bitRate := getEnvInt("BYTEDANCE_TTS_BIT_RATE", 0)
-	modelType := getEnvInt("BYTEDANCE_TTS_MODEL_TYPE", 0)
-	explicitLanguage := os.Getenv("BYTEDANCE_TTS_EXPLICIT_LANGUAGE")
-	enableSubtitle := getEnvBool("BYTEDANCE_TTS_ENABLE_SUBTITLE", false)
+	apiKey := all["api_key"]
+	resourceId := all["default_resource_id"]
+	speaker := all["default_speaker"]
+	missing := []string{}
+	if apiKey == "" {
+		missing = append(missing, "api_key")
+	}
+	if resourceId == "" {
+		missing = append(missing, "default_resource_id")
+	}
+	if speaker == "" {
+		missing = append(missing, "default_speaker")
+	}
+	if len(missing) > 0 {
+		TTSConfigErr = fmt.Errorf("missing required settings: %v", missing)
+		return TTSConfigErr
+	}
+
+	model := all["model"]
+	format := all["default_format"]
+	if format == "" {
+		format = "mp3"
+	}
+	sampleRate, _ := s.SettingsGetInt("sample_rate", 24000)
+	bitRate, _ := s.SettingsGetInt("bit_rate", 0)
+	modelType, _ := s.SettingsGetInt("model_type", 0)
+	explicitLanguage := all["explicit_language"]
+	enableSubtitle, _ := s.SettingsGetBool("enable_subtitle", false)
 
 	var adds *volcano.Additions
 	if modelType != 0 || explicitLanguage != "" {
@@ -168,17 +197,10 @@ func InitTTSConfig() error {
 	}
 
 	TTSTimeout = common.DefaultTimeout
-	if ts := os.Getenv("BYTEDANCE_TTS_TIMEOUT"); ts != "" {
-		if d, err := time.ParseDuration(ts); err == nil {
-			TTSTimeout = d
-		} else {
-			log.Printf("无效的超时设置 %q,使用默认值 %v", ts, TTSTimeout)
-		}
-	}
-
-	common.DebugLog = getEnvBool("BYTEDANCE_TTS_DEBUG", false)
-	if common.DebugLog {
-		log.Println("调试日志已启用 BYTEDANCE_TTS_DEBUG")
+	if v, err := s.SettingsGetDuration("timeout", common.DefaultTimeout); err == nil {
+		TTSTimeout = v
+	} else {
+		TTSTimeout = common.DefaultTimeout
 	}
 
 	TTSOptions = volcano.Options{
@@ -195,7 +217,16 @@ func InitTTSConfig() error {
 		EnableSubtitle: enableSubtitle,
 		Additions:      adds,
 	}
+	TTSConfigErr = nil
 	return nil
+}
+
+// Store 是 LoadRuntimeConfig 需要的最小接口(避免 setting 包 import store 产生 cycle)。
+type Store interface {
+	SettingsGetAll() (map[string]string, error)
+	SettingsGetInt(key string, def int) (int, error)
+	SettingsGetBool(key string, def bool) (bool, error)
+	SettingsGetDuration(key string, def time.Duration) (time.Duration, error)
 }
 
 func getEnvDefault(name, def string) string {

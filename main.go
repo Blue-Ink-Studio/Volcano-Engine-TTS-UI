@@ -55,6 +55,15 @@ func main() {
 		metrics.Meter.Handler().ServeHTTP(w, &http.Request{})
 		return nil
 	})
+	// M3: 从 store 加载运行时 TTS 配置(替代原来的 env-based InitTTSConfig)
+	if st != nil {
+		if err := setting.LoadRuntimeConfig(st); err != nil {
+			log.Printf("[main] TTS 运行时配置加载失败:%v(将保持 install mode 或返 503)", err)
+		} else {
+			log.Printf("[main] TTS 运行时配置已加载(api_key=***, speaker=%s, resource=%s, format=%s)",
+				setting.TTSOptions.Speaker, setting.TTSOptions.ResourceID, setting.TTSOptions.Format)
+		}
+	}
 	log.Printf("[main] 当前模式: %s (db=%s lock=%s)", res.Mode, dbPath, res.LockPath)
 
 	controller.InitController()
