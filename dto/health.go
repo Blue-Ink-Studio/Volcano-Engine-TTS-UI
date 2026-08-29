@@ -12,6 +12,9 @@ type HealthResponse struct {
 	StartTime    string                 `json:"start_time"`
 	Memory       map[string]interface{} `json:"memory"`
 	ConfigStatus ConfigStatusResponse   `json:"config_status"`
+	// M1 新增:反映 installer 模式,便于部署探针/运维识别未初始化状态
+	Installed bool   `json:"installed"`
+	Mode      string `json:"mode"`
 }
 
 type ConfigStatusResponse struct {

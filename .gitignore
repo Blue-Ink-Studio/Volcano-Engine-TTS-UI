@@ -26,3 +26,9 @@ TODO.md
 
 # Release artifacts (build output)
 release/
+
+# Runtime database artifacts (created by M1 installer flow)
+tts.db
+tts.db-*
+tts.db.*
+installed.lock

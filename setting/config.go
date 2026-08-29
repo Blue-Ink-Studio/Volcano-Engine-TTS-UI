@@ -1,6 +1,8 @@
 package setting
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"log"
 	"os"
@@ -51,11 +53,26 @@ var Server ServerConfig
 // 不直接调用 middleware(避免循环 import)。
 var TrustedProxyHops int
 
+// SetupToken 是安装模式下的初始化凭证。
+//   - 若 TTS_ADMIN_KEY 环境变量非空,用其值(用户可复现,便于脚本化安装)
+//   - 若 TTS_ADMIN_KEY 为空,启动时随机生成 32 字节十六进制,
+//     打印到日志(/api/setup 提交时必须带这个 token)
+//
+// 安装完成后,/api/setup 端点永久关闭,SetupToken 失去意义但保留在内存。
+var SetupToken string
+
+// SetupTokenSource 标记 SetupToken 的来源,便于日志区分。
+//   "env"      = 来自 TTS_ADMIN_KEY
+//   "ephemeral"= 启动时随机生成(每次启动变)
+//   ""         = 未设置
+var SetupTokenSource string
+
 // InitAllConfigs 集中初始化所有配置,启动期调用一次。
 func InitAllConfigs() {
 	InitServerConfig()
 	InitAuthConfig()
 	InitCORSConfig()
+	InitSetupToken()
 	TTSConfigErr = InitTTSConfig()
 }
 
@@ -211,6 +228,30 @@ func getEnvBool(name string, def bool) bool {
 		return def
 	}
 	return b
+}
+
+// InitSetupToken 加载或生成安装模式下的初始化凭证。
+//   - TTS_ADMIN_KEY 存在:用其值,SetupTokenSource="env"
+//   - TTS_ADMIN_KEY 空:随机生成 16 字节 = 32 字符 hex,SetupTokenSource="ephemeral",打印到日志
+func InitSetupToken() {
+	v := os.Getenv("TTS_ADMIN_KEY")
+	if v != "" {
+		SetupToken = v
+		SetupTokenSource = "env"
+		return
+	}
+	// 临时 token:16 字节随机 = 32 字符 hex,够用且短
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		// 极端情况:随机源失败,降级为时间戳(不应发生)
+		log.Printf("[setup] 生成一次性 token 失败,使用时间戳: %v", err)
+		SetupToken = fmt.Sprintf("dev-%d", time.Now().UnixNano())
+		SetupTokenSource = "ephemeral"
+		return
+	}
+	SetupToken = hex.EncodeToString(b)
+	SetupTokenSource = "ephemeral"
+	log.Printf("[setup] 一次性安装 token(仅打印一次,公网部署请设置 TTS_ADMIN_KEY): %s", SetupToken)
 }
 
 // CheckEnvironmentVariables 返回 /health 用的环境变量状态快照。

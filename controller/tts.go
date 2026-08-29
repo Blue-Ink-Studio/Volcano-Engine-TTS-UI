@@ -14,6 +14,7 @@ import (
 	"github.com/volcano-tts/tts-api/adapter/volcano"
 	"github.com/volcano-tts/tts-api/common"
 	"github.com/volcano-tts/tts-api/dto"
+	"github.com/volcano-tts/tts-api/installer"
 	"github.com/volcano-tts/tts-api/metrics"
 	"github.com/volcano-tts/tts-api/middleware"
 	"github.com/volcano-tts/tts-api/setting"
@@ -59,6 +60,15 @@ func OpenaiTTSHandler(w http.ResponseWriter, r *http.Request) {
 			r.Method, r.URL.Path, middleware.GetClientIP(r))
 		metrics.RequestTotal.Inc(telemetry.Labels{"status": "method_not_allowed", "format": "", "speaker": "", "model": ""})
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// 安装模式双保险:即使 InstallGuard 中间件没拦住,这里也 503 + 引导跳转
+	if installer.GetMode() == installer.ModeSetup {
+		log.Printf("[tts] 安装模式下拒绝 /v1/audio/speech - 客户端=%s", middleware.GetClientIP(r))
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = w.Write([]byte(`{"error":"not installed","code":"install_required","redirect":"/setup"}`))
 		return
 	}
 
@@ -213,7 +223,12 @@ func contentTypeFor(format string) string {
 func HealthHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 
-	if setting.TTSConfigErr != nil {
+	// 安装模式下 /health 仍然 200,但通过 installed 字段让探针/运维识别
+	// (Kubernetes readiness probe 可以用 installed=false 决定是否放流量)
+	mode := installer.GetMode()
+	if mode == installer.ModeSetup {
+		w.WriteHeader(http.StatusOK) // 200,因为进程活着,只是还没初始化
+	} else if setting.TTSConfigErr != nil {
 		w.WriteHeader(http.StatusServiceUnavailable)
 	} else {
 		w.WriteHeader(http.StatusOK)
@@ -223,7 +238,9 @@ func HealthHandler(w http.ResponseWriter, r *http.Request) {
 	allRequired := env["all_required_vars_set"].(bool)
 
 	status := "ok"
-	if !allRequired {
+	if mode == installer.ModeSetup {
+		status = "not_installed"
+	} else if !allRequired {
 		status = "configuration_error"
 	}
 
@@ -239,6 +256,8 @@ func HealthHandler(w http.ResponseWriter, r *http.Request) {
 			AllRequiredVarsSet: allRequired,
 			ConfigError:        setting.TTSConfigErr != nil,
 		},
+		Installed: mode == installer.ModeNormal,
+		Mode:      mode.String(),
 	}
 	json.NewEncoder(w).Encode(resp)
 }

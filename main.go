@@ -10,22 +10,48 @@ import (
 	"time"
 
 	"github.com/volcano-tts/tts-api/controller"
+	"github.com/volcano-tts/tts-api/installer"
 	"github.com/volcano-tts/tts-api/metrics"
 	"github.com/volcano-tts/tts-api/middleware"
 	"github.com/volcano-tts/tts-api/router"
 	"github.com/volcano-tts/tts-api/setting"
 )
 
+// ttsDBPath 返回数据库/lock 所在路径;空时落到当前目录的 tts.db。
+func ttsDBPath() string {
+	if p := os.Getenv("TTS_DB_PATH"); p != "" {
+		return p
+	}
+	return "tts.db"
+}
+
 func main() {
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
 	log.SetPrefix("[TTS-Server] ")
 
+	// 1) 加载引导环境变量(PORT / OPENAI_TTS_API_KEY / TTS_ADMIN_KEY 等)
 	setting.InitAllConfigs()
 	metrics.Init()
 	middleware.InitRateLimiter()
-	controller.InitController()
 	setting.LogStartupSummary()
 
+	// 2) 启动期关键步骤:打开/建库 → 检测 lock → 判定模式
+	dbPath := ttsDBPath()
+	if err := installer.EnsureDBDir(dbPath); err != nil {
+		log.Fatalf("FATAL: cannot create db dir: %v", err)
+	}
+	st, res, err := installer.Detect(dbPath)
+	if err != nil {
+		log.Fatalf("FATAL: installer detect failed: %v", err)
+	}
+	if res.Corrupted {
+		log.Printf("[main] 注意: 启动时检测到 db 损坏并已自愈回退(备份=%s)", res.BackupTo)
+	}
+	// 注入 setup 控制器需要的 store + dbPath(无论哪种模式都注入,正常模式下备用)
+	controller.SetSetupState(st, dbPath)
+	log.Printf("[main] 当前模式: %s (db=%s lock=%s)", res.Mode, dbPath, res.LockPath)
+
+	controller.InitController()
 	controller.SetStartTime(time.Now())
 
 	r := router.Setup()
@@ -42,12 +68,16 @@ func main() {
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 
 	go func() {
-		log.Printf("Starting ByteDance TTS to OpenAI API Adapter Server")
-		log.Printf("Listening on port: %s", setting.Server.Port)
-		log.Printf("OpenAI TTS endpoint: http://localhost:%s/v1/audio/speech", setting.Server.Port)
+		if installer.GetMode() == installer.ModeSetup {
+			log.Printf("Starting TTS Server in SETUP mode")
+			log.Printf("Open browser to http://localhost:%s/setup to install", setting.Server.Port)
+		} else {
+			log.Printf("Starting ByteDance TTS to OpenAI API Adapter Server")
+			log.Printf("Listening on port: %s", setting.Server.Port)
+			log.Printf("OpenAI TTS endpoint: http://localhost:%s/v1/audio/speech", setting.Server.Port)
+		}
 		log.Printf("Health check: http://localhost:%s/health", setting.Server.Port)
 		log.Printf("Metrics: http://localhost:%s/metrics", setting.Server.Port)
-		log.Printf("Using ByteDance v3 API")
 
 		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("Server failed to start: %v", err)
@@ -56,6 +86,11 @@ func main() {
 
 	<-quit
 	log.Println("Shutting down server...")
+
+	// 关闭 db 连接(仅当 st 非 nil 时)
+	if st != nil {
+		_ = st.Close()
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
