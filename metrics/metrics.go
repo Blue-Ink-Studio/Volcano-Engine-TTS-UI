@@ -114,12 +114,14 @@ type AdapterRecorder struct{}
 
 // UpstreamStarted 满足 volcano.MetricsRecorder 接口。
 func (AdapterRecorder) UpstreamStarted(speaker, model, format string) {
-	UpstreamTotal.Inc(telemetry.Labels{"status": "started", "format": format, "model": model, "speaker": speaker})
+	// speaker 用 sha1[:8] 替代,保护火山复刻音色 ID
+	// (无鉴权 /metrics 端点可枚举,这是 P0 隐私问题)
+	UpstreamTotal.Inc(telemetry.Labels{"status": "started", "format": format, "model": model, "speaker": telemetry.SpeakerLabel(speaker)})
 }
 
 // UpstreamFinished 满足 volcano.MetricsRecorder 接口。
 func (AdapterRecorder) UpstreamFinished(speaker, model, format, status string, duration, ttfb time.Duration, chunks, audioBytes, errCode int) {
-	labels := telemetry.Labels{"status": status, "format": format, "model": model, "speaker": speaker}
+	labels := telemetry.Labels{"status": status, "format": format, "model": model, "speaker": telemetry.SpeakerLabel(speaker)}
 	UpstreamTotal.Inc(labels)
 	UpstreamDuration.Observe(duration.Seconds(), telemetry.Labels{"status": status, "format": format})
 	if ttfb > 0 {

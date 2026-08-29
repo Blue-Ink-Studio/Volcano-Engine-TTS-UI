@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/volcano-tts/tts-api/common"
 	"github.com/volcano-tts/tts-api/installer"
 	"github.com/volcano-tts/tts-api/middleware"
 	"github.com/volcano-tts/tts-api/setting"
@@ -262,17 +263,5 @@ func validateSetupVoices(vs []SetupVoice) error {
 	return nil
 }
 
-// secureEqualString 是常量时间字符串比较,防止 token 计时攻击。
-func secureEqualString(a, b string) bool {
-	if len(a) != len(b) {
-		// 先比对长度(避免短串早返回时泄漏长度信息)
-		// 但仍要遍历一遍避免优化器消除分支
-		_ = a[0]
-		return false
-	}
-	var diff byte
-	for i := 0; i < len(a); i++ {
-		diff |= a[i] ^ b[i]
-	}
-	return diff == 0
-}
+// secureEqualString wraps common.SecureEqualString 保持向后兼容(原文件内已有调用)。
+func secureEqualString(a, b string) bool { return common.SecureEqualString(a, b) }

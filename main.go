@@ -49,6 +49,12 @@ func main() {
 	}
 	// 注入 setup 控制器需要的 store + dbPath(无论哪种模式都注入,正常模式下备用)
 	controller.SetSetupState(st, dbPath)
+	// 注入 admin 控制器需要的 store + 指标文本写入器(M2)
+	controller.SetAdminStore(st)
+	controller.SetMetricsTextWriter(func(w http.ResponseWriter) error {
+		metrics.Meter.Handler().ServeHTTP(w, &http.Request{})
+		return nil
+	})
 	log.Printf("[main] 当前模式: %s (db=%s lock=%s)", res.Mode, dbPath, res.LockPath)
 
 	controller.InitController()
@@ -75,6 +81,7 @@ func main() {
 			log.Printf("Starting ByteDance TTS to OpenAI API Adapter Server")
 			log.Printf("Listening on port: %s", setting.Server.Port)
 			log.Printf("OpenAI TTS endpoint: http://localhost:%s/v1/audio/speech", setting.Server.Port)
+			log.Printf("Admin WebUI: http://localhost:%s/admin", setting.Server.Port)
 		}
 		log.Printf("Health check: http://localhost:%s/health", setting.Server.Port)
 		log.Printf("Metrics: http://localhost:%s/metrics", setting.Server.Port)

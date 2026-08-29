@@ -1,0 +1,359 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>火山 TTS · 管理后台</title>
+    <script src="https://cdn.bootcdn.net/ajax/libs/vue/3.4.21/vue.global.prod.js"></script>
+    <script src="https://cdn.bootcdn.net/ajax/libs/axios/1.6.7/axios.min.js"></script>
+    <style>
+        :root {
+            --bg: #0b0f1a;
+            --bg-card: #131826;
+            --bg-elev: #1a2138;
+            --border: #232b42;
+            --text: #e4e7ee;
+            --text-dim: #8a92a6;
+            --text-mute: #5a6275;
+            --accent: #00d4ff;
+            --accent-2: #7b2ff7;
+            --success: #22c55e;
+            --warning: #f59e0b;
+            --danger: #ef4444;
+        }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+            background: var(--bg); color: var(--text);
+            min-height: 100vh; padding: 24px; font-size: 14px;
+            background-image:
+                radial-gradient(ellipse 80% 50% at 50% -20%, rgba(0,212,255,0.08), transparent),
+                radial-gradient(ellipse 60% 40% at 80% 100%, rgba(123,47,247,0.06), transparent);
+        }
+        #app { max-width: 1100px; margin: 0 auto; }
+
+        .login {
+            max-width: 420px; margin: 100px auto; padding: 32px;
+            background: var(--bg-card); border: 1px solid var(--border);
+            border-radius: 12px;
+        }
+        .login h1 { font-size: 20px; margin-bottom: 8px; }
+        .login .sub { color: var(--text-dim); font-size: 12px; margin-bottom: 24px; }
+        .login input {
+            width: 100%; padding: 10px 12px; margin-bottom: 12px;
+            background: var(--bg-elev); border: 1px solid var(--border);
+            color: var(--text); border-radius: 8px; font-size: 13px;
+        }
+        .login input:focus { outline: none; border-color: var(--accent); }
+        .login button {
+            width: 100%; padding: 10px; background: var(--accent); color: #00121a;
+            border: none; border-radius: 8px; font-weight: 500; cursor: pointer;
+        }
+        .login button:disabled { background: var(--text-mute); cursor: not-allowed; }
+        .login .err { color: var(--danger); font-size: 12px; margin-top: 8px; }
+
+        .header {
+            display: flex; align-items: center; justify-content: space-between;
+            margin-bottom: 24px; flex-wrap: wrap; gap: 16px;
+        }
+        .header-left { display: flex; align-items: center; gap: 12px; }
+        .logo {
+            width: 40px; height: 40px; border-radius: 10px;
+            background: linear-gradient(135deg, var(--accent), var(--accent-2));
+            display: flex; align-items: center; justify-content: center;
+            font-weight: 700; font-size: 16px; color: #fff;
+        }
+        .header h1 { font-size: 18px; }
+        .header .sub { font-size: 11px; color: var(--text-dim); }
+
+        .tabs { display: flex; gap: 4px; margin-bottom: 16px; border-bottom: 1px solid var(--border); }
+        .tab {
+            padding: 8px 16px; cursor: pointer; color: var(--text-dim);
+            font-size: 13px; border-bottom: 2px solid transparent;
+            margin-bottom: -1px; transition: all 0.2s;
+        }
+        .tab:hover { color: var(--text); }
+        .tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+
+        .btn {
+            background: var(--bg-elev); border: 1px solid var(--border); color: var(--text);
+            padding: 6px 12px; border-radius: 6px; cursor: pointer; font-size: 12px;
+            display: inline-flex; align-items: center; gap: 4px;
+        }
+        .btn:hover { border-color: var(--accent); }
+        .btn-primary { background: var(--accent); color: #00121a; border-color: var(--accent); font-weight: 500; }
+        .btn-primary:hover { background: #33ddff; }
+        .btn-danger { color: var(--danger); border-color: var(--border); }
+        .btn-danger:hover { border-color: var(--danger); }
+
+        .card { background: var(--bg-card); border: 1px solid var(--border); border-radius: 10px; padding: 18px; margin-bottom: 12px; }
+        .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; margin-bottom: 16px; }
+        .stat-label { font-size: 11px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.5px; }
+        .stat-value { font-size: 24px; font-weight: 700; margin-top: 4px; }
+        .stat-value.accent { color: var(--accent); }
+        .stat-value.success { color: var(--success); }
+
+        .table { width: 100%; border-collapse: collapse; }
+        .table th, .table td {
+            text-align: left; padding: 8px 10px; font-size: 12px;
+            border-bottom: 1px solid var(--border);
+        }
+        .table th { color: var(--text-dim); font-weight: 500; text-transform: uppercase; font-size: 10px; letter-spacing: 0.5px; }
+        .table tr:last-child td { border-bottom: none; }
+        .table .name { font-family: "SF Mono", Monaco, monospace; color: var(--accent); }
+        .table .mono { font-family: "SF Mono", Monaco, monospace; color: var(--text-dim); }
+        .empty { color: var(--text-mute); text-align: center; padding: 32px; font-size: 12px; }
+
+        /* switch */
+        .switch { position: relative; display: inline-block; width: 36px; height: 20px; cursor: pointer; }
+        .switch input { opacity: 0; width: 0; height: 0; }
+        .slider { position: absolute; inset: 0; background: var(--bg-elev); border-radius: 20px; transition: 0.2s; border: 1px solid var(--border); }
+        .slider::before { content: ""; position: absolute; left: 2px; top: 2px; width: 14px; height: 14px; background: var(--text-dim); border-radius: 50%; transition: 0.2s; }
+        .switch input:checked + .slider { background: var(--success); border-color: var(--success); }
+        .switch input:checked + .slider::before { transform: translateX(16px); background: #fff; }
+
+        /* modal */
+        .modal-bg { position: fixed; inset: 0; background: rgba(0,0,0,0.6); display: flex; align-items: center; justify-content: center; z-index: 100; }
+        .modal { background: var(--bg-card); border: 1px solid var(--border); border-radius: 10px; padding: 24px; width: 480px; max-width: 90vw; }
+        .modal h2 { font-size: 16px; margin-bottom: 16px; }
+        .modal label { display: block; font-size: 11px; color: var(--text-dim); margin-top: 12px; margin-bottom: 4px; }
+        .modal input, .modal select, .modal textarea {
+            width: 100%; padding: 8px 10px; background: var(--bg-elev); border: 1px solid var(--border);
+            color: var(--text); border-radius: 6px; font-size: 12px; font-family: inherit;
+        }
+        .modal .actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 20px; }
+        .err { color: var(--danger); font-size: 12px; margin-top: 8px; }
+    </style>
+</head>
+<body>
+    <div id="app">
+        <!-- Login -->
+        <div v-if="!apiKey" class="login">
+            <h1>火山 TTS · 管理后台</h1>
+            <div class="sub">输入 OPENAI_TTS_API_KEY 登录</div>
+            <input v-model="keyInput" type="password" placeholder="API Key" @keyup.enter="login" autofocus>
+            <button @click="login" :disabled="!keyInput">登录</button>
+            <div v-if="loginErr" class="err">{{ loginErr }}</div>
+        </div>
+
+        <!-- Main -->
+        <div v-else>
+            <div class="header">
+                <div class="header-left">
+                    <div class="logo">TTS</div>
+                    <div>
+                        <h1>管理后台</h1>
+                        <div class="sub">火山 TTS 聚合平台 · 模式: {{ overview.mode }} · v{{ overview.version }}</div>
+                    </div>
+                </div>
+                <div style="display: flex; gap: 8px; align-items: center;">
+                    <button class="btn" @click="reloadAll">刷新</button>
+                    <button class="btn" @click="logout">登出</button>
+                </div>
+            </div>
+
+            <div class="tabs">
+                <div class="tab" :class="{active: tab==='dashboard'}" @click="tab='dashboard'">仪表盘</div>
+                <div class="tab" :class="{active: tab==='voices'}" @click="tab='voices'">音色</div>
+            </div>
+
+            <!-- Dashboard -->
+            <div v-if="tab==='dashboard'">
+                <div class="stats">
+                    <div class="card">
+                        <div class="stat-label">模式</div>
+                        <div class="stat-value" :class="overview.installed ? 'success' : 'accent'">{{ overview.mode }}</div>
+                    </div>
+                    <div class="card">
+                        <div class="stat-label">音色数</div>
+                        <div class="stat-value accent">{{ overview.voice_count }}</div>
+                        <div style="font-size: 11px; color: var(--text-mute); margin-top: 4px;">{{ overview.voice_enabled_count }} 启用</div>
+                    </div>
+                    <div class="card">
+                        <div class="stat-label">运行时间</div>
+                        <div class="stat-value">{{ formatUptime(overview.uptime_seconds) }}</div>
+                    </div>
+                    <div class="card">
+                        <div class="stat-label">数据库</div>
+                        <div class="stat-value" style="font-size: 13px; word-break: break-all;">{{ shortPath(overview.db_path) || '—' }}</div>
+                    </div>
+                </div>
+                <div class="card">
+                    <div style="font-size: 12px; color: var(--text-dim); margin-bottom: 6px;">Commit</div>
+                    <div class="mono" style="font-size: 13px;">{{ overview.commit || 'dev' }}</div>
+                </div>
+            </div>
+
+            <!-- Voices -->
+            <div v-if="tab==='voices'">
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
+                    <div style="color: var(--text-dim); font-size: 12px;">共 {{ voices.length }} 条</div>
+                    <button class="btn btn-primary" @click="openAdd">+ 新增音色</button>
+                </div>
+                <div class="card" style="padding: 0;">
+                    <table class="table" v-if="voices.length">
+                        <thead>
+                            <tr>
+                                <th>名称</th>
+                                <th>Speaker</th>
+                                <th>资源 ID</th>
+                                <th>Model</th>
+                                <th>启用</th>
+                                <th style="width: 100px;">操作</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr v-for="v in voices" :key="v.name">
+                                <td class="name">{{ v.name }}</td>
+                                <td class="mono">{{ v.speaker }}</td>
+                                <td class="mono">{{ v.resource_id }}</td>
+                                <td class="mono">{{ v.model || '—' }}</td>
+                                <td>
+                                    <label class="switch">
+                                        <input type="checkbox" :checked="v.enabled" @change="toggle(v)">
+                                        <span class="slider"></span>
+                                    </label>
+                                </td>
+                                <td>
+                                    <button class="btn btn-danger" @click="remove(v)">删除</button>
+                                </td>
+                            </tr>
+                        </tbody>
+                    </table>
+                    <div v-else class="empty">还没有音色。点击右上角"新增音色"开始添加。</div>
+                </div>
+            </div>
+
+            <div v-if="actionErr" class="err" style="margin-top: 16px;">⚠ {{ actionErr }}</div>
+        </div>
+
+        <!-- Add voice modal -->
+        <div v-if="showAdd" class="modal-bg" @click.self="showAdd=false">
+            <div class="modal">
+                <h2>新增音色</h2>
+                <label>对外名 (voice) *</label>
+                <input v-model="form.name" placeholder="qian">
+                <label>Speaker (火山音色 ID) *</label>
+                <input v-model="form.speaker" placeholder="S_xxx">
+                <label>资源 ID *</label>
+                <input v-model="form.resource_id" placeholder="volc.megatts.icl">
+                <label>Model</label>
+                <input v-model="form.model" placeholder="seed-tts-2.0-standard">
+                <label>Language</label>
+                <input v-model="form.language" placeholder="zh">
+                <label>Description</label>
+                <input v-model="form.description" placeholder="可选">
+                <div v-if="addErr" class="err">{{ addErr }}</div>
+                <div class="actions">
+                    <button class="btn" @click="showAdd=false">取消</button>
+                    <button class="btn btn-primary" @click="submitAdd" :disabled="adding">{{ adding ? '提交中...' : '提交' }}</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+    const { createApp, ref, computed, onMounted, watch } = Vue;
+    createApp({
+        setup() {
+            const apiKey = ref(sessionStorage.getItem('ttsAdminKey') || '');
+            const keyInput = ref('');
+            const loginErr = ref('');
+            const tab = ref(location.hash.slice(1) || 'dashboard');
+            const overview = ref({});
+            const voices = ref([]);
+            const actionErr = ref('');
+            const showAdd = ref(false);
+            const adding = ref(false);
+            const addErr = ref('');
+            const form = ref({ name: '', speaker: '', resource_id: 'volc.megatts.icl', model: 'seed-tts-2.0-standard', language: '', description: '' });
+
+            const http = axios.create({ baseURL: '/api' });
+            http.interceptors.request.use(c => {
+                if (apiKey.value) c.headers.Authorization = 'Bearer ' + apiKey.value;
+                return c;
+            });
+            http.interceptors.response.use(r => r, err => {
+                if (err.response && err.response.status === 401) {
+                    sessionStorage.removeItem('ttsAdminKey');
+                    apiKey.value = '';
+                }
+                return Promise.reject(err);
+            });
+
+            watch(tab, v => { location.hash = v; });
+            window.addEventListener('hashchange', () => { tab.value = location.hash.slice(1) || 'dashboard'; });
+
+            const login = async () => {
+                loginErr.value = '';
+                try {
+                    apiKey.value = keyInput.value;
+                    await http.get('/admin/overview');
+                    sessionStorage.setItem('ttsAdminKey', keyInput.value);
+                } catch (e) {
+                    apiKey.value = '';
+                    loginErr.value = '鉴权失败: ' + (e.response?.data?.error?.message || e.message);
+                }
+            };
+            const logout = () => { sessionStorage.removeItem('ttsAdminKey'); apiKey.value = ''; };
+
+            const loadOverview = async () => {
+                try { overview.value = (await http.get('/admin/overview')).data; }
+                catch (e) { actionErr.value = '加载概览失败: ' + e.message; }
+            };
+            const loadVoices = async () => {
+                try {
+                    const r = await http.get('/voices');
+                    voices.value = r.data.voices || [];
+                } catch (e) { actionErr.value = '加载音色失败: ' + e.message; }
+            };
+            const reloadAll = () => { loadOverview(); loadVoices(); };
+
+            const openAdd = () => {
+                form.value = { name: '', speaker: '', resource_id: 'volc.megatts.icl', model: 'seed-tts-2.0-standard', language: '', description: '' };
+                addErr.value = '';
+                showAdd.value = true;
+            };
+            const submitAdd = async () => {
+                addErr.value = '';
+                if (!form.value.name || !form.value.speaker || !form.value.resource_id) {
+                    addErr.value = '请填写名称、Speaker、资源 ID';
+                    return;
+                }
+                adding.value = true;
+                try {
+                    await http.post('/voices', form.value);
+                    showAdd.value = false;
+                    await loadVoices();
+                    await loadOverview();
+                } catch (e) {
+                    addErr.value = e.response?.data?.error?.message || e.message;
+                } finally { adding.value = false; }
+            };
+            const toggle = async (v) => {
+                try { await http.patch(`/voices/${v.name}/toggle`, { enabled: !v.enabled }); await loadVoices(); }
+                catch (e) { actionErr.value = '切换失败: ' + (e.response?.data?.error?.message || e.message); }
+            };
+            const remove = async (v) => {
+                if (!confirm(`确定删除音色 "${v.name}" 吗?`)) return;
+                try { await http.delete(`/voices/${v.name}`); await loadVoices(); await loadOverview(); }
+                catch (e) { actionErr.value = '删除失败: ' + (e.response?.data?.error?.message || e.message); }
+            };
+
+            const formatUptime = (s) => {
+                if (!s) return '—';
+                const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60);
+                return h > 0 ? `${h}h ${m}m` : `${m}m`;
+            };
+            const shortPath = (p) => p ? p.split(/[\\/]/).pop() : '';
+
+            onMounted(() => { if (apiKey.value) reloadAll(); });
+
+            return { apiKey, keyInput, loginErr, login, logout, tab, overview, voices, actionErr,
+                showAdd, form, addErr, adding, openAdd, submitAdd, toggle, remove,
+                formatUptime, shortPath, reloadAll };
+        },
+    }).mount('#app');
+    </script>
+</body>
+</html>
