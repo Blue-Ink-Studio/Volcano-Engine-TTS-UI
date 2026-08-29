@@ -32,3 +32,9 @@ tts.db
 tts.db-*
 tts.db.*
 installed.lock
+
+# UI handoff bundle (for external AI redesign work; not deployed)
+ui-handoff/
+
+# Docs (本地草稿,不入库)
+docs/

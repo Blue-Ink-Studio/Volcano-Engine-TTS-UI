@@ -10,17 +10,21 @@ import (
 )
 
 // Voice 是一行音色记录;时间字段保持 ISO8601 字符串(SQLite TEXT 默认)。
+//
+// JSON tag 是为了前端(admin.html)能直接读取 — 之前没加 tag 时 Go 的
+// "Name" / "Speaker" 等大写字段会原样输出,前端用 v.name 拿到 undefined,
+// 整张表看起来"空"但其实有数据。补 tag 后前端能正常显示。
 type Voice struct {
-	ID          int64
-	Name        string
-	Speaker     string
-	ResourceID  string
-	Model       string
-	Language    string
-	Description string
-	Enabled     bool
-	CreatedAt   string
-	UpdatedAt   string
+	ID          int64  `json:"id"`
+	Name        string `json:"name"`
+	Speaker     string `json:"speaker"`
+	ResourceID  string `json:"resource_id"`
+	Model       string `json:"model"`
+	Language    string `json:"language"`
+	Description string `json:"description"`
+	Enabled     bool   `json:"enabled"`
+	CreatedAt   string `json:"created_at"`
+	UpdatedAt   string `json:"updated_at"`
 }
 
 // ErrDuplicate 表示 name 唯一冲突;controller 翻译为 409。
