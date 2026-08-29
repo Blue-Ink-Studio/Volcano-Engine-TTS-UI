@@ -127,6 +127,30 @@ func normalizeOrigin(origin string) string {
 	return strings.ToLower(origin)
 }
 
+// SplitOriginsForCORS 解析逗号/换行/空格分隔的 origins 列表,
+// 全部小写、trim 末尾 / 后面统一比较。导出供 controller 复用
+// (PUT /api/settings/cors 写完立即刷新 setting.CORS 用)。
+func SplitOriginsForCORS(s string) []string {
+	return splitAndLowerOrigins(s)
+}
+
+// splitAndLowerOrigins 解析逗号/换行/空格分隔的 origins 列表,
+// 全部小写、trim 末尾 / 后面统一比较(只在本包内用,外部用 SplitOriginsForCORS)。
+// 实现细节:用 strings.FieldsFunc 切分,首尾 trim,末尾去 /。
+func splitAndLowerOrigins(s string) []string {
+	parts := strings.FieldsFunc(s, func(r rune) bool {
+		return r == ',' || r == '\n' || r == ' ' || r == '\t'
+	})
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.ToLower(strings.TrimRight(strings.TrimSpace(p), "/"))
+		if p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
 // LoadRuntimeConfig 从 store 加载 TTS 全局配置到 TTSOptions / TTSTimeout / Auth.APIKeys 内存。
 // 启动期(master 模式)调一次,或 PUT /api/settings 后调一次(改完立即生效)。
 //
@@ -233,6 +257,32 @@ func LoadRuntimeConfig(s Store) error {
 		Auth.APIKeys = []string{authKey}
 	} else {
 		Auth.APIKeys = nil
+	}
+
+	// CORS 配置:DB > env
+	// cors_allow_all (bool): 允许所有来源(*)
+	// cors_origins (string): 逗号分隔白名单
+	// 同源豁免由 middleware/cors.go 的 isSameOrigin 负责,DB 这里只管跨域名单
+	corsAllowAll, _ := s.SettingsGetBool("cors_allow_all", false)
+	if !corsAllowAll {
+		// env 兜底
+		if v := strings.ToLower(strings.TrimSpace(os.Getenv("CORS_ALLOW_ALL"))); v == "1" || v == "true" || v == "yes" {
+			corsAllowAll = true
+		}
+	}
+	originsStr := strings.TrimSpace(all["cors_origins"])
+	if originsStr == "" {
+		originsStr = os.Getenv("ALLOWED_ORIGINS")
+	}
+	if corsAllowAll {
+		CORS.AllowAll = true
+		CORS.Origins = nil
+	} else if originsStr != "" {
+		CORS.AllowAll = false
+		CORS.Origins = SplitOriginsForCORS(originsStr)
+	} else {
+		CORS.AllowAll = false
+		CORS.Origins = nil
 	}
 
 	TTSConfigErr = nil

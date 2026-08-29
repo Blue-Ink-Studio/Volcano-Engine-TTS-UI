@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/volcano-tts/tts-api/common"
+	"github.com/volcano-tts/tts-api/installer"
 	"github.com/volcano-tts/tts-api/setting"
 )
 
@@ -98,6 +99,15 @@ func splitOrigin(origin string) (host, scheme string) {
 
 func CORS(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// 安装模式完全跳过 CORS:
+		//   - 用户首次装,不可能提前知道自己的访问域名来配 ALLOWED_ORIGINS
+		//   - 装完进 normal 模式后,设的 CORS 才生效(从 DB 读)
+		// 这样 install 永远能成功,装完再通过 WebUI 配 CORS。
+		if installer.GetMode() == installer.ModeSetup {
+			next.ServeHTTP(w, r)
+			return
+		}
+
 		origin := r.Header.Get("Origin")
 
 		// 无 Origin 头:非跨域请求,跳过 CORS 处理

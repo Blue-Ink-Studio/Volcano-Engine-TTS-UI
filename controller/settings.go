@@ -6,6 +6,7 @@ import (
 	"log"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/volcano-tts/tts-api/middleware"
@@ -19,6 +20,9 @@ type SettingsResponse struct {
 	APIKeySet        bool   `json:"api_key_set"`       // 是否已设置(用于前端判断要不要提示必填)
 	AuthKey          string `json:"auth_key"`          // 鉴权 key 打码(客户端访问 + admin 登录用)
 	AuthKeySet       bool   `json:"auth_key_set"`
+	CORSAllowAll     bool   `json:"cors_allow_all"`    // 允许所有来源(*)
+	CORSOrigins      string `json:"cors_origins"`      // 逗号分隔的白名单(原文,含大小写,trim 末尾 /)
+	CORSConfigured   bool   `json:"cors_configured"`   // 是否配了 CORS(给 banner 用)
 	DefaultResourceID string `json:"default_resource_id"`
 	DefaultSpeaker   string `json:"default_speaker"`
 	DefaultFormat    string `json:"default_format"`
@@ -54,6 +58,9 @@ func SettingsGetHandler(w http.ResponseWriter, r *http.Request) {
 		APIKeySet:         all["api_key"] != "",
 		AuthKey:           maskAPIKeyField(all["auth_key"]),
 		AuthKeySet:        all["auth_key"] != "",
+		CORSAllowAll:      all["cors_allow_all"] == "1" || all["cors_allow_all"] == "true",
+		CORSOrigins:       all["cors_origins"],
+		CORSConfigured:    all["cors_allow_all"] == "1" || all["cors_allow_all"] == "true" || all["cors_origins"] != "",
 		DefaultResourceID: all["default_resource_id"],
 		DefaultSpeaker:    all["default_speaker"],
 		DefaultFormat:     all["default_format"],
@@ -289,6 +296,99 @@ func SettingsAuthKeyHandler(w http.ResponseWriter, r *http.Request) {
 	log.Printf("[settings] auth_key updated, runtime active (next request uses new key)")
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
+}
+
+// SettingsCORSRequest 是 PUT /api/settings/cors 的 body。
+// 两个字段都可选(至少给一个):
+//   - allow_all: true → 任意 Origin 都接受(*);设了之后 origins 失效
+//   - origins: 一行一个 origin,后端 trim + lower + 去末尾 /
+type SettingsCORSRequest struct {
+	AllowAll *bool  `json:"allow_all,omitempty"`
+	Origins  string `json:"origins,omitempty"` // 也接受 string 数组(任一形式)
+}
+
+// SettingsCORSHandler PUT /api/settings/cors
+// 鉴权: RequireAdmin。改完立即更新 setting.CORS(进程内生效,跨域请求从下个请求开始按新配置)。
+// 同源豁免由 middleware/cors.go 的 isSameOrigin 处理,不在这里管。
+func SettingsCORSHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPut {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	s := GetAdminStore()
+	if s == nil {
+		middleware.SendJSONError(w, http.StatusServiceUnavailable, "database not ready", "configuration_error", "db_not_ready")
+		return
+	}
+
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<10)
+	var body SettingsCORSRequest
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		middleware.SendJSONError(w, http.StatusBadRequest, "invalid JSON body", "invalid_request_error", "bad_request")
+		return
+	}
+	if body.AllowAll == nil && trimAll(body.Origins) == "" && body.Origins != "" {
+		// 空 body 不算错误,用户可能是想"清空"(只清 origins 保留现状)
+	}
+	if body.AllowAll == nil && body.Origins == "" {
+		middleware.SendJSONError(w, http.StatusBadRequest,
+			"at least one of allow_all / origins required",
+			"invalid_request_error", "no_fields")
+		return
+	}
+
+	updates := map[string]string{}
+	if body.AllowAll != nil {
+		updates["cors_allow_all"] = boolToStr(*body.AllowAll)
+	}
+	if body.Origins != "" {
+		// 校验每个 origin 至少像 http(s)://... (防止用户填空或填乱字符)
+		for _, line := range strings.Split(body.Origins, "\n") {
+			line = strings.TrimSpace(line)
+			if line == "" {
+				continue
+			}
+			low := strings.ToLower(line)
+			if !strings.HasPrefix(low, "http://") && !strings.HasPrefix(low, "https://") {
+				middleware.SendJSONError(w, http.StatusBadRequest,
+					fmt.Sprintf("invalid origin: %q (must start with http:// or https://)", line),
+					"invalid_request_error", "origin_invalid")
+				return
+			}
+		}
+		updates["cors_origins"] = body.Origins
+	}
+	if err := s.SettingsSetBatch(updates); err != nil {
+		log.Printf("[settings] cors set: %v", err)
+		middleware.SendJSONError(w, http.StatusInternalServerError, "write cors failed", "server_error", "db_write_failed")
+		return
+	}
+
+	// 立即刷新 setting.CORS,跨域请求从下个请求开始按新配置生效
+	// 复用 LoadRuntimeConfig 的解析逻辑(只取 cors 部分,避免覆盖其它运行时字段)
+	corsAllowAll, _ := s.SettingsGetBool("cors_allow_all", false)
+	originsStr := ""
+	if v, _, _ := s.SettingsGet("cors_origins"); v != "" {
+		originsStr = v
+	}
+	if corsAllowAll {
+		setting.CORS.AllowAll = true
+		setting.CORS.Origins = nil
+	} else if originsStr != "" {
+		setting.CORS.AllowAll = false
+		setting.CORS.Origins = setting.SplitOriginsForCORS(originsStr)
+	} else {
+		setting.CORS.AllowAll = false
+		setting.CORS.Origins = nil
+	}
+	log.Printf("[settings] cors updated (allow_all=%v origins=%q), runtime active", setting.CORS.AllowAll, originsStr)
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"ok":           true,
+		"allow_all":    setting.CORS.AllowAll,
+		"origins":      originsStr,
+		"cors_active":  true,
+	})
 }
 
 // maskAPIKeyField 复用 setting 包的打码风格(前 4 后 4 中间 ****)。
