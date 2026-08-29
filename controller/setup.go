@@ -176,6 +176,12 @@ func SetupSubmitHandler(w http.ResponseWriter, r *http.Request) {
 		setting.Auth.APIKeys = []string{authKey}
 	}
 
+	// 装完 reload TTS 全局配置(让 TTSOptions 立即有可用的 api_key/speaker/resource_id,
+	// 否则 /v1/audio/speech 会因为 TTSConfigErr 在启动期被设而返 503,要重启才生效)。
+	if err := setting.LoadRuntimeConfig(GetSetupStore()); err != nil {
+		log.Printf("[setup] warning: 装完 LoadRuntimeConfig 失败: %v(下次启动会恢复)", err)
+	}
+
 	// 清空旧 voices 再插入(假设是首次安装;若不是,name 冲突会变成 409)
 	// 这里选择 "清空+插入" 语义,符合"setup 是首次安装"的产品定位
 	// 如果想保留旧 voices,可以改成 UPSERT,但 M1 不做

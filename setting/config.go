@@ -153,7 +153,7 @@ func splitAndLowerOrigins(s string) []string {
 
 // LoadRuntimeConfig 从 store 加载 TTS 全局配置到 TTSOptions / TTSTimeout / Auth.APIKeys 内存。
 // 启动期(master 模式)调一次,或 PUT /api/settings 后调一次(改完立即生效)。
-//
+////
 // 与原 InitTTSConfig 的区别:
 //   - 不再读 BYTEDANCE_TTS_* env;全部从 store.Settings 读
 //   - 必填项(api_key / default_resource_id / default_speaker)缺失时返 error
@@ -202,7 +202,22 @@ func LoadRuntimeConfig(s Store) error {
 		return TTSConfigErr
 	}
 
+	// 【BUG 修复】default_speaker 是 voice **名字**(如 "chun"),
+	// 不是火山 speaker ID (如 "S_G8tEKnaJ1")。原代码直接把 voice 名当
+	// speaker ID 用,导致调 /v1/audio/speech 不传 voice 时火山 55000000。
+	// 这里查 voice 表拿真正的 speaker / resource_id / model。
+	var voiceModel string
+	if vSpeaker, vResource, vModel, found, vErr := s.GetVoiceForTTS(speaker); vErr == nil && found {
+		speaker = vSpeaker
+		resourceId = vResource
+		voiceModel = vModel
+		// 找不到 voice 时不报错 — 保持原值(向后兼容)
+	}
+
 	model := all["model"]
+	if voiceModel != "" {
+		model = voiceModel // voice 行有 model 时优先用 voice 的
+	}
 	format := all["default_format"]
 	if format == "" {
 		format = "mp3"
@@ -290,11 +305,20 @@ func LoadRuntimeConfig(s Store) error {
 }
 
 // Store 是 LoadRuntimeConfig 需要的最小接口(避免 setting 包 import store 产生 cycle)。
+//
+// 重要:VoiceGetByName 用 4 个返回值(speaker/resourceID/model/found/err)
+// 而非 (VoiceRef, error),这样 store 包不需要 import setting 包
+// 就能实现这个接口(避免循环 import)。
 type Store interface {
 	SettingsGetAll() (map[string]string, error)
 	SettingsGetInt(key string, def int) (int, error)
 	SettingsGetBool(key string, def bool) (bool, error)
 	SettingsGetDuration(key string, def time.Duration) (time.Duration, error)
+	// GetVoiceForTTS 给定 voice 名字,返 (speaker_id, resource_id, model, found, err)。
+	//   - found=false 表示 voice 不存在(此时 err=nil,返回值是空串)
+	//   - err!=nil 是真错误(db 失败等)
+	//   - 找到时返 voice 行的真实字段值
+	GetVoiceForTTS(name string) (speaker, resourceID, model string, found bool, err error)
 }
 
 func getEnvDefault(name, def string) string {
