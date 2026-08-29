@@ -17,6 +17,8 @@ import (
 type SettingsResponse struct {
 	APIKey           string `json:"api_key"`           // 打码形式,例如 S_G8****naJ1
 	APIKeySet        bool   `json:"api_key_set"`       // 是否已设置(用于前端判断要不要提示必填)
+	AuthKey          string `json:"auth_key"`          // 鉴权 key 打码(客户端访问 + admin 登录用)
+	AuthKeySet       bool   `json:"auth_key_set"`
 	DefaultResourceID string `json:"default_resource_id"`
 	DefaultSpeaker   string `json:"default_speaker"`
 	DefaultFormat    string `json:"default_format"`
@@ -50,6 +52,8 @@ func SettingsGetHandler(w http.ResponseWriter, r *http.Request) {
 	resp := SettingsResponse{
 		APIKey:            maskAPIKeyField(all["api_key"]),
 		APIKeySet:         all["api_key"] != "",
+		AuthKey:           maskAPIKeyField(all["auth_key"]),
+		AuthKeySet:        all["auth_key"] != "",
 		DefaultResourceID: all["default_resource_id"],
 		DefaultSpeaker:    all["default_speaker"],
 		DefaultFormat:     all["default_format"],
@@ -239,6 +243,50 @@ func SettingsAPIKeyHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	log.Printf("[settings] api_key updated, runtime reloaded")
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
+}
+
+// SettingsAuthKeyRequest 是 PUT /api/settings/auth-key 的 body。
+// auth_key 是 admin 鉴权和 /v1/audio/speech 鉴权用的 key(火山上游 key 是 api_key,这是两套)。
+type SettingsAuthKeyRequest struct {
+	AuthKey string `json:"auth_key"`
+}
+
+// SettingsAuthKeyHandler PUT /api/settings/auth-key
+// 鉴权: RequireAdmin。改完立即更新 setting.Auth.APIKeys(进程内生效),
+// 下一个请求就用新 key — admin 自己改完要等下一次请求才能验证(避免改完立刻自踢)。
+func SettingsAuthKeyHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPut {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	s := GetAdminStore()
+	if s == nil {
+		middleware.SendJSONError(w, http.StatusServiceUnavailable, "database not ready", "configuration_error", "db_not_ready")
+		return
+	}
+
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<10)
+	var body SettingsAuthKeyRequest
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		middleware.SendJSONError(w, http.StatusBadRequest, "invalid JSON body", "invalid_request_error", "bad_request")
+		return
+	}
+	key := trimAll(body.AuthKey)
+	if key == "" {
+		middleware.SendJSONError(w, http.StatusBadRequest, "auth_key cannot be empty", "invalid_request_error", "missing_field")
+		return
+	}
+	if err := s.SettingsSet("auth_key", key); err != nil {
+		log.Printf("[settings] auth-key set: %v", err)
+		middleware.SendJSONError(w, http.StatusInternalServerError, "write auth_key failed", "server_error", "db_write_failed")
+		return
+	}
+	// 立即生效:不重新 LoadRuntimeConfig(那会覆盖其它字段),
+	// 只单独刷新 Auth.APIKeys
+	setting.Auth.APIKeys = []string{key}
+	log.Printf("[settings] auth_key updated, runtime active (next request uses new key)")
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
 }

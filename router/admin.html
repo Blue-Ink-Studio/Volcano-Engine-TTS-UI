@@ -228,8 +228,21 @@
             <!-- Settings -->
             <div v-if="tab==='settings'">
                 <div class="card">
-                    <div class="card-title">火山 TTS 凭证</div>
-                    <div class="card-desc" style="color: var(--text-dim); font-size: 12px; margin-bottom: 16px;">改完点保存,立即生效,无需重启服务。</div>
+                    <div class="card-title">鉴权 Key (登录 + 客户端调用)</div>
+                    <div class="card-desc" style="color: var(--text-dim); font-size: 12px; margin-bottom: 16px;">客户端用这个 Key 调 <code>/v1/audio/speech</code>,也是登录 <code>/admin</code> 的密码。改完下一次请求立即生效(改完会被当前会话自踢,需重新登录)。</div>
+                    <div class="field">
+                        <label>当前 Key (打码: <span style="color: var(--accent); font-family: monospace;">{{ settings.auth_key || '(未设置)' }}</span>)</label>
+                        <div style="display: flex; gap: 8px;">
+                            <input type="password" v-model="authKeyInput" :placeholder="settings.auth_key_set ? '不改留空' : '输入新 Key'" style="flex: 1;">
+                            <button class="btn btn-primary" @click="saveAuthKey" :disabled="!authKeyInput">更新 Key</button>
+                        </div>
+                        <div class="hint">独立端点 /api/settings/auth-key。改了之后,你的浏览器 401 自动跳回登录页,用新 Key 重登。</div>
+                    </div>
+                </div>
+
+                <div class="card">
+                    <div class="card-title">火山 TTS 上游凭证</div>
+                    <div class="card-desc" style="color: var(--text-dim); font-size: 12px; margin-bottom: 16px;">调火山 v3 上游用的凭证。改完点保存,立即生效,无需重启服务。</div>
 
                     <div class="field">
                         <label>API Key (打码显示: <span style="color: var(--accent); font-family: monospace;">{{ settings.api_key || '(未设置)' }}</span>)</label>
@@ -331,6 +344,7 @@
             const settings = ref({});
             const settingsForm = ref({ default_resource_id: '', default_speaker: '', default_format: 'mp3', sample_rate: 24000, model: '' });
             const apiKeyInput = ref('');
+            const authKeyInput = ref('');
             const savingSettings = ref(false);
             const settingsErr = ref('');
             const settingsOk = ref(false);
@@ -422,6 +436,23 @@
                     settingsErr.value = e.response?.data?.error?.message || e.message;
                 }
             };
+            const saveAuthKey = async () => {
+                settingsErr.value = ''; settingsOk.value = false;
+                if (!authKeyInput.value) { settingsErr.value = 'Auth Key 不能为空'; return; }
+                try {
+                    await http.put('/settings/auth-key', { auth_key: authKeyInput.value });
+                    authKeyInput.value = '';
+                    // 改完自己会 401,清掉 session key 让用户重新登录
+                    setTimeout(() => {
+                        sessionStorage.removeItem('ttsAdminKey');
+                        apiKey.value = '';
+                    }, 200);
+                    settingsOk.value = true;
+                    setTimeout(() => settingsOk.value = false, 3000);
+                } catch (e) {
+                    settingsErr.value = e.response?.data?.error?.message || e.message;
+                }
+            };
             const resetSettingsForm = () => { loadSettings(); };
 
             const openAdd = () => {
@@ -466,8 +497,8 @@
 
             return { apiKey, keyInput, loginErr, login, logout, tab, overview, voices, actionErr,
                 showAdd, form, addErr, adding, openAdd, submitAdd, toggle, remove,
-                settings, settingsForm, apiKeyInput, savingSettings, settingsErr, settingsOk,
-                loadSettings, saveSettings, saveApiKey, resetSettingsForm,
+                settings, settingsForm, apiKeyInput, authKeyInput, savingSettings, settingsErr, settingsOk,
+                loadSettings, saveSettings, saveApiKey, saveAuthKey, resetSettingsForm,
                 formatUptime, shortPath, reloadAll };
         },
     }).mount('#app');

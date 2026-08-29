@@ -84,6 +84,7 @@ func Setup() *mux.Router {
 	r.Handle("/api/settings", middleware.RequireAdmin(http.HandlerFunc(controller.SettingsGetHandler))).Methods("GET")
 	r.Handle("/api/settings", middleware.RequireAdmin(http.HandlerFunc(controller.SettingsUpdateHandler))).Methods("PUT")
 	r.Handle("/api/settings/api-key", middleware.RequireAdmin(http.HandlerFunc(controller.SettingsAPIKeyHandler))).Methods("PUT")
+	r.Handle("/api/settings/auth-key", middleware.RequireAdmin(http.HandlerFunc(controller.SettingsAuthKeyHandler))).Methods("PUT")
 
 	// 业务路由
 	r.HandleFunc("/v1/audio/speech", controller.OpenaiTTSHandler).Methods("POST", "OPTIONS")

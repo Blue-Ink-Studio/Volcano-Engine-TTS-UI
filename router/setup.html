@@ -96,11 +96,17 @@
         <div v-if="errorMsg" class="banner">⚠ {{ errorMsg }}</div>
 
         <div class="card">
-            <div class="card-title">火山引擎 TTS 凭证</div>
-            <div class="card-desc">从火山引擎控制台获取,API Key 仅在此页面输入,不会回显。</div>
+            <div class="card-title">OpenAI 鉴权 + 火山引擎 TTS 凭证</div>
+            <div class="card-desc">从控制台/面板获取。两个 Key 仅在此页面输入,不会回显,装完不用再碰 env。</div>
             <div class="field">
-                <label>API Key <span class="req">*</span></label>
+                <label>OpenAI 鉴权 Key <span class="req">*</span></label>
+                <input type="password" v-model="form.auth_key" placeholder="自定,例如 my-secret-key-2024" autocomplete="off">
+                <div class="hint">客户端用这个 Key 调 <code>/v1/audio/speech</code>,也是登录 <code>/admin</code> 的密码。装完可在 <code>/admin → 设置</code> 改。</div>
+            </div>
+            <div class="field">
+                <label>火山 TTS API Key <span class="req">*</span></label>
                 <input type="password" v-model="form.api_key" placeholder="例如: 5b4d7c2a-..." autocomplete="off">
+                <div class="hint">调火山 v3 上游用的凭证,从 <a href="https://console.volcengine.com/" target="_blank">火山控制台</a> 获取。</div>
             </div>
             <div class="field-row">
                 <div class="field">
@@ -166,6 +172,7 @@
     createApp({
         setup() {
             const form = ref({
+                auth_key: '',
                 api_key: '',
                 default_resource_id: 'volc.megatts.default',
                 default_speaker: '',
@@ -200,8 +207,8 @@
 
             const submit = async () => {
                 errorMsg.value = '';
-                if (!form.value.api_key || !form.value.default_resource_id || !form.value.default_speaker || !form.value.token) {
-                    errorMsg.value = '请填写所有必填项(API Key / 资源 ID / 默认音色 / Token)';
+                if (!form.value.auth_key || !form.value.api_key || !form.value.default_resource_id || !form.value.default_speaker || !form.value.token) {
+                    errorMsg.value = '请填写所有必填项(OpenAI Key / 火山 API Key / 资源 ID / 默认音色 / Token)';
                     return;
                 }
                 if (!form.value.voices.length || form.value.voices.some(v => !v.name || !v.speaker || !v.resource_id)) {
@@ -213,6 +220,7 @@
                     const r = await axios.post('/api/setup', {
                         token: form.value.token,
                         settings: {
+                            auth_key: form.value.auth_key,
                             api_key: form.value.api_key,
                             default_resource_id: form.value.default_resource_id,
                             default_speaker: form.value.default_speaker,

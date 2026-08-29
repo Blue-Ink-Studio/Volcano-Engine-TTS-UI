@@ -127,7 +127,7 @@ func normalizeOrigin(origin string) string {
 	return strings.ToLower(origin)
 }
 
-// LoadRuntimeConfig 从 store 加载 TTS 全局配置到 TTSOptions / TTSTimeout 内存。
+// LoadRuntimeConfig 从 store 加载 TTS 全局配置到 TTSOptions / TTSTimeout / Auth.APIKeys 内存。
 // 启动期(master 模式)调一次,或 PUT /api/settings 后调一次(改完立即生效)。
 //
 // 与原 InitTTSConfig 的区别:
@@ -148,6 +148,11 @@ func normalizeOrigin(origin string) string {
 //   BYTEDANCE_TTS_EXPLICIT_LANGUAGE → explicit_language
 //   BYTEDANCE_TTS_ENABLE_SUBTITLE   → enable_subtitle (默认 false)
 //   BYTEDANCE_TTS_TIMEOUT        → TTSTimeout (默认 30s)
+//
+// 鉴权 key(auth_key)优先级:DB > env OPENAI_TTS_API_KEY
+//   - 首次启动(无 DB 数据):用 env,保证向后兼容
+//   - 已 install:用 DB,env 不再读
+//   - DB 没 auth_key 但 env 有(env fallback):仍用 env
 func LoadRuntimeConfig(s Store) error {
 	all, err := s.SettingsGetAll()
 	if err != nil {
@@ -217,6 +222,19 @@ func LoadRuntimeConfig(s Store) error {
 		EnableSubtitle: enableSubtitle,
 		Additions:      adds,
 	}
+
+	// 鉴权 key:DB > env(向后兼容)
+	authKey := all["auth_key"]
+	if authKey == "" {
+		authKey = os.Getenv("OPENAI_TTS_API_KEY")
+	}
+	// 用临时 slice 避免和 InitAuthConfig 抢同一个 Auth.APIKeys 底层
+	if authKey != "" {
+		Auth.APIKeys = []string{authKey}
+	} else {
+		Auth.APIKeys = nil
+	}
+
 	TTSConfigErr = nil
 	return nil
 }

@@ -29,11 +29,11 @@ func main() {
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
 	log.SetPrefix("[TTS-Server] ")
 
-	// 1) 加载引导环境变量(PORT / OPENAI_TTS_API_KEY / TTS_ADMIN_KEY 等)
+	// 1) 加载引导环境变量(PORT / TTS_ADMIN_KEY / OPENAI_TTS_API_KEY 兜底)
+	// 注: Auth.APIKeys 在 InitAllConfigs 里先读 env,后被 LoadRuntimeConfig 覆盖为 DB 值。
 	setting.InitAllConfigs()
 	metrics.Init()
 	middleware.InitRateLimiter()
-	setting.LogStartupSummary()
 
 	// 2) 启动期关键步骤:打开/建库 → 检测 lock → 判定模式
 	dbPath := ttsDBPath()
@@ -47,23 +47,28 @@ func main() {
 	if res.Corrupted {
 		log.Printf("[main] 注意: 启动时检测到 db 损坏并已自愈回退(备份=%s)", res.BackupTo)
 	}
-	// 注入 setup 控制器需要的 store + dbPath(无论哪种模式都注入,正常模式下备用)
+
+	// 3) 注入 setup/admin 控制器需要的句柄(M1+M2)
 	controller.SetSetupState(st, dbPath)
-	// 注入 admin 控制器需要的 store + 指标文本写入器(M2)
 	controller.SetAdminStore(st)
 	controller.SetMetricsTextWriter(func(w http.ResponseWriter) error {
 		metrics.Meter.Handler().ServeHTTP(w, &http.Request{})
 		return nil
 	})
-	// M3: 从 store 加载运行时 TTS 配置(替代原来的 env-based InitTTSConfig)
+
+	// 4) M3: 从 store 加载运行时 TTS 配置(替代原来的 env-based InitTTSConfig)
+	// 必须在 LogStartupSummary 之前,这样日志显示的是真实状态(API key 已从 DB 加载,不再读 env)
 	if st != nil {
 		if err := setting.LoadRuntimeConfig(st); err != nil {
-			log.Printf("[main] TTS 运行时配置加载失败:%v(将保持 install mode 或返 503)", err)
+			log.Printf("[main] TTS 运行时配置加载失败:%v", err)
 		} else {
 			log.Printf("[main] TTS 运行时配置已加载(api_key=***, speaker=%s, resource=%s, format=%s)",
 				setting.TTSOptions.Speaker, setting.TTSOptions.ResourceID, setting.TTSOptions.Format)
 		}
 	}
+
+	// 5) 启动摘要日志(此时 Auth.APIKeys 已是 DB 值,日志反映真实状态)
+	setting.LogStartupSummary()
 	log.Printf("[main] 当前模式: %s (db=%s lock=%s)", res.Mode, dbPath, res.LockPath)
 
 	controller.InitController()

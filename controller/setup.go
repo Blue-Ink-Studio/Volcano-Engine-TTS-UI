@@ -169,6 +169,13 @@ func SetupSubmitHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// 立即把 auth_key 灌到 setting.Auth.APIKeys,这样后续 /v1/audio/speech 和 /admin
+	// 在本进程内能立刻用新 key(无需等 LoadRuntimeConfig)。
+	authKey := strings.TrimSpace(body.Settings["auth_key"])
+	if authKey != "" {
+		setting.Auth.APIKeys = []string{authKey}
+	}
+
 	// 清空旧 voices 再插入(假设是首次安装;若不是,name 冲突会变成 409)
 	// 这里选择 "清空+插入" 语义,符合"setup 是首次安装"的产品定位
 	// 如果想保留旧 voices,可以改成 UPSERT,但 M1 不做
@@ -224,8 +231,10 @@ func SetupSubmitHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 // validateSetupSettings 校验必填项。
+// auth_key (鉴权) 也是必填 — 让 setup 成为"单一配置入口",
+// 用户装完不用再回去设 OPENAI_TTS_API_KEY env。
 func validateSetupSettings(m map[string]string) error {
-	required := []string{"api_key", "default_resource_id", "default_speaker"}
+	required := []string{"api_key", "auth_key", "default_resource_id", "default_speaker"}
 	var missing []string
 	for _, k := range required {
 		if strings.TrimSpace(m[k]) == "" {
