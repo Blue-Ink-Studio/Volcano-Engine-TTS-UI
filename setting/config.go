@@ -12,6 +12,7 @@ import (
 
 	"github.com/volcano-tts/tts-api/adapter/volcano"
 	"github.com/volcano-tts/tts-api/common"
+	"github.com/volcano-tts/tts-api/telemetry"
 )
 
 // 全部环境变量读取的单一入口:其它包不允许直接 os.Getenv,只读这里的全局 Config。
@@ -318,7 +319,8 @@ func LogStartupSummary() {
 	checks := []ttsCheck{
 		{"BYTEDANCE_TTS_API_KEY", maskAPIKey(TTSOptions.APIKey), TTSOptions.APIKey != ""},
 		{"BYTEDANCE_TTS_RESOURCE_ID", TTSOptions.ResourceID, TTSOptions.ResourceID != ""},
-		{"BYTEDANCE_TTS_SPEAKER", TTSOptions.Speaker, TTSOptions.Speaker != ""},
+		// speaker 是火山复刻音色 ID(用户付费资产),日志里打码,避免明文落盘
+		{"BYTEDANCE_TTS_SPEAKER", telemetry.MaskSpeaker(TTSOptions.Speaker), TTSOptions.Speaker != ""},
 	}
 	missingCount := 0
 	for _, c := range checks {

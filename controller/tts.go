@@ -161,7 +161,10 @@ func OpenaiTTSHandler(w http.ResponseWriter, r *http.Request) {
 
 	finalLabels := telemetry.Labels{
 		"format":  clientFormat,
-		"speaker": opts.Speaker,
+		// speaker 是火山复刻音色 ID(用户付费资产),不能直接出现在 /metrics label 里
+		//(无鉴权可枚举)。用 sha1[:8] 替代:同 speaker 同 label 保留 per-voice 观测,
+		//但反推不出原值。Admin UI 想要看原名通过 /api/voices 拿 name 字段。
+		"speaker": telemetry.SpeakerLabel(opts.Speaker),
 		"model":   opts.Model,
 	}
 	if err != nil {
