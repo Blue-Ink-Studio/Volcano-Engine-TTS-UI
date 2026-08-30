@@ -1,25 +1,19 @@
-# 字节跳动火山引擎TTS v3 API 转 OpenAI 兼容接口
+# 字节火山引擎 TTS v3 → OpenAI 兼容接口
 
-## 项目简介
+将火山引擎 TTS v3 API 封装为 OpenAI 兼容的 `/v1/audio/speech` 端点,自带引导式安装、WebUI 后台、SQLite 持久化、Prometheus 观测。单二进制,无外部服务依赖。
 
-本项目将字节跳动火山引擎TTS（文本转语音）v3 API 封装为 OpenAI 兼容的 TTS API 接口,使原本调用 OpenAI TTS 服务的应用可以无缝切换到火山引擎。
-
-### 主要特性
+## 特性
 
 - 完全兼容 OpenAI `/v1/audio/speech` API
-- 支持火山引擎 TTS v3 HTTP Chunked 单向流式 API
-- 支持多种音频格式:mp3 / ogg_opus / pcm / wav(wav 内部转 pcm 后本地拼头)
-- 支持火山复刻 2.0 子模型(`seed-tts-2.0-standard` / `-expressive`)
-- API Key 鉴权、IP 速率限制、全局并发限制
-- 内置 Prometheus 文本格式 `/metrics` 端点,零外部依赖
-- 跨平台支持(Windows / Linux / macOS)
+- **引导式安装**: 首次启动自动进入 `/setup` 向导,无需手写 env
+- **WebUI 后台** `/admin`: 音色管理 / 全局设置 / CORS 配置 / 鉴权
+- **音色库**: 多 voice 动态路由,未知 / 禁用 voice 返回明确错误
+- **多格式输出**: mp3 / ogg_opus / pcm / wav (内部转 pcm + 本地拼头) / aac / flac
+- **鉴权 + 限流**: API Key 校验, IP 速率限制, 全局并发限制
+- **观测**: Prometheus 文本格式 `/metrics` + 服务状态 `/health`, 零外部依赖
+- **跨平台**: Windows / Linux / macOS / Docker
 
 ## 快速开始
-
-### 前置要求
-
-- Go 1.26 或更高版本
-- 火山引擎账号并开通 TTS 服务
 
 ### 1. 编译
 
@@ -27,311 +21,192 @@
 go build -o tts-api .
 ```
 
-### 2. 配置环境变量
-
-复制 `.env.example` 为 `.env` 并填入实际配置:
+### 2. 启动
 
 ```bash
-cp .env.example .env
-```
-
-### 3. 启动
-
-```bash
-# Windows
-tts-api.exe
-
-# Linux/macOS
+# 默认: 端口 8080, 监听 localhost
 ./tts-api
 ```
 
-服务默认监听 `8080` 端口,可通过 `PORT` 环境变量修改。
+启动后浏览器打开 `http://localhost:8080/setup`,完成 4 步引导:
 
-## 环境变量配置
+1. 凭证: 火山 API Key + OpenAI 端鉴权 key
+2. 默认路由: 默认资源 ID (复刻 2.0 用 `seed-icl-2.0`) + 默认音色名
+3. 音色列表: 每个 voice 的对外名 + 火山 speaker ID
+4. 确认提交
 
-### 必需参数
+完成后自动跳转到 `/admin`,从这里登录管理。
 
-| 变量名 | 说明 |
-|--------|------|
-| `BYTEDANCE_TTS_API_KEY` | 火山引擎新版控制台 API Key |
-| `BYTEDANCE_TTS_RESOURCE_ID` | 资源 ID,决定模型版本与计费(`seed-tts-1.0` / `seed-icl-2.0` 等) |
-| `BYTEDANCE_TTS_SPEAKER` | 发音人(音色)ID,复刻音色以 `S_` 开头 |
-
-### TTS 行为参数
-
-| 变量名 | 说明 | 默认值 |
-|--------|------|--------|
-| `BYTEDANCE_TTS_TIMEOUT` | 单次合成超时 | `30s` |
-| `BYTEDANCE_TTS_FORMAT` | 上游实际请求的音频格式(mp3 / pcm / ogg_opus);客户端要求 wav 时内部自动转 pcm + 本地拼 WAV 头 | `mp3` |
-| `BYTEDANCE_TTS_SAMPLE_RATE` | 上游采样率(8000 / 16000 / 22050 / 24000 / 32000 / 44100 / 48000);**此值直接写入 WAV 头,需与上游实际 PCM 采样率一致,否则音频变速变调** | `24000` |
-| `BYTEDANCE_TTS_BIT_RATE` | MP3 比特率,仅 mp3 生效 | 无 |
-
-### 复刻 2.0 扩展参数
-
-| 变量名 | 说明 | 默认值 |
-|--------|------|--------|
-| `BYTEDANCE_TTS_MODEL` | 复刻 2.0 子模型(`seed-tts-2.0-standard` / `seed-tts-2.0-expressive`) | 控制台默认 |
-| `BYTEDANCE_TTS_MODEL_TYPE` | 模型类型(4=ICL V2, 5=ICL V3),推荐显式指定 | 无 |
-| `BYTEDANCE_TTS_EXPLICIT_LANGUAGE` | 非中英文合成时指定语种(zh-cn / en / ja / es-mx / id / pt-br / ko) | 无 |
-| `BYTEDANCE_TTS_ENABLE_SUBTITLE` | 启用字级时间戳(复刻 2.0 生效) | `false` |
-
-### 运行时 / 服务参数
-
-| 变量名 | 说明 | 默认值 |
-|--------|------|--------|
-| `OPENAI_TTS_API_KEY` | 🔴 **公网必设** OpenAI 兼容接口的 API Key(逗号分隔支持多个);**未设置时鉴权完全关闭** | 无(不鉴权) |
-| `TRUSTED_PROXY_HOPS` | X-Forwarded-For 解析模式(0=启发式/默认,>0=精确 N 跳) | `0`(启发式) |
-| `PORT` | 服务监听端口 | `8080` |
-| `ALLOWED_ORIGINS` | CORS 跨域白名单(逗号分隔,调试可设 `*`;空则拒绝所有跨域) | 无 |
-
-### 反代拓扑与 X-Forwarded-For 解析
-
-当服务部署在反代(nginx / caddy / CDN)后面时,反代会通过 `X-Forwarded-For`(XFF)头传递真实客户端 IP。本服务通过 `TRUSTED_PROXY_HOPS` 环境变量控制 XFF 解析方式,支持两种模式。
-
-#### 何时需要关心这个配置
-
-| 部署方式 | 是否需要配置 |
-|---|---|
-| 服务直接暴露公网 IP(无反代)| ❌ 不适用,跳过本节 |
-| 服务前有 1 个反代(nginx / caddy)| ❌ 不必配置,启发式模式自动处理 |
-| 服务前有 2 跳以上反代(CDN + 自建反代)| ⚠️ 启发式模式"够用",需要精准按真实 client 限流时再设 |
-
-> **直出部署(无反代)的用户**:本节不适用,跳过阅读。`TRUSTED_PROXY_HOPS` 在你的部署下不会被读取。
-
-#### 启发式模式(默认 / `TRUSTED_PROXY_HOPS=0`)
-
-从 XFF 链尾向前扫描,**跳过私有 IP,返回第一个公网 IP**。
-
-适用场景:单跳反代(最常见)、多跳含公网代理(CDN + nginx)。
-
-**行为示例**:
-
-| XFF 链 | 启发式返回 | 备注 |
-|---|---|---|
-| `1.2.3.4` | `1.2.3.4` | 单跳,真实 client |
-| `fake, 1.2.3.4` | `1.2.3.4` | 攻击者伪造首值,跳过 fake |
-| `1.2.3.4, 5.6.7.8, 10.0.0.1` | `5.6.7.8` | 多跳,返回最末公网 IP(CDN 边缘) |
-| `1.2.3.4, 192.168.1.1` | `1.2.3.4` | 链尾是私有 IP,跳过 |
-
-**优点**:零配置,大多数部署自动正确。
-
-**限制**:多跳 CDN 场景下,限流粒度为"按 CDN 边缘 IP"而非"按真实 client"。攻击者填满某 CDN 边缘配额可能影响该 CDN 下的其他用户——但无法伪造身份、无法越权。
-
-#### 精确模式(`TRUSTED_PROXY_HOPS=N`,N > 0)
-
-从 XFF 链尾倒数第 N+1 个位置取值,即"信任最近 N 跳反代,取该信任链之前那一跳的 IP"。
-
-适用场景:多跳 CDN + 反代,且需要精准按真实 client 限流。
-
-**N 的确定方法**:统计客户端到本服务之间的反代跳数。
-
-| 拓扑 | 跳数 | 配置 |
-|---|---|---|
-| `client → nginx → 本服务` | 1 | `TRUSTED_PROXY_HOPS=1` |
-| `client → Cloudflare → nginx → 本服务` | 2 | `TRUSTED_PROXY_HOPS=2` |
-| `client → CDN → WAF → nginx → 本服务` | 3 | `TRUSTED_PROXY_HOPS=3` |
-
-**行为对比**(以 `client(1.2.3.4) → CDN(203.0.113.5) → nginx(10.0.0.1) → 本服务` 为例,XFF 链 = `1.2.3.4, 203.0.113.5`):
-
-| `TRUSTED_PROXY_HOPS` | 返回 | 评价 |
-|---|---|---|
-| 0(默认启发式)| `203.0.113.5` | CDN 边缘 IP,限流粒度粗 |
-| 1(数到 nginx,未穿透)| `203.0.113.5` | 配置不当,与默认相同 |
-| 2(穿透到真实 client)| `1.2.3.4` | 精准到真实 client ✓ |
-| 3(超出实际跳数)| `directIP`(链长不足保护)| 配置错误,需修正 |
-
-#### 为什么两种模式都从链尾扫描
-
-XFF 链的第一个值是**客户端可控**的:攻击者可以发送任意 `X-Forwarded-For: 1.2.3.4`,若反代用追加模式(如 nginx 默认的 `$proxy_add_x_forwarded_for`),链尾才会追加真实 IP。
-
-若代码取首值,攻击者每次换伪造 IP 即可绕过 IP 限流,也可伪装成受害 IP 把其配额耗尽(间接 DoS)。两种模式都从链尾扫描,天然免疫这种攻击。
-
-#### 验证当前模式
-
-启动期日志会显示当前模式:
-
-```
-TRUSTED_PROXY_HOPS 未设置,使用默认启发式模式(XFF 链尾第一个公网 IP)
-# 或
-已配置 TRUSTED_PROXY_HOPS=0(启发式模式,等同默认)
-# 或
-已配置 TRUSTED_PROXY_HOPS=2(精确模式,信任 2 跳反代)
-```
-
-也可在 `GetClientIP` 临时加 `log.Printf` 打印解析结果,或参考已有的 `middleware/ratelimit_test.go`(24 个 XFF 表驱动用例)来扩展更多 XFF 链场景。生产环境不要保留 debug 日志。
-
-### Resource ID 说明
-
-| Resource ID | 模型说明 |
-|-------------|----------|
-| `seed-tts-1.0` | 豆包语音合成模型 1.0 字符版 |
-| `seed-tts-1.0-concurr` | 豆包语音合成模型 1.0 并发版 |
-| `seed-tts-2.0` | 豆包语音合成模型 2.0 字符版 |
-| `seed-icl-2.0` | 声音复刻 2.0 字符版 |
-
-> 上表为通用模型名。火山控制台实际显示的资源 ID 字符串通常是 `volc.megatts.default`、`volc.megatts.icl` 等(带版本号形如 `volc.megatts.icl.2_0`),**以控制台资源管理页面显示的字符串为准**。资源 ID 与音色必须**同时在控制台开通**才能组合使用,否则 API 返回 `code=55000000, message=resource ID is mismatched with speaker related resource`。
-
-**注意:** 复刻音色(speaker 以 `S_` 开头)必须搭配对应族的 Resource ID,否则 API 返回 resource mismatched 错误。
-
-## 调试日志
-
-### BYTEDANCE_TTS_DEBUG
-
-服务运行期日志分为**始终输出**和**调试模式才输出**两类。通过 `BYTEDANCE_TTS_DEBUG` 环境变量控制调试日志开关。
-
-| 值 | 行为 |
-|----|------|
-| 不设置 / `false` | 仅输出错误、警告、启动摘要、成功日志(默认,生产环境推荐) |
-| `true` | 额外输出适配器层调试日志 |
+### 3. 调用
 
 ```bash
-# 启用调试
-BYTEDANCE_TTS_DEBUG=true ./tts-api
-
-# 或写入 .env
-echo "BYTEDANCE_TTS_DEBUG=true" >> .env
+curl -X POST http://localhost:8080/v1/audio/speech \
+  -H "Authorization: Bearer <装时设的 OpenAI key>" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"tts-1","input":"你好,世界","voice":"chun"}' \
+  -o output.mp3
 ```
 
-启用后启动时会打印:
+## 环境变量
 
-```
-调试日志已启用 BYTEDANCE_TTS_DEBUG
-```
+**只需 4 个启动引导变量**(安装前 / DB 还不存在时必需):
 
-### 始终输出的日志
+| 变量 | 必设 | 用途 |
+|---|---|---|
+| `TTS_ADMIN_KEY` | ✓ (生产) | `/api/setup` 安装 token,首次安装时校验 |
+| `TTS_DB_PATH` | ✗ | DB 路径,默认 `./tts.db` |
+| `PORT` | ✗ | 监听端口,默认 `8080` |
+| `OPENAI_TTS_API_KEY` | ✗ (生产) | OpenAI 端鉴权 key,可不设(内网) |
 
-启动摘要、错误警告、合成成功/失败、访问日志(Logger 中间件):
+**所有业务配置**(`api_key` / `default_resource_id` / `default_speaker` / `default_format` / `sample_rate` / `model` / `model_type` / `explicit_language` / `enable_subtitle` / `timeout` / `cors_origins` / `cors_allow_all` / `auth_key` / `trusted_proxy_hops`) — 全部在 `/admin` 设置,持久化到 SQLite。
 
-```
-[TTS-Server] config.go:238: === 环境配置汇总 ===
-[TTS-Server] config.go:239: 服务端口: 8080
-...
-警告: TTS 合成失败 - 路径=/v1/audio/speech 客户端=... 文本长度=50 耗时=114ms 错误=...
-TTS 合成成功 - 音色=zh_female_qingxin 格式=mp3 文本=50字 音频=12345字节 分片=3 耗时=1.2s
-POST /v1/audio/speech 1.2.3.4:56789 200 1.2s
-```
+env 仍可作为 fallback 读(老用户兼容),但**新用户应通过 WebUI 配**。
 
-### 调试模式才输出的日志(`BYTEDANCE_TTS_DEBUG=true`)
+## WebUI 使用
 
-适配器层与 CORS 拦截详情:
+### `/setup` 首次安装
 
-```
-TTS upstream: resource_id=seed-icl-2.0 speaker=zh_female_qingxin model="seed-tts-2.0-standard" format=mp3 sample_rate=24000 speech_rate=0 additions="..."
-Sentence start: sequence=0, sentence=...
-Sentence end: sequence=0
-TTS 合成结束, usage: text_words=5
-volcano: 忽略未识别事件 event="xxx" sequence=1
-CORS拦截: 来源="https://..." 路径=/v1/audio/speech 方法=POST 客户端=...
-```
+四步表单:
+1. **凭证**: 火山 API Key (必填) + OpenAI 鉴权 Key (可选)
+2. **默认路由**: 默认资源 ID (`seed-icl-2.0`) + 默认音色名 + 默认格式 + 采样率
+3. **音色列表**: 每个 voice 一行,填对外名 + 火山 speaker ID
+4. **确认**: 提交写入 DB,自动跳 `/admin`
 
-> **生产建议:** 默认不开 `BYTEDANCE_TTS_DEBUG`,需要排查问题时再临时开启,避免 sentence 级别日志刷屏。
+### `/admin` 日常管理
 
-## CORS 跨域配置
+| Tab | 用途 |
+|---|---|
+| 仪表盘 | 进程状态 / 内存 / 启动时长 / 配置检查 |
+| 音色管理 | CRUD 音色: 名称 / speaker / 资源 ID / 模型 / 语言 / 启用 / 描述 |
+| 设置 | 全局设置: API Key / 默认资源 ID / 默认音色 / 格式 / 采样率 / 子模型 / 鉴权 key |
+| CORS | 白名单 (逗号分隔) 或 `*` 模式 |
+| 退出 | 清除 session |
 
-跨域请求由 `ALLOWED_ORIGINS` 控制,按**完整 origin**(协议 + 域名 + 端口)精确匹配:
+修改设置后**自动 reload**,不需重启服务。
 
-- `https://app.example.com` — 精确匹配一个来源
-- `https://a.com,https://b.com` — 多个来源逗号分隔
-- `*` — 允许所有来源(**不可与凭据请求共存**)
-- `app.example.com` — 缺协议头,**永远不会匹配**(强制校验 `http://` / `https://` 开头)
+### 客户端可见错误
 
-**典型坑:**
+| 场景 | HTTP | Body code | message |
+|---|---|---|---|
+| 缺少 Authorization | 401 | `invalid_api_key` | Invalid API key provided. |
+| 音色不存在 | 400 | `unknown_voice` | `unknown voice: 'alloy'` |
+| 音色被 admin 禁用 | 403 | `voice_disabled` | `voice 'chun' is disabled` |
+| 服务未就绪 (DB 配置损坏) | 503 | `service_unavailable` | TTS service configuration error... |
 
-1. 客户端是 `http://` 但服务端是 `https://`:浏览器按 `http://...` 的 origin 发请求,白名单里的 `https://...` 不会匹配 → 403。**客户端必须用 `https://` 开头**。
-2. `ALLOWED_ORIGINS=*` + 客户端带 `Authorization`:浏览器按规范**直接拒绝预检**(凭据 + 通配符冲突),POST 根本发不出去。
-3. 同源请求不受 CORS 限制。
+## API 端点
 
-## API 使用说明
+### `POST /v1/audio/speech`
 
-> ⚠️ **公网部署前必读**:如果你的服务暴露在公网,**必须**设置 `OPENAI_TTS_API_KEY` 或由前置反代(nginx / caddy)承担鉴权。未设置时 `Authorization` 头完全跳过校验,任何能访问 `:8080` 的人都能调用 TTS 合成,消耗你的火山额度。详见[部署 → 公网安全清单](#公网部署安全清单)。
+OpenAI 兼容,鉴权 `Authorization: Bearer <OPENAI_TTS_API_KEY>`(若已设)。
 
-### OpenAI 兼容接口
-
-**端点:** `POST /v1/audio/speech`
-
-**请求头:**
-- `Content-Type: application/json`
-- `Authorization: Bearer <你的API密钥>`(如果配置了 `OPENAI_TTS_API_KEY`)
-
-**请求体:**
+请求体:
 
 ```json
 {
-  "model": "tts-1",
-  "input": "你好,这是一个测试文本",
-  "voice": "alloy",
-  "response_format": "mp3",
-  "speed": 1.0
+  "model": "tts-1",          // 兼容字段,实际不影响
+  "input": "你好,世界",     // 必填,要合成的文本
+  "voice": "chun",           // 选填: 装时设的 voice 名称,留空走 default_speaker
+  "response_format": "mp3",  // 选填: mp3 / opus / wav / pcm / aac / flac
+  "speed": 1.0               // 选填: 0.25 ~ 4.0,实际 0.5 ~ 2.0 生效
 }
 ```
 
-**参数说明:**
-- `model` — 模型名(OpenAI 兼容,实际不影响,火山侧用 `BYTEDANCE_TTS_MODEL`)
-- `input` — 要合成的文本
-- `voice` — 发音人(OpenAI 兼容,实际用 `BYTEDANCE_TTS_SPEAKER`)
-- `response_format` — 输出格式:`mp3`(默认)/ `opus`(映射 ogg_opus)/ `wav` / `pcm` / `aac` / `flac`(降级到 mp3)
-- `speed` — 语速倍率,客户端接受范围 0.25 ~ 4.0;**火山实际生效范围 0.5 ~ 2.0**(speech_rate [-50, 100]),超出范围会被静默截断,客户端无感反馈
+格式映射:
 
-**格式映射:**
+| OpenAI `response_format` | 上游实际 | Content-Type |
+|---|---|---|
+| `mp3` (默认) | mp3 | `audio/mpeg` |
+| `opus` | ogg_opus | `audio/ogg` |
+| `wav` | pcm → 本地拼 wav header | `audio/wav` |
+| `pcm` | pcm | `audio/pcm` |
+| `aac` / `flac` | mp3 (降级) | `audio/mpeg` |
 
-| OpenAI response_format | 火山 API 格式 | Content-Type |
-|------------------------|--------------|--------------|
-| `mp3` | mp3 | audio/mpeg |
-| `opus` | ogg_opus | audio/ogg |
-| `wav` | pcm → 本地拼 wav header | audio/wav |
-| `pcm` | pcm | audio/pcm |
-| `aac` / `flac` | mp3(降级) | audio/mpeg |
+### `GET /health`
 
-**调用示例:**
+无鉴权,返回:
 
-```bash
-# MP3
-curl -X POST "http://localhost:8080/v1/audio/speech" \
-  -H "Content-Type: application/json" \
-  -d '{"model":"tts-1","input":"你好,世界","voice":"alloy","speed":1.0}' \
-  -o output.mp3
-
-# WAV
-curl -X POST "http://localhost:8080/v1/audio/speech" \
-  -H "Content-Type: application/json" \
-  -d '{"model":"tts-1","input":"你好,世界","voice":"alloy","response_format":"wav"}' \
-  -o output.wav
+```json
+{
+  "status": "ok",                            // ok | not_installed | configuration_error
+  "service": "ByteDance TTS to OpenAI API Adapter",
+  "version": "v0.2.0",
+  "commit": "621f9f8",
+  "uptime": "3600 seconds",
+  "config_status": {
+    "all_required_vars_set": true,
+    "config_error": false,
+    "error": "..."                           // 仅在 config_error=true 时出现
+  },
+  "installed": true,
+  "mode": "normal"
+}
 ```
 
-### 健康检查
+- 正常: HTTP 200, `status: "ok"`
+- 未安装: HTTP 200, `status: "not_installed"`
+- 配置损坏: HTTP 503, `status: "configuration_error"`, `error` 字段有原因
 
-```bash
-curl http://localhost:8080/health
-```
+### `GET /metrics`
 
-返回服务状态、版本、运行时长、内存、配置检查结果(**不鉴权**)。
+Prometheus 文本格式,无鉴权。主要指标见 [观测 / Metrics](#观测--metrics)。
 
-## 限流机制
+### `GET /admin`, `GET /setup`, `GET /dashboard`
 
-为保护上游火山 API,服务实现两层限流:
+- `/admin`: 后台 (Vue SPA),需鉴权
+- `/setup`: 引导式安装页 (Vue SPA),无鉴权,装完自动跳转
+- `/dashboard`: 服务状态预览页 (无鉴权)
 
-### 全局并发限制
-- 最多同时处理 **10 个** TTS 请求
-- 超过返回 `503 Service Unavailable`
+## 老用户迁移 (从 v0.1.0 → v0.2.0)
 
-### IP 速率限制
-- 每个 IP 每分钟 **100 个** 请求
-- 超过返回 `429 Too Many Requests`
+v0.1.0 用 env 配 11 个 `BYTEDANCE_TTS_*` 变量。v0.2.0 起改 WebUI:
 
-**触发日志(始终输出):**
+| 旧 env | v0.2.0 配置入口 |
+|---|---|
+| `BYTEDANCE_TTS_API_KEY` | `/admin` 设置 → API Key |
+| `BYTEDANCE_TTS_RESOURCE_ID` | `/admin` 设置 → 默认资源 ID |
+| `BYTEDANCE_TTS_SPEAKER` | `/admin` 设置 → 默认音色 (填 voice **名字**,不是 speaker ID) |
+| `BYTEDANCE_TTS_FORMAT` | `/admin` 设置 → 默认格式 |
+| `BYTEDANCE_TTS_SAMPLE_RATE` | `/admin` 设置 → 采样率 |
+| `BYTEDANCE_TTS_BIT_RATE` | `/admin` 设置 → MP3 比特率 |
+| `BYTEDANCE_TTS_MODEL` | `/admin` 设置 → 子模型 |
+| `BYTEDANCE_TTS_MODEL_TYPE` | `/admin` 设置 → 模型类型 |
+| `BYTEDANCE_TTS_EXPLICIT_LANGUAGE` | `/admin` 设置 → 显式语言 |
+| `BYTEDANCE_TTS_ENABLE_SUBTITLE` | `/admin` 设置 → 启用字级时间戳 |
+| `BYTEDANCE_TTS_TIMEOUT` | (保留 env 暂未搬 DB) |
+| `ALLOWED_ORIGINS` | `/admin` → CORS → 跨域白名单 |
+| `OPENAI_TTS_API_KEY` | `/admin` 设置 → OpenAI 端鉴权 key |
 
-```
-警告: 已达到最大并发请求数限制,拒绝请求 - 客户端IP: 1.2.3.4
-警告: 已超过IP速率限制,拒绝请求 - 客户端IP: 1.2.3.4
-```
+**逐步迁移建议**:
+
+1. 装 v0.2.0,启动时**不**带任何 `BYTEDANCE_TTS_*` env
+2. 浏览器 `/setup`, 把原 env 里的值填到对应字段
+3. 验证 `/v1/audio/speech` 正常
+4. 下次部署可彻底删 env
+
+**临时兼容**: 老 env 仍可作为 DB 缺失时的 fallback(为 0 重启零配置启动保留),但**不推荐生产用**。
+
+## 资源 ID (重要)
+
+V3 API **只允许两个资源 ID**:
+
+| Resource ID | 说明 |
+|---|---|
+| `seed-tts-2.0` | 豆包语音合成大模型 2.0 (普通 TTS) |
+| `seed-icl-2.0` | 豆包声音复刻大模型 2.0 (复刻 2.0) |
+
+`volc.megatts.icl` / `volc.megatts.default` 等是 **1.0 API** 的资源 / 服务品类编码,**不是 v3 API 2.0 的合法资源 ID**。本项目用复刻 2.0,应填 `seed-icl-2.0`。
+
+复刻音色(speaker 以 `S_` 开头,例如 `S_G8tEKnaJ1`)必须搭配 `seed-icl-2.0`,否则返回 `code=55000000 resource ID is mismatched`。
+
+模型名: `seed-tts-2.0-standard` (这是**复刻 2.0 唯一的子模型名**,**和资源 ID 不同**)。
 
 ## 观测 / Metrics
 
-服务内置 Prometheus 文本格式的 `/metrics` 端点,**不鉴权**(与 `/health` 一致),可直接被 Prometheus 抓取或浏览器查看。Go 进程内埋点,零外部依赖,实现位于 `telemetry/` 与 `metrics/` 包。
+Prometheus 文本格式,无鉴权。可直接被 Prometheus 抓取或浏览器查看。
 
-### 主要指标
+主要指标:
 
-| 指标名 | 类型 | 标签 | 说明 |
+| 指标 | 类型 | 标签 | 说明 |
 |---|---|---|---|
 | `tts_request_total` | counter | status, format, speaker, model | /v1/audio/speech 请求数 |
 | `tts_request_duration_seconds` | histogram | status, format | 端到端延迟 |
@@ -340,175 +215,117 @@ curl http://localhost:8080/health
 | `tts_upstream_first_byte_seconds` | histogram | format | TTFB |
 | `tts_upstream_chunks_total` | counter | format | 收到的音频 chunk 数 |
 | `tts_upstream_audio_bytes_total` | counter | format | 实际返回字节数 |
-| `tts_upstream_errors_total` | counter | code | 上游错误(code 聚合到 transport/client/server/upstream) |
+| `tts_upstream_errors_total` | counter | code | 上游错误 (聚合到 transport/client/server/upstream) |
 | `tts_usage_text_words_total` | counter | model | 上游计费字符数 |
 | `tts_concurrency_active` | gauge |  | 当前在飞请求数 |
 | `tts_concurrency_rejected_total` | counter |  | 并发上限拒绝数 |
 | `tts_ratelimit_rejected_total` | counter |  | 速率限制拒绝数 |
 | `tts_auth_failed_total` | counter |  | API Key 鉴权失败数 |
+| `tts_config_load_failures_total` | counter | mode | TTS 启动配置加载失败数 (告警用) |
 
-### Prometheus 抓取示例
+**注意**: `speaker` 标签是 `sha1(speaker)[:8]` 哈希值,不是明文,保护火山复刻音色 ID 隐私。
+
+### 告警示例
 
 ```yaml
-scrape_configs:
-  - job_name: tts-api
-    static_configs:
-      - targets: ['localhost:8080']
+- alert: TTSConfigLoadFailure
+  expr: rate(tts_config_load_failures_total{mode="normal"}[5m]) > 0
+  for: 1m
+  labels: { severity: critical }
+  annotations:
+    summary: TTS service cannot start due to invalid config
 ```
 
-### 仪表盘
+## 公网部署安全清单
 
-`/dashboard` 展示服务状态 + 内存 + 配置信息,并内嵌 `/metrics` 预览;Grafana 等工具可直接基于上面指标做面板。
+公网直接暴露 (`:8080` 可被互联网任意访问) 时,**至少满足以下两条之一**:
 
-### ⚠️ 公网部署:监控端点无鉴权
+1. **设置 `OPENAI_TTS_API_KEY`** (推荐, 最简单)
+   ```bash
+   OPENAI_TTS_API_KEY=<32+ 位随机字符串>
+   ```
+   客户端请求时带 `Authorization: Bearer <那个字符串>`。
 
-`/metrics`、`/health`、`/dashboard` **均不鉴权**,这是对齐 Prometheus 抓取场景的设计权衡:
+2. **前置反代承担鉴权** (nginx / caddy / Cloudflare Access)
+   - 反代层做 basic auth / mTLS / Cloudflare Access 等任一方案
+   - 反代**仅**把鉴权后的请求转发到 `:8080`
+   - 此时 `OPENAI_TTS_API_KEY` 可不设
 
-| 端点 | 暴露内容 | 风险 |
-|---|---|---|
-| `/metrics` | 业务标签(speaker/model/format)、运行指标、错误计数 | 侦察面:可推断使用量、技术栈、错误模式 |
-| `/health` | 服务状态、版本号、运行时长、内存 | 侦察面:版本号可用于匹配已知 CVE |
-| `/dashboard` | 配置检查结果(含 `TTSConfigErr` 状态) | 信息泄露:可确认配置是否就绪 |
+**`/metrics` / `/dashboard` / `/health` 均不鉴权**,生产环境务必通过反代保护:
 
-**部署建议**:
+```nginx
+location /metrics { allow 10.0.0.0/8; deny all; }  # 仅 Prometheus 服务器
+location /dashboard { auth_basic "admin"; auth_basic_user_file /etc/nginx/.htpasswd; }
+location /health { allow 10.0.0.0/8; deny all; }  # 或 K8s liveness probe 直接访问
+```
 
-- **内网 / 反代后**:无影响,符合预期
-- **公网直接暴露**:在前置反代(nginx / caddy)上保护这些端点,示例 nginx 配置:
+## 部署
 
-  ```nginx
-  location /metrics {
-      auth_basic "metrics";
-      auth_basic_user_file /etc/nginx/.htpasswd;
-      allow 10.0.0.0/8;        # 仅允许 Prometheus 服务器网段
-      deny all;
-  }
-  location /dashboard {
-      auth_basic "admin";
-      auth_basic_user_file /etc/nginx/.htpasswd;
-  }
-  location /health {
-      allow 10.0.0.0/8;        # 或保留给监控系统访问
-      deny all;
-  }
-  ```
+### Docker
 
-- **最简方案**:反代层直接限制 `/metrics` 只能从 Prometheus 服务器 IP 访问,无需 basic auth
+```bash
+# .env 至少含 TTS_ADMIN_KEY, 公网再加 OPENAI_TTS_API_KEY
+docker compose up -d
+```
+
+`docker-compose.yml` 已配 named volume `tts-api-data` 挂载到容器 `/data`,DB 与 lock 文件持久化,容器重启不丢配置。
+
+### Linux Systemd
+
+参见 `v0.1.0 README`,**注意**:v0.2.0 启动前不需要 `EnvironmentFile` 含业务变量,只保留 `TTS_ADMIN_KEY`。
 
 ## 架构
 
 | 包 | 职责 |
 |---|---|
-| `main.go` | 启动入口,信号处理 |
-| `telemetry/` | Counter / Gauge / Histogram + Prometheus 文本导出(零依赖) |
-| `metrics/` | TTS 业务指标注册,火山适配器埋点适配 |
-| `adapter/volcano/` | 火山 v3 HTTP Chunked 客户端(client/request/response/audio/errors/synthesis) |
-| `controller/` | /v1/audio/speech、/health 处理器 |
-| `middleware/` | SecurityHeaders、CORS、鉴权、限流、并发、日志、客户端 IP 提取 |
-| `setting/` | 单一环境变量入口 + 启动汇总 |
-| `common/`、`dto/` | 常量、请求/响应类型,`common.DebugLog` 控制调试日志 |
+| `main.go` | 启动入口,模式检测 (setup/normal),fail-fast |
+| `installer/` | 启动期模式检测,DB 自愈回退 |
+| `setting/` | 全局配置 (TTSOptions / Auth / CORS) + 启动汇总 |
+| `store/` | SQLite 数据访问 (settings / voices) + 自愈 |
+| `controller/` | /v1/audio/speech、/health、/setup、/admin、/api/setup、/api/settings、/api/voices |
+| `middleware/` | SecurityHeaders, CORS, 鉴权, 限流, 并发, 日志, 客户端 IP 提取, install 模式守卫 |
 | `router/` | 路由注册 |
-
-## 部署
-
-### Linux Systemd
-
-创建 `/etc/systemd/system/tts-server.service`:
-
-```ini
-[Unit]
-Description=ByteDance TTS to OpenAI API Adapter
-After=network.target
-
-[Service]
-Type=simple
-User=www-data
-WorkingDirectory=/www/wwwroot/tts-server
-EnvironmentFile=/www/wwwroot/tts-server/.env
-ExecStart=/www/wwwroot/tts-server/tts-api
-Restart=always
-RestartSec=10
-
-[Install]
-WantedBy=multi-user.target
-```
-
-```bash
-sudo systemctl daemon-reload
-sudo systemctl enable tts-server
-sudo systemctl start tts-server
-```
-
-### Docker
-
-```bash
-docker compose up -d
-```
-
-环境变量通过 `.env` 或 `docker-compose.yml` 传入。
-
-### 公网部署安全清单
-
-公网直接暴露(`:8080` 可被互联网任意访问)时,**至少满足以下两条之一**,否则视为不安全的部署:
-
-1. **设置 `OPENAI_TTS_API_KEY`**(推荐,最简单)
-   ```bash
-   # .env
-   OPENAI_TTS_API_KEY=<32+ 位随机字符串>
-   ```
-   客户端请求时带 `Authorization: Bearer <那个字符串>`。
-
-2. **前置反代承担鉴权**(nginx / caddy / Cloudflare Access)
-   - 反代层做 basic auth、mTLS、Cloudflare Access 等任一方案
-   - 反代**仅**把鉴权后的请求转发到 `:8080`,Go 服务本身保持"无鉴权"
-   - 此时 `OPENAI_TTS_API_KEY` 可不设
-
-**两个端点还需要单独保护**(无论上面哪种方案):
-
-- `/metrics`:暴露业务标签与运行指标,详见[观测 / Metrics → 公网部署](#公网部署监控端点无鉴权)
-- `/dashboard`:暴露配置检查结果,同上
-
-**未做保护的典型风险**:
-- 任意人 curl `POST /v1/audio/speech` → 消耗你火山账号的字符额度
-- 任意人 `GET /metrics` → 推断你的使用量、技术栈、错误模式
-- 任意人 `GET /dashboard` → 确认你 TTS 配置就绪状态
-
-**内网部署 / 私网反代后**:这些警示不适用,直接用就行。
+| `adapter/volcano/` | 火山 v3 HTTP Chunked 客户端 |
+| `telemetry/` | Counter / Gauge / Histogram + Prometheus 文本导出 |
+| `metrics/` | TTS 业务指标注册 |
+| `cmd/dumpdb/` | ops 工具: dump tts.db |
+| `dto/` | 请求/响应类型 |
+| `common/` | 常量 + 调试日志 |
 
 ## 常见问题
 
-### 1. `code=55000000, message=resource ID is mismatched with speaker related resource`
+### 1. `code=55000000 resource ID is mismatched`
 
-资源/音色不匹配。修复:
-
-1. 火山控制台 → 语音技术 → 你的应用 → 资源管理或音色库
+资源 / 音色不匹配。修复:
+1. 火山控制台 → 语音技术 → 你的应用 → 资源管理
 2. 用控制台在线体验/调试同一对 `BYTEDANCE_TTS_RESOURCE_ID` + 音色
 3. 控制台能合成的组合才是正确的
-4. 把控制台实际显示的资源 ID 字符串(通常是 `volc.megatts.*` 格式)填到 `BYTEDANCE_TTS_RESOURCE_ID`
-5. 复刻音色(speaker 以 `S_` 开头)需确认 Resource ID 已开通且与音色同族
+4. v3 API 复刻 2.0 用 `seed-icl-2.0`, **不要填 `volc.megatts.icl`**
+5. 复刻音色 (speaker `S_` 开头) 需确认 Resource ID 已开通
 
-### 2. PowerShell 下 `curl` 解释错
+### 2. `code=45000030 requested resource not granted`
+
+账号未开通该资源。控制台 → 资源管理 → 申请开通。
+
+### 3. 资源 ID 该填什么
+
+v3 API 复刻 2.0 项目: **`seed-icl-2.0`** (固定)
+
+`volc.megatts.icl` 是 1.0 服务品类编码,本项目用不了。
+
+### 4. WAV 格式音频播放异常
+
+流式场景下火山 API 的 wav 格式每个 chunk 都返回完整 wav header,拼接后损坏。本项目已自动处理:选择 wav 输出时,内部用 pcm 格式请求 API,本地拼装标准 wav header。如仍有问题,改用 `mp3`。
+
+### 5. PowerShell 下 `curl` 解释错
 
 PowerShell 里 `curl` 是 `Invoke-WebRequest` 的别名。**必须写 `curl.exe`**:
 
 ```powershell
-curl.exe -v -X POST "http://localhost:8080/v1/audio/speech" -H "Content-Type: application/json" --data-binary "@body.json"
+curl.exe -X POST "http://localhost:8080/v1/audio/speech" -H "Content-Type: application/json" --data-binary "@body.json"
 ```
 
 JSON 用单引号包,或写到文件用 `--data-binary "@file.json"`。
-
-### 3. WAV 格式音频播放异常
-
-流式场景下火山 API 的 wav 格式每个 chunk 都返回完整 wav header,拼接后损坏。本项目已自动处理:选择 wav 输出时,内部用 pcm 格式请求 API,本地拼装标准 wav header。如仍有问题,改用 `mp3`。
-
-### 4. 调试时如何看详细日志
-
-设置 `BYTEDANCE_TTS_DEBUG=true` 后重启服务,会额外输出上游请求参数、sentence 事件、CORS 拦截等。详见上文「调试日志」一节。
-
-### 5. 多 API Key 配置
-
-```bash
-OPENAI_TTS_API_KEY=sk-key1,sk-key2,sk-key3
-```
 
 ### 6. 修改端口
 
@@ -516,19 +333,18 @@ OPENAI_TTS_API_KEY=sk-key1,sk-key2,sk-key3
 PORT=8081 ./tts-api
 ```
 
+或 `.env` 里改 `PORT=8081`。
+
 ## 技术支持
 
 如有问题,请检查:
-
-1. 环境变量配置是否正确
-2. 网络是否能访问火山引擎 TTS 服务
-3. 鉴权信息是否有效
-4. Resource ID 与 Speaker 是否匹配
-5. `ALLOWED_ORIGINS` 是否包含前端完整 origin(含 https://)
-6. 客户端请求 URL 是否以 https:// 开头
-7. 生产环境凭据是否定期轮换
-8. 复刻音色确保 Resource ID 与音色 ID 同族
-9. 音频格式是否匹配客户端解码能力(默认 mp3 兼容性最好)
+1. 服务启动后日志第一段 "环境配置汇总" — 火山必填项是否全 ✓
+2. `/health` 返回 `status: "ok"` 且 `config_error: false`
+3. `/admin` → 设置 tab 检查 API Key / 默认资源 ID / 默认音色
+4. `/admin` → 音色管理 tab 检查 voice 是否启用
+5. 火山控制台 → 在线体验同一对 resource + speaker 能合成
+6. 客户端请求 URL 是否以 https:// 开头 (公网)
+7. `/admin` → CORS tab 检查白名单含前端完整 origin
 
 ## 许可证
 
