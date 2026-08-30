@@ -953,7 +953,7 @@
                     toast('err', '保存 CORS 失败: ' + corsErr.value);
                 } finally { savingCors.value = false; }
             };
-            const reloadAll = () => { loadOverview(); loadVoices(); };
+            const reloadAll = () => { loadOverview(); loadVoices(); loadSettings(); };
 
             const saveSettings = async () => {
                 settingsErr.value = '';
