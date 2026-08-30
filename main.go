@@ -15,6 +15,7 @@ import (
 	"github.com/volcano-tts/tts-api/middleware"
 	"github.com/volcano-tts/tts-api/router"
 	"github.com/volcano-tts/tts-api/setting"
+	"github.com/volcano-tts/tts-api/telemetry"
 )
 
 // ttsDBPath 返回数据库/lock 所在路径;空时落到当前目录的 tts.db。
@@ -58,9 +59,23 @@ func main() {
 
 	// 4) M3: 从 store 加载运行时 TTS 配置(替代原来的 env-based InitTTSConfig)
 	// 必须在 LogStartupSummary 之前,这样日志显示的是真实状态(API key 已从 DB 加载,不再读 env)
+	//
+	// 模式区分:
+	//   - setup 模式 + 失败 = 正常(还没装), 警告即可
+	//   - normal 模式 + 失败 = 致命(已装但配置坏), fail-fast 让 K8s/进程管理器拉起
 	if st != nil {
 		if err := setting.LoadRuntimeConfig(st); err != nil {
-			log.Printf("[main] TTS 运行时配置加载失败:%v", err)
+			mode := installer.GetMode()
+			modeName := "setup"
+			if mode == installer.ModeNormal {
+				modeName = "normal"
+			}
+			metrics.ConfigLoadFailures.Inc(telemetry.Labels{"mode": modeName})
+			if mode == installer.ModeNormal {
+				log.Printf("[main][FATAL] TTS 运行时配置加载失败 (normal mode, 服务无法启动): %v", err)
+				log.Fatalf("service cannot start in normal mode without valid config: %v", err)
+			}
+			log.Printf("[main][WARN] TTS 运行时配置加载失败 (setup mode, 需先 /setup): %v", err)
 		} else {
 			log.Printf("[main] TTS 运行时配置已加载(api_key=***, speaker=%s, resource=%s, format=%s)",
 				setting.TTSOptions.Speaker, setting.TTSOptions.ResourceID, setting.TTSOptions.Format)

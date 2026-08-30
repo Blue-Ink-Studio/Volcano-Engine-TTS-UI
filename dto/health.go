@@ -18,6 +18,8 @@ type HealthResponse struct {
 }
 
 type ConfigStatusResponse struct {
-	AllRequiredVarsSet bool `json:"all_required_vars_set"`
-	ConfigError        bool `json:"config_error"`
+	AllRequiredVarsSet bool   `json:"all_required_vars_set"`
+	ConfigError        bool   `json:"config_error"`
+	// Error 仅在 ConfigError=true 时填充, 给出原始 error message, 方便运维 / curl 一眼看出原因
+	Error string `json:"error,omitempty"`
 }

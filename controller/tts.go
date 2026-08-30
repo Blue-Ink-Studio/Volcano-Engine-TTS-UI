@@ -305,11 +305,21 @@ func HealthHandler(w http.ResponseWriter, r *http.Request) {
 		ConfigStatus: dto.ConfigStatusResponse{
 			AllRequiredVarsSet: allRequired,
 			ConfigError:        setting.TTSConfigErr != nil,
+			Error:              configErrorMessage(setting.TTSConfigErr),
 		},
 		Installed: mode == installer.ModeNormal,
 		Mode:      mode.String(),
 	}
 	json.NewEncoder(w).Encode(resp)
+}
+
+// configErrorMessage 把 setting.TTSConfigErr 安全地转成可对外暴露的字符串。
+// 仅在 normal 模式且有错时调用, error 为 nil 时返 "" (被 omitempty 跳过)。
+func configErrorMessage(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
 }
 
 var startTime time.Time
