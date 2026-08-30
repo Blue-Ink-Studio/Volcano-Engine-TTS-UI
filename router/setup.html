@@ -223,8 +223,8 @@
             <div class="field-row">
                 <div class="field">
                     <label>默认资源 ID <span class="req">*</span></label>
-                    <input v-model="form.default_resource_id" placeholder="volc.megatts.default">
-                    <div class="hint">音色所属的计费资源 ID;volc.megatts.icl 用于复刻音色。</div>
+                    <input v-model="form.default_resource_id" placeholder="seed-icl-2.0">
+                    <div class="hint">音色所属的计费资源 ID;本项目为豆包声音复刻大模型 2.0,固定使用 <code>seed-icl-2.0</code>。</div>
                 </div>
                 <div class="field">
                     <label>默认音色 <span class="req">*</span></label>
@@ -275,7 +275,7 @@
             <div v-for="(v, i) in form.voices" :key="i" class="voice-row">
                 <input v-model="v.name" placeholder="qian">
                 <input v-model="v.speaker" placeholder="S_xxx">
-                <input v-model="v.resource_id" placeholder="volc.megatts.icl">
+                <input v-model="v.resource_id" placeholder="seed-icl-2.0">
                 <input v-model="v.model" placeholder="seed-tts-2.0-standard">
                 <button class="rm" @click="removeVoice(i)" :disabled="form.voices.length <= 1" title="删除">×</button>
             </div>
@@ -340,18 +340,18 @@
             const form = ref({
                 auth_key: '',
                 api_key: '',
-                default_resource_id: 'volc.megatts.default',
+                default_resource_id: 'seed-icl-2.0',
                 default_speaker: '',
                 default_format: 'mp3',
                 sample_rate: 24000,
                 token: '',
-                voices: [{ name: '', speaker: '', resource_id: 'volc.megatts.icl', model: 'seed-tts-2.0-standard' }],
+                voices: [{ name: '', speaker: '', resource_id: 'seed-icl-2.0', model: 'seed-tts-2.0-standard' }],
             });
             const errorMsg = ref('');
             const submitting = ref(false);
 
             const addVoice = () => {
-                form.value.voices.push({ name: '', speaker: '', resource_id: 'volc.megatts.icl', model: 'seed-tts-2.0-standard' });
+                form.value.voices.push({ name: '', speaker: '', resource_id: 'seed-icl-2.0', model: 'seed-tts-2.0-standard' });
             };
             const removeVoice = (i) => {
                 if (form.value.voices.length > 1) form.value.voices.splice(i, 1);

@@ -27,6 +27,12 @@ TODO.md
 # Release artifacts (build output)
 release/
 
+# Local build output (start-local.ps1 builds to bin/)
+bin/
+
+# Local dev scripts (per-user; not part of repo)
+start-local.ps1
+
 # Runtime database artifacts (created by M1 installer flow)
 tts.db
 tts.db-*
