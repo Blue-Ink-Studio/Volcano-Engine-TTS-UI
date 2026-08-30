@@ -684,7 +684,7 @@
                             <div class="grid-2">
                                 <div class="field">
                                     <label>默认资源 ID</label>
-                                    <input v-model="settingsForm.default_resource_id" placeholder="volc.megatts.default">
+                                    <input v-model="settingsForm.default_resource_id" placeholder="seed-icl-2.0">
                                 </div>
                                 <div class="field">
                                     <label>默认音色 (name)</label>
@@ -773,7 +773,7 @@
                                 </div>
                                 <div class="field">
                                     <label>资源 ID <span class="req">*</span></label>
-                                    <input v-model="form.resource_id" placeholder="volc.megatts.icl" class="mono">
+                                    <input v-model="form.resource_id" placeholder="seed-icl-2.0" class="mono">
                                 </div>
                                 <div class="field">
                                     <label>Model</label>
@@ -847,7 +847,7 @@
             const showAdd = ref(false);
             const adding = ref(false);
             const addErr = ref('');
-            const form = ref({ name: '', speaker: '', resource_id: 'volc.megatts.icl', model: 'seed-tts-2.0-standard', language: '', description: '' });
+            const form = ref({ name: '', speaker: '', resource_id: 'seed-icl-2.0', model: 'seed-tts-2.0-standard', language: '', description: '' });
 
             // Settings
             const settings = ref({});
@@ -1006,7 +1006,7 @@
             const resetSettingsForm = () => { loadSettings(); };
 
             const openAdd = () => {
-                form.value = { name: '', speaker: '', resource_id: 'volc.megatts.icl', model: 'seed-tts-2.0-standard', language: '', description: '' };
+                form.value = { name: '', speaker: '', resource_id: 'seed-icl-2.0', model: 'seed-tts-2.0-standard', language: '', description: '' };
                 addErr.value = '';
                 showAdd.value = true;
             };
