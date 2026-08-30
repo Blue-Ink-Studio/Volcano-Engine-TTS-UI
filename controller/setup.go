@@ -190,11 +190,21 @@ func SetupSubmitHandler(w http.ResponseWriter, r *http.Request) {
 		log.Printf("[setup] 检测到 %d 条已存在 voices,本次将跳过清空(name 冲突由 ErrDuplicate 处理)", len(existing))
 	}
 	inserted := 0
+	// 【UX 改进】voice 行的 resource_id 留空时,自动用 settings.default_resource_id 兜底。
+	// 用户在 step 2 填了 default_resource_id 后,step 3 的 voice 行 resource_id
+	// 可以不填 — 保持一致。否则会出现 "settings 里 seed-icl-2.0,voice 里 volc.megatts.icl"
+	// 这种 mismatch,运行时 500。
+	defaultResourceID := settingsKV["default_resource_id"]
 	for _, v := range body.Voices {
+		voiceResourceID := v.ResourceID
+		if voiceResourceID == "" {
+			voiceResourceID = defaultResourceID
+			log.Printf("[setup] voice %q resource_id 留空,自动用 default_resource_id=%q", v.Name, defaultResourceID)
+		}
 		_, err := s.VoiceInsert(store.Voice{
 			Name:       v.Name,
 			Speaker:    v.Speaker,
-			ResourceID: v.ResourceID,
+			ResourceID: voiceResourceID,
 			Model:      v.Model,
 			Language:   v.Language,
 			Enabled:    true,
@@ -267,9 +277,9 @@ func validateSetupVoices(vs []SetupVoice) error {
 		if strings.TrimSpace(v.Speaker) == "" {
 			return fmt.Errorf("voices[%d] (%s): speaker is required", i, v.Name)
 		}
-		if strings.TrimSpace(v.ResourceID) == "" {
-			return fmt.Errorf("voices[%d] (%s): resource_id is required", i, v.Name)
-		}
+		// 【UX 改进】resource_id 留空是允许的 — 装时(下面那个循环)会自动用
+		// settings.default_resource_id 兜底。用户只填 step 2 一处即可。
+		_ = v.ResourceID // (保留以便以后加更细的校验)
 		if _, dup := names[v.Name]; dup {
 			return fmt.Errorf("voices[%d]: duplicate name %q", i, v.Name)
 		}
