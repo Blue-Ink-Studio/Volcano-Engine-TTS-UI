@@ -172,9 +172,9 @@ func OpenaiTTSHandler(w http.ResponseWriter, r *http.Request) {
 		v, err := s.VoiceGetByName(req.Voice)
 		if err != nil {
 			if err == store.ErrNotFound {
-				log.Printf("警告: 未知 voice=%s - 路径=%s 客户端=%s", req.Voice, r.URL.Path, middleware.GetClientIP(r))
+				log.Printf("警告: 未知 voice=%q - 路径=%s 客户端=%s", req.Voice, r.URL.Path, middleware.GetClientIP(r))
 				middleware.SendJSONError(w, http.StatusBadRequest,
-					fmt.Sprintf("unknown voice: %s", req.Voice),
+					fmt.Sprintf("unknown voice: '%s'", req.Voice),
 					"invalid_request_error", "unknown_voice")
 				return
 			}
@@ -184,6 +184,13 @@ func OpenaiTTSHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		// 覆盖 opts(API key / UID 保留自 setting.TTSOptions)
+		if !v.Enabled {
+			log.Printf("警告: voice=%q 已禁用 - 客户端=%s", req.Voice, middleware.GetClientIP(r))
+			middleware.SendJSONError(w, http.StatusForbidden,
+				fmt.Sprintf("voice '%s' is disabled", req.Voice),
+				"invalid_request_error", "voice_disabled")
+			return
+		}
 		opts.Speaker = v.Speaker
 		opts.ResourceID = v.ResourceID
 		if v.Model != "" {
