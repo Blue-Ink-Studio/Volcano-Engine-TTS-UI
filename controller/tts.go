@@ -155,7 +155,8 @@ func OpenaiTTSHandler(w http.ResponseWriter, r *http.Request) {
 	opts.Text = req.Input
 
 	// M3: voice 路由
-	//   - voice 为空 → 用 setting.TTSOptions.Speaker (即 store 里的 default_speaker)
+	//   - voice 为空 → 走 LoadRuntimeConfig 解析过的 opts.Speaker (已是真 speaker ID,
+	//     default_speaker 是 voice 名,LoadRuntimeConfig 查 voice 表后替换)
 	//   - voice 非空 → 查 voices 表,替换 opts.Speaker / ResourceID / Model
 	//   - 命中但 enabled=0 → 仍可用(用户显式传 voice 即覆盖 enabled 状态;若想禁用在 admin UI 关掉就行)
 	//   - 未命中 → 400 "unknown voice: <name>"

@@ -202,15 +202,23 @@ func LoadRuntimeConfig(s Store) error {
 		return TTSConfigErr
 	}
 
-	// 【BUG 修复】default_speaker 是 voice **名字**(如 "chun"),
+	// 【BUG 修复 · 第二轮】default_speaker 是 voice **名字**(如 "chun"),
 	// 不是火山 speaker ID (如 "S_G8tEKnaJ1")。原代码直接把 voice 名当
 	// speaker ID 用,导致调 /v1/audio/speech 不传 voice 时火山 55000000。
-	// 这里查 voice 表拿真正的 speaker / resource_id / model。
+	//
+	// 字段优先级:
+	//   - speaker     ←  从 default_speaker 这个 voice 查表拿真 ID (必查)
+	//   - resource_id ←  settings 里的(用户偏好,不被 voice 行覆盖)
+	//   - model       ←  voice 行的优先,settings 里的次之
+	//
+	// 之前 f5563e6 把 resourceId 也覆盖了,导致用户在 setup 设的
+	// default_resource_id 永远没机会生效。这次只覆盖 speaker,不动 resourceId。
 	var voiceModel string
-	if vSpeaker, vResource, vModel, found, vErr := s.GetVoiceForTTS(speaker); vErr == nil && found {
+	if vSpeaker, _, vModel, found, vErr := s.GetVoiceForTTS(speaker); vErr == nil && found {
 		speaker = vSpeaker
-		resourceId = vResource
-		voiceModel = vModel
+		if vModel != "" {
+			voiceModel = vModel
+		}
 		// 找不到 voice 时不报错 — 保持原值(向后兼容)
 	}
 
