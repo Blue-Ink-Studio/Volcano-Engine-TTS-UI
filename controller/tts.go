@@ -190,7 +190,7 @@ func OpenaiTTSHandler(w http.ResponseWriter, r *http.Request) {
 			opts.Model = v.Model
 		}
 		log.Printf("[tts] voice=%s 命中 (speaker=%s resource=%s model=%s) - 客户端=%s",
-			req.Voice, v.Speaker, v.ResourceID, v.Model, middleware.GetClientIP(r))
+			req.Voice, telemetry.MaskSpeaker(v.Speaker), v.ResourceID, v.Model, middleware.GetClientIP(r))
 	}
 
 	ctx, cancel := context.WithTimeout(r.Context(), setting.TTSTimeout)
