@@ -25,15 +25,18 @@ RUN apk --no-cache add ca-certificates tzdata \
 WORKDIR /app
 
 COPY --from=builder /app/tts-api .
-COPY --from=builder /app/health.html .
+# health.html 已通过 //go:embed 嵌入 binary,无需单独复制
 
-RUN chown -R appuser:appgroup /app
+# 准备 /data 目录存 SQLite (tts.db + installed.lock)
+# appuser 必须可写,否则启动后无法创建 DB
+RUN mkdir -p /data \
+    && chown -R appuser:appgroup /app /data
 
 USER appuser
 
 EXPOSE 8080
 
-HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
     CMD wget -qO- http://localhost:8080/health || exit 1
 
 ENTRYPOINT ["./tts-api"]

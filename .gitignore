@@ -4,6 +4,9 @@
 *.test
 *.out
 
+# Go test sources (prevent accidental commit; tests live outside the repo by policy)
+*_test.go
+
 # Editor / OS
 .vscode/
 .idea/
@@ -20,3 +23,24 @@ Thumbs.db
 
 # Local-only working notes (use task board for shared tracking)
 TODO.md
+
+# Release artifacts (build output)
+release/
+
+# Local build output (start-local.ps1 builds to bin/)
+bin/
+
+# Local dev scripts (per-user; not part of repo)
+start-local.ps1
+
+# Runtime database artifacts (created by M1 installer flow)
+tts.db
+tts.db-*
+tts.db.*
+installed.lock
+
+# UI handoff bundle (for external AI redesign work; not deployed)
+ui-handoff/
+
+# Docs (本地草稿,不入库)
+docs/

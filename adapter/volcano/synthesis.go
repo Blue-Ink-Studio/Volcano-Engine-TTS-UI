@@ -11,6 +11,7 @@ import (
 
 	"github.com/volcano-tts/tts-api/common"
 	"github.com/volcano-tts/tts-api/dto"
+	"github.com/volcano-tts/tts-api/telemetry"
 )
 
 // MetricsRecorder 是适配器向上报告埋点的接口。
@@ -83,7 +84,7 @@ func Synthesis(
 
 	if common.DebugLog {
 		log.Printf("TTS upstream: resource_id=%s speaker=%s model=%q format=%s sample_rate=%d speech_rate=%d additions=%q",
-			opts.ResourceID, opts.Speaker, opts.Model, opts.Format, opts.SampleRate, opts.SpeechRate, extractAdditionsForLog(body))
+			opts.ResourceID, telemetry.MaskSpeaker(opts.Speaker), opts.Model, opts.Format, opts.SampleRate, opts.SpeechRate, extractAdditionsForLog(body))
 	}
 
 	resp, err := client.PostStream(ctx, "https://openspeech.bytedance.com/api/v3/tts/unidirectional", headers, body)
@@ -144,7 +145,7 @@ func Synthesis(
 	mtr.UpstreamFinished(opts.Speaker, opts.Model, opts.Format, "ok", duration, parsed.FirstChunk, parsed.Chunks, len(finalData), 0)
 
 	log.Printf("TTS 合成成功 - 音色=%s 格式=%s 文本=%d字 音频=%d字节 分片=%d 耗时=%v",
-		opts.Speaker, clientFormat, len(text), len(finalData), parsed.Chunks, duration)
+		telemetry.MaskSpeaker(opts.Speaker), clientFormat, len(text), len(finalData), parsed.Chunks, duration)
 
 	return &dto.SynthesisResult{
 		AudioData:  finalData,

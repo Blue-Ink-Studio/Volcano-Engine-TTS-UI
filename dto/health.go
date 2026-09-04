@@ -12,9 +12,14 @@ type HealthResponse struct {
 	StartTime    string                 `json:"start_time"`
 	Memory       map[string]interface{} `json:"memory"`
 	ConfigStatus ConfigStatusResponse   `json:"config_status"`
+	// M1 新增:反映 installer 模式,便于部署探针/运维识别未初始化状态
+	Installed bool   `json:"installed"`
+	Mode      string `json:"mode"`
 }
 
 type ConfigStatusResponse struct {
-	AllRequiredVarsSet bool `json:"all_required_vars_set"`
-	ConfigError        bool `json:"config_error"`
+	AllRequiredVarsSet bool   `json:"all_required_vars_set"`
+	ConfigError        bool   `json:"config_error"`
+	// Error 仅在 ConfigError=true 时填充, 给出原始 error message, 方便运维 / curl 一眼看出原因
+	Error string `json:"error,omitempty"`
 }

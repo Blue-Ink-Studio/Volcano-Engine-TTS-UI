@@ -14,9 +14,11 @@ import (
 	"github.com/volcano-tts/tts-api/adapter/volcano"
 	"github.com/volcano-tts/tts-api/common"
 	"github.com/volcano-tts/tts-api/dto"
+	"github.com/volcano-tts/tts-api/installer"
 	"github.com/volcano-tts/tts-api/metrics"
 	"github.com/volcano-tts/tts-api/middleware"
 	"github.com/volcano-tts/tts-api/setting"
+	"github.com/volcano-tts/tts-api/store"
 	"github.com/volcano-tts/tts-api/telemetry"
 	"github.com/volcano-tts/tts-api/version"
 )
@@ -59,6 +61,15 @@ func OpenaiTTSHandler(w http.ResponseWriter, r *http.Request) {
 			r.Method, r.URL.Path, middleware.GetClientIP(r))
 		metrics.RequestTotal.Inc(telemetry.Labels{"status": "method_not_allowed", "format": "", "speaker": "", "model": ""})
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// 安装模式双保险:即使 InstallGuard 中间件没拦住,这里也 503 + 引导跳转
+	if installer.GetMode() == installer.ModeSetup {
+		log.Printf("[tts] 安装模式下拒绝 /v1/audio/speech - 客户端=%s", middleware.GetClientIP(r))
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = w.Write([]byte(`{"error":"not installed","code":"install_required","redirect":"/setup"}`))
 		return
 	}
 
@@ -143,6 +154,52 @@ func OpenaiTTSHandler(w http.ResponseWriter, r *http.Request) {
 	opts := setting.TTSOptions
 	opts.Text = req.Input
 
+	// M3: voice 路由
+	//   - voice 为空 → 走 LoadRuntimeConfig 解析过的 opts.Speaker (已是真 speaker ID,
+	//     default_speaker 是 voice 名,LoadRuntimeConfig 查 voice 表后替换)
+	//   - voice 非空 → 查 voices 表,替换 opts.Speaker / ResourceID / Model
+	//   - 命中但 enabled=0 → 仍可用(用户显式传 voice 即覆盖 enabled 状态;若想禁用在 admin UI 关掉就行)
+	//   - 未命中 → 400 "unknown voice: <name>"
+	if req.Voice != "" {
+		s := GetAdminStore()
+		if s == nil {
+			log.Printf("警告: voice=%s 路由但 store 未初始化 - 路径=%s", req.Voice, r.URL.Path)
+			middleware.SendJSONError(w, http.StatusServiceUnavailable,
+				"voice routing requires database; not initialized",
+				"configuration_error", "db_not_ready")
+			return
+		}
+		v, err := s.VoiceGetByName(req.Voice)
+		if err != nil {
+			if err == store.ErrNotFound {
+				log.Printf("警告: 未知 voice=%q - 路径=%s 客户端=%s", req.Voice, r.URL.Path, middleware.GetClientIP(r))
+				middleware.SendJSONError(w, http.StatusBadRequest,
+					fmt.Sprintf("unknown voice: '%s'", req.Voice),
+					"invalid_request_error", "unknown_voice")
+				return
+			}
+			log.Printf("警告: voice 查库失败 - 错误=%v voice=%s", err, req.Voice)
+			middleware.SendJSONError(w, http.StatusInternalServerError,
+				"voice lookup failed", "server_error", "db_read_failed")
+			return
+		}
+		// 覆盖 opts(API key / UID 保留自 setting.TTSOptions)
+		if !v.Enabled {
+			log.Printf("警告: voice=%q 已禁用 - 客户端=%s", req.Voice, middleware.GetClientIP(r))
+			middleware.SendJSONError(w, http.StatusForbidden,
+				fmt.Sprintf("voice '%s' is disabled", req.Voice),
+				"invalid_request_error", "voice_disabled")
+			return
+		}
+		opts.Speaker = v.Speaker
+		opts.ResourceID = v.ResourceID
+		if v.Model != "" {
+			opts.Model = v.Model
+		}
+		log.Printf("[tts] voice=%s 命中 (speaker=%s resource=%s model=%s) - 客户端=%s",
+			req.Voice, telemetry.MaskSpeaker(v.Speaker), v.ResourceID, v.Model, middleware.GetClientIP(r))
+	}
+
 	ctx, cancel := context.WithTimeout(r.Context(), setting.TTSTimeout)
 	defer cancel()
 
@@ -151,7 +208,10 @@ func OpenaiTTSHandler(w http.ResponseWriter, r *http.Request) {
 
 	finalLabels := telemetry.Labels{
 		"format":  clientFormat,
-		"speaker": opts.Speaker,
+		// speaker 是火山复刻音色 ID(用户付费资产),不能直接出现在 /metrics label 里
+		//(无鉴权可枚举)。用 sha1[:8] 替代:同 speaker 同 label 保留 per-voice 观测,
+		//但反推不出原值。Admin UI 想要看原名通过 /api/voices 拿 name 字段。
+		"speaker": telemetry.SpeakerLabel(opts.Speaker),
 		"model":   opts.Model,
 	}
 	if err != nil {
@@ -213,7 +273,12 @@ func contentTypeFor(format string) string {
 func HealthHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 
-	if setting.TTSConfigErr != nil {
+	// 安装模式下 /health 仍然 200,但通过 installed 字段让探针/运维识别
+	// (Kubernetes readiness probe 可以用 installed=false 决定是否放流量)
+	mode := installer.GetMode()
+	if mode == installer.ModeSetup {
+		w.WriteHeader(http.StatusOK) // 200,因为进程活着,只是还没初始化
+	} else if setting.TTSConfigErr != nil {
 		w.WriteHeader(http.StatusServiceUnavailable)
 	} else {
 		w.WriteHeader(http.StatusOK)
@@ -223,7 +288,9 @@ func HealthHandler(w http.ResponseWriter, r *http.Request) {
 	allRequired := env["all_required_vars_set"].(bool)
 
 	status := "ok"
-	if !allRequired {
+	if mode == installer.ModeSetup {
+		status = "not_installed"
+	} else if !allRequired {
 		status = "configuration_error"
 	}
 
@@ -238,9 +305,21 @@ func HealthHandler(w http.ResponseWriter, r *http.Request) {
 		ConfigStatus: dto.ConfigStatusResponse{
 			AllRequiredVarsSet: allRequired,
 			ConfigError:        setting.TTSConfigErr != nil,
+			Error:              configErrorMessage(setting.TTSConfigErr),
 		},
+		Installed: mode == installer.ModeNormal,
+		Mode:      mode.String(),
 	}
 	json.NewEncoder(w).Encode(resp)
+}
+
+// configErrorMessage 把 setting.TTSConfigErr 安全地转成可对外暴露的字符串。
+// 仅在 normal 模式且有错时调用, error 为 nil 时返 "" (被 omitempty 跳过)。
+func configErrorMessage(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
 }
 
 var startTime time.Time

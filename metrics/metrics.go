@@ -34,6 +34,9 @@ var (
 	ConcurrencyRejected *telemetry.Counter
 	RateLimitRejected   *telemetry.Counter
 	AuthFailed          *telemetry.Counter
+
+	// 启动期配置加载失败(仅 normal 模式可能触发,触发后服务 fail-fast)
+	ConfigLoadFailures *telemetry.Counter
 )
 
 // Init 初始化所有指标。在 main 启动期调用一次。
@@ -107,6 +110,11 @@ func Init() {
 		"tts_auth_failed_total",
 		"Requests rejected due to invalid/missing API key.",
 	)
+	ConfigLoadFailures = m.NewCounter(
+		"tts_config_load_failures_total",
+		"TTS runtime config load failures during startup. labeled by mode (normal/setup).",
+		"mode",
+	)
 }
 
 // AdapterRecorder 把 telemetry 指标适配为 volcano.MetricsRecorder。
@@ -114,12 +122,14 @@ type AdapterRecorder struct{}
 
 // UpstreamStarted 满足 volcano.MetricsRecorder 接口。
 func (AdapterRecorder) UpstreamStarted(speaker, model, format string) {
-	UpstreamTotal.Inc(telemetry.Labels{"status": "started", "format": format, "model": model, "speaker": speaker})
+	// speaker 用 sha1[:8] 替代,保护火山复刻音色 ID
+	// (无鉴权 /metrics 端点可枚举,这是 P0 隐私问题)
+	UpstreamTotal.Inc(telemetry.Labels{"status": "started", "format": format, "model": model, "speaker": telemetry.SpeakerLabel(speaker)})
 }
 
 // UpstreamFinished 满足 volcano.MetricsRecorder 接口。
 func (AdapterRecorder) UpstreamFinished(speaker, model, format, status string, duration, ttfb time.Duration, chunks, audioBytes, errCode int) {
-	labels := telemetry.Labels{"status": status, "format": format, "model": model, "speaker": speaker}
+	labels := telemetry.Labels{"status": status, "format": format, "model": model, "speaker": telemetry.SpeakerLabel(speaker)}
 	UpstreamTotal.Inc(labels)
 	UpstreamDuration.Observe(duration.Seconds(), telemetry.Labels{"status": status, "format": format})
 	if ttfb > 0 {

@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/volcano-tts/tts-api/common"
+	"github.com/volcano-tts/tts-api/installer"
 	"github.com/volcano-tts/tts-api/setting"
 )
 
@@ -40,12 +41,85 @@ func matchOrigin(origin string) (string, bool) {
 	return "", false
 }
 
+// isSameOrigin 比较 Origin 与 r.Host,判断是否同源。
+//   - 直接访问(server 自己:80): Origin=http://server:80, Host=server:80 → 同源
+//   - 反向代理(https://app.example.com → http://server:80):
+//     Origin=https://app.example.com, Host=server:80
+//     默认不同源;但如果设置 TRUSTED_PROXY_HOPS 或 X-Forwarded-Host,要让它们一致。
+//   - 浏览器对同源 POST 也会设 Origin(避免被自己的 CORS 误伤),这里豁免。
+// 返回 true 表示请求来自自己,无需 CORS 介入。
+func isSameOrigin(r *http.Request) bool {
+	origin := r.Header.Get("Origin")
+	if origin == "" {
+		return false
+	}
+	// 解析 Origin 的 host 部分
+	originHost, originScheme := splitOrigin(origin)
+	if originHost == "" {
+		return false
+	}
+	// 优先用 X-Forwarded-Host / X-Forwarded-Proto(反向代理场景),
+	// 退而用 r.Host(直接访问场景)
+	reqHost := r.Host
+	if fh := r.Header.Get("X-Forwarded-Host"); fh != "" {
+		// X-Forwarded-Host 可能是 host1, host2 (取第一个)
+		if i := strings.Index(fh, ","); i >= 0 {
+			fh = strings.TrimSpace(fh[:i])
+		}
+		reqHost = fh
+	}
+	reqScheme := "http"
+	if r.TLS != nil {
+		reqScheme = "https"
+	} else if fp := r.Header.Get("X-Forwarded-Proto"); fp != "" {
+		if i := strings.Index(fp, ","); i >= 0 {
+			fp = strings.TrimSpace(fp[:i])
+		}
+		reqScheme = strings.ToLower(fp)
+	}
+	// host 匹配(忽略大小写)
+	return strings.EqualFold(originHost, reqHost) && strings.EqualFold(originScheme, reqScheme)
+}
+
+// splitOrigin 把 "https://example.com:8080" 拆成 ("example.com:8080", "https")。
+// 没有 scheme 时返回 ("", "")。
+func splitOrigin(origin string) (host, scheme string) {
+	idx := strings.Index(origin, "://")
+	if idx < 0 || idx == 0 {
+		return "", ""
+	}
+	scheme = origin[:idx]
+	rest := origin[idx+3:]
+	// 去掉 path 部分
+	if i := strings.Index(rest, "/"); i >= 0 {
+		rest = rest[:i]
+	}
+	return rest, scheme
+}
+
 func CORS(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// 安装模式完全跳过 CORS:
+		//   - 用户首次装,不可能提前知道自己的访问域名来配 ALLOWED_ORIGINS
+		//   - 装完进 normal 模式后,设的 CORS 才生效(从 DB 读)
+		// 这样 install 永远能成功,装完再通过 WebUI 配 CORS。
+		if installer.GetMode() == installer.ModeSetup {
+			next.ServeHTTP(w, r)
+			return
+		}
+
 		origin := r.Header.Get("Origin")
 
 		// 无 Origin 头:非跨域请求,跳过 CORS 处理
 		if origin == "" {
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		// 同源豁免:浏览器对同源 POST/JSON 也会发 Origin 头(防 fetch 滥用),
+		// 但同源请求本就不需要 CORS 介入。这里对比 Origin 与 Host(含 X-Forwarded-*),
+		// 一致就放行,避免自家人被自家 CORS 拦。
+		if isSameOrigin(r) {
 			next.ServeHTTP(w, r)
 			return
 		}

@@ -1,0 +1,1075 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>火山 TTS · 管理后台</title>
+    <script src="https://cdn.bootcdn.net/ajax/libs/vue/3.4.21/vue.global.prod.js"></script>
+    <script src="https://cdn.bootcdn.net/ajax/libs/axios/1.6.7/axios.min.js"></script>
+    <style>
+        :root {
+            --bg: #0a0e1a;
+            --bg-sidebar: #0c111e;
+            --bg-card: #131826;
+            --bg-elev: #1a2138;
+            --bg-hover: #1f2740;
+            --border: #232b42;
+            --border-strong: #2e3754;
+            --text: #e4e7ee;
+            --text-dim: #94a3b8;
+            --text-mute: #64748b;
+            --accent: #00d4ff;
+            --accent-hover: #33ddff;
+            --accent-2: #7b2ff7;
+            --accent-soft: rgba(0, 212, 255, 0.10);
+            --accent-glow: rgba(0, 212, 255, 0.35);
+            --success: #22c55e;
+            --success-soft: rgba(34, 197, 94, 0.12);
+            --warning: #f59e0b;
+            --warning-soft: rgba(245, 158, 11, 0.12);
+            --danger: #ef4444;
+            --danger-soft: rgba(239, 68, 68, 0.12);
+            --radius: 8px;
+            --radius-lg: 12px;
+            --radius-xl: 16px;
+            --shadow-sm: 0 1px 2px rgba(0,0,0,0.4);
+            --shadow: 0 4px 16px rgba(0,0,0,0.25);
+            --shadow-lg: 0 20px 50px rgba(0,0,0,0.5);
+            --sidebar-w: 240px;
+        }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        html, body { height: 100%; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            font-size: 14px;
+            line-height: 1.5;
+            -webkit-font-smoothing: antialiased;
+            background-image:
+                radial-gradient(ellipse 70% 50% at 20% 0%, rgba(0,212,255,0.05), transparent),
+                radial-gradient(ellipse 50% 40% at 100% 100%, rgba(123,47,247,0.04), transparent);
+            background-attachment: fixed;
+        }
+        #app { min-height: 100vh; }
+
+        /* === Login === */
+        .login-screen {
+            min-height: 100vh;
+            display: flex; align-items: center; justify-content: center;
+            padding: 24px; position: relative;
+        }
+        .login-screen::before {
+            content: ''; position: absolute; inset: 0;
+            background:
+                radial-gradient(circle at 30% 20%, rgba(0,212,255,0.12), transparent 40%),
+                radial-gradient(circle at 70% 80%, rgba(123,47,247,0.10), transparent 40%);
+            pointer-events: none;
+        }
+        .login-card {
+            position: relative;
+            width: 100%; max-width: 400px;
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: var(--radius-xl);
+            padding: 36px 32px;
+            box-shadow: var(--shadow-lg);
+        }
+        .login-logo {
+            width: 52px; height: 52px;
+            border-radius: 14px;
+            background: linear-gradient(135deg, var(--accent), var(--accent-2));
+            display: flex; align-items: center; justify-content: center;
+            font-weight: 700; font-size: 18px; color: #fff;
+            margin: 0 auto 20px;
+            box-shadow: 0 6px 24px var(--accent-glow);
+        }
+        .login-card h1 { font-size: 22px; font-weight: 600; text-align: center; margin-bottom: 6px; }
+        .login-card .sub { color: var(--text-dim); font-size: 13px; text-align: center; margin-bottom: 24px; }
+        .login-input {
+            width: 100%; padding: 12px 14px; margin-bottom: 14px;
+            background: var(--bg-elev); border: 1px solid var(--border);
+            color: var(--text); border-radius: var(--radius); font-size: 14px;
+            font-family: inherit; transition: border-color 0.15s, box-shadow 0.15s;
+        }
+        .login-input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+        .login-err {
+            margin-top: 12px; padding: 10px 12px;
+            background: var(--danger-soft); border: 1px solid rgba(239,68,68,0.3);
+            color: var(--danger); border-radius: var(--radius); font-size: 12px;
+        }
+
+        /* === App shell === */
+        .app-shell { display: flex; min-height: 100vh; }
+        .sidebar {
+            width: var(--sidebar-w);
+            background: var(--bg-sidebar);
+            border-right: 1px solid var(--border);
+            display: flex; flex-direction: column;
+            position: sticky; top: 0; height: 100vh;
+            flex-shrink: 0;
+        }
+        .brand { display: flex; align-items: center; gap: 12px; padding: 20px 18px; border-bottom: 1px solid var(--border); }
+        .brand-logo {
+            width: 36px; height: 36px; border-radius: 10px;
+            background: linear-gradient(135deg, var(--accent), var(--accent-2));
+            display: flex; align-items: center; justify-content: center;
+            font-weight: 700; font-size: 13px; color: #fff;
+            box-shadow: 0 2px 12px var(--accent-glow);
+        }
+        .brand-name { font-size: 14px; font-weight: 600; }
+        .brand-version { font-size: 11px; color: var(--text-mute); margin-top: 2px; font-family: ui-monospace, monospace; }
+
+        .nav { flex: 1; padding: 16px 12px; overflow-y: auto; }
+        .nav-group { margin-bottom: 20px; }
+        .nav-label {
+            font-size: 10px; font-weight: 600; color: var(--text-mute);
+            text-transform: uppercase; letter-spacing: 0.8px;
+            padding: 0 10px 8px;
+        }
+        .nav-item {
+            display: flex; align-items: center; gap: 10px;
+            padding: 9px 10px; border-radius: var(--radius);
+            color: var(--text-dim); font-size: 13px;
+            cursor: pointer; user-select: none;
+            margin-bottom: 2px;
+            transition: background 0.12s, color 0.12s;
+            position: relative;
+        }
+        .nav-item:hover { background: var(--bg-hover); color: var(--text); }
+        .nav-item.active {
+            background: var(--accent-soft);
+            color: var(--accent);
+            font-weight: 500;
+        }
+        .nav-item.active::before {
+            content: ''; position: absolute; left: 0; top: 50%; transform: translateY(-50%);
+            width: 3px; height: 16px; background: var(--accent); border-radius: 0 2px 2px 0;
+        }
+        .nav-icon { font-size: 16px; width: 18px; text-align: center; flex-shrink: 0; }
+        .nav-badge {
+            margin-left: auto; padding: 1px 7px; border-radius: 10px;
+            background: var(--bg-hover); font-size: 11px; font-weight: 500;
+            color: var(--text-dim);
+        }
+        .nav-item.active .nav-badge { background: rgba(0,212,255,0.2); color: var(--accent); }
+        .nav-dot {
+            margin-left: auto; width: 6px; height: 6px; border-radius: 50%;
+            background: var(--warning); box-shadow: 0 0 0 3px rgba(245,158,11,0.2);
+        }
+
+        .sidebar-foot {
+            display: flex; gap: 4px; padding: 12px;
+            border-top: 1px solid var(--border);
+        }
+        .btn-icon {
+            flex: 1; padding: 8px; background: transparent;
+            border: 1px solid transparent; border-radius: var(--radius);
+            color: var(--text-dim); cursor: pointer; font-size: 13px;
+            font-family: inherit;
+            transition: all 0.12s;
+        }
+        .btn-icon:hover { background: var(--bg-hover); color: var(--text); border-color: var(--border); }
+
+        /* === Main === */
+        .main { flex: 1; min-width: 0; padding: 28px 32px; max-width: 1200px; }
+        .page-head {
+            display: flex; justify-content: space-between; align-items: flex-end;
+            margin-bottom: 24px; gap: 16px; flex-wrap: wrap;
+        }
+        .page-title { font-size: 22px; font-weight: 600; letter-spacing: -0.01em; }
+        .page-sub { color: var(--text-dim); font-size: 13px; margin-top: 4px; }
+        .page-actions { display: flex; gap: 8px; align-items: center; }
+
+        /* === Buttons === */
+        .btn {
+            display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+            padding: 8px 14px; background: var(--bg-elev); border: 1px solid var(--border);
+            color: var(--text); border-radius: var(--radius); cursor: pointer;
+            font-size: 13px; font-weight: 500; font-family: inherit;
+            transition: all 0.12s;
+            white-space: nowrap;
+        }
+        .btn:hover:not(:disabled) { border-color: var(--border-strong); background: var(--bg-hover); }
+        .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+        .btn-primary { background: var(--accent); color: #00121a; border-color: var(--accent); }
+        .btn-primary:hover:not(:disabled) { background: var(--accent-hover); border-color: var(--accent-hover); }
+        .btn-danger { color: var(--danger); border-color: var(--border); }
+        .btn-danger:hover:not(:disabled) { background: var(--danger-soft); border-color: var(--danger); color: var(--danger); }
+        .btn-danger-ghost { color: var(--text-mute); border-color: transparent; background: transparent; padding: 5px 10px; }
+        .btn-danger-ghost:hover:not(:disabled) { background: var(--danger-soft); color: var(--danger); border-color: transparent; }
+        .btn-sm { padding: 6px 10px; font-size: 12px; }
+        .btn-lg { padding: 11px 16px; font-size: 14px; }
+
+        /* === Card === */
+        .card {
+            background: var(--bg-card); border: 1px solid var(--border);
+            border-radius: var(--radius-lg); padding: 20px; margin-bottom: 16px;
+        }
+        .card-head { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 16px; gap: 12px; }
+        .card-title { font-size: 15px; font-weight: 600; }
+        .card-sub { font-size: 12px; color: var(--text-dim); margin-top: 2px; }
+
+        /* === Stat grid === */
+        .stat-grid {
+            display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+            gap: 14px; margin-bottom: 20px;
+        }
+        .stat-card {
+            background: var(--bg-card); border: 1px solid var(--border);
+            border-radius: var(--radius-lg); padding: 18px 20px;
+            transition: border-color 0.15s;
+            position: relative; overflow: hidden;
+        }
+        .stat-card::before {
+            content: ''; position: absolute; top: 0; left: 0; right: 0; height: 1px;
+            background: linear-gradient(90deg, transparent, var(--border-strong), transparent);
+        }
+        .stat-card:hover { border-color: var(--border-strong); }
+        .stat-top { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
+        .stat-label { font-size: 11px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.5px; font-weight: 500; }
+        .stat-value { font-size: 26px; font-weight: 700; letter-spacing: -0.02em; line-height: 1.1; }
+        .stat-value .stat-unit { font-size: 14px; color: var(--text-mute); font-weight: 500; margin-left: 4px; }
+        .stat-foot { font-size: 11px; color: var(--text-dim); margin-top: 6px; }
+
+        .pill {
+            display: inline-flex; align-items: center; gap: 5px;
+            padding: 2px 8px; border-radius: 999px;
+            font-size: 11px; font-weight: 500;
+            background: var(--bg-elev); color: var(--text-dim);
+            border: 1px solid var(--border);
+        }
+        .pill-dot { width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
+        .pill-success { background: var(--success-soft); color: var(--success); border-color: rgba(34,197,94,0.3); }
+        .pill-accent { background: var(--accent-soft); color: var(--accent); border-color: rgba(0,212,255,0.3); }
+        .pill-warning { background: var(--warning-soft); color: var(--warning); border-color: rgba(245,158,11,0.3); }
+        .pill-mute { background: var(--bg-elev); color: var(--text-mute); }
+
+        /* === KV list === */
+        .kv { display: grid; grid-template-columns: 1fr 1fr; gap: 0; }
+        .kv-row { display: contents; }
+        .kv-row > dt { padding: 10px 16px 10px 0; font-size: 12px; color: var(--text-dim); border-bottom: 1px solid var(--border); }
+        .kv-row > dd { padding: 10px 0; font-size: 13px; border-bottom: 1px solid var(--border); word-break: break-all; }
+        .kv-row:last-child > dt, .kv-row:last-child > dd { border-bottom: none; }
+
+        /* === Toolbar === */
+        .toolbar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; gap: 12px; flex-wrap: wrap; }
+        .toolbar-left { display: flex; align-items: center; gap: 10px; flex: 1; min-width: 0; }
+        .toolbar-right { font-size: 12px; color: var(--text-dim); }
+
+        .search { position: relative; flex: 0 0 280px; max-width: 100%; }
+        .search input {
+            width: 100%; padding: 8px 12px 8px 32px;
+            background: var(--bg-card); border: 1px solid var(--border);
+            color: var(--text); border-radius: var(--radius); font-size: 13px;
+            font-family: inherit; transition: border-color 0.15s;
+        }
+        .search input::placeholder { color: var(--text-mute); }
+        .search input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+        .search-icon { position: absolute; left: 10px; top: 50%; transform: translateY(-50%); color: var(--text-mute); font-size: 14px; pointer-events: none; }
+
+        .seg { display: inline-flex; background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius); padding: 2px; }
+        .seg-btn {
+            padding: 5px 12px; background: transparent; border: none;
+            color: var(--text-dim); cursor: pointer; font-size: 12px; font-family: inherit;
+            border-radius: 6px; transition: all 0.12s;
+        }
+        .seg-btn:hover { color: var(--text); }
+        .seg-btn.active { background: var(--bg-elev); color: var(--accent); }
+
+        /* === Data table === */
+        .data-card { background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius-lg); overflow: hidden; }
+        .data-table { width: 100%; border-collapse: collapse; }
+        .data-table th {
+            text-align: left; padding: 12px 16px; font-size: 11px; font-weight: 600;
+            color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.5px;
+            background: var(--bg-elev); border-bottom: 1px solid var(--border);
+            white-space: nowrap;
+        }
+        .data-table td {
+            padding: 14px 16px; font-size: 13px;
+            border-bottom: 1px solid var(--border); vertical-align: middle;
+        }
+        .data-table tbody tr { transition: background 0.1s; }
+        .data-table tbody tr:hover { background: rgba(255,255,255,0.02); }
+        .data-table tbody tr:last-child td { border-bottom: none; }
+        .th-actions { text-align: right; width: 1%; white-space: nowrap; }
+        .data-table td.th-actions { text-align: right; }
+        .cell-name { font-weight: 500; }
+        .cell-sub { font-size: 11px; color: var(--text-mute); margin-top: 2px; }
+
+        .empty { padding: 64px 24px; text-align: center; color: var(--text-dim); }
+        .empty-icon { font-size: 36px; opacity: 0.3; margin-bottom: 12px; }
+        .empty-title { font-size: 15px; font-weight: 500; color: var(--text); margin-bottom: 6px; }
+        .empty-desc { font-size: 13px; margin-bottom: 16px; }
+
+        /* === Switch === */
+        .switch { position: relative; display: inline-block; width: 36px; height: 20px; cursor: pointer; vertical-align: middle; }
+        .switch input { opacity: 0; width: 0; height: 0; }
+        .switch-track {
+            position: absolute; inset: 0;
+            background: var(--bg-elev); border: 1px solid var(--border);
+            border-radius: 999px; transition: all 0.18s;
+        }
+        .switch-track::before {
+            content: ''; position: absolute; top: 2px; left: 2px;
+            width: 14px; height: 14px; border-radius: 50%;
+            background: var(--text-dim); transition: all 0.18s;
+        }
+        .switch input:checked + .switch-track { background: var(--accent); border-color: var(--accent); }
+        .switch input:checked + .switch-track::before { transform: translateX(16px); background: #00121a; }
+
+        /* === Forms === */
+        .field { margin-bottom: 14px; }
+        .field label { display: block; font-size: 12px; color: var(--text-dim); margin-bottom: 6px; font-weight: 500; }
+        .field label .req { color: var(--danger); margin-left: 2px; }
+        .field input, .field select, .field textarea, .input-static, .textarea {
+            width: 100%; padding: 9px 12px;
+            background: var(--bg-elev); border: 1px solid var(--border);
+            color: var(--text); border-radius: var(--radius); font-size: 13px;
+            font-family: inherit; transition: border-color 0.15s, box-shadow 0.15s;
+        }
+        .field input:focus, .field select:focus, .field textarea:focus, .textarea:focus {
+            outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft);
+        }
+        .field select {
+            appearance: none;
+            background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'><path fill='%238a92a6' d='M6 8L1 3h10z'/></svg>");
+            background-repeat: no-repeat; background-position: right 10px center; padding-right: 30px;
+        }
+        .input-static { font-family: ui-monospace, SFMono-Regular, monospace; color: var(--accent); padding: 8px 12px; }
+        .textarea { font-family: ui-monospace, SFMono-Regular, monospace; font-size: 12px; line-height: 1.6; resize: vertical; }
+        .input-group { display: flex; gap: 8px; }
+        .input-group input { flex: 1; }
+        .hint { font-size: 11px; color: var(--text-mute); margin-top: 5px; line-height: 1.5; }
+        .check { display: flex; align-items: center; gap: 8px; cursor: pointer; font-size: 13px; color: var(--text); }
+        .check input[type=checkbox] { width: 16px; height: 16px; accent-color: var(--accent); cursor: pointer; }
+        .divider { height: 1px; background: var(--border); margin: 20px 0; }
+        .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+        .grid-2 .field { margin-bottom: 0; }
+        .actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 20px; padding-top: 16px; border-top: 1px solid var(--border); }
+        code { font-family: ui-monospace, SFMono-Regular, monospace; font-size: 0.9em; background: var(--bg-elev); padding: 1px 5px; border-radius: 4px; color: var(--accent); }
+        .mono { font-family: ui-monospace, SFMono-Regular, monospace; }
+
+        /* === Settings grid === */
+        .settings-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(420px, 1fr)); gap: 16px; align-items: start; }
+        .settings-grid .card { margin-bottom: 0; }
+
+        /* === Alert / Banner === */
+        .alert { display: flex; align-items: center; gap: 12px; padding: 12px 16px; border-radius: var(--radius); margin-bottom: 16px; font-size: 13px; }
+        .alert-icon { font-size: 16px; flex-shrink: 0; }
+        .alert-body { flex: 1; }
+        .alert-title { font-weight: 500; }
+        .alert-desc { font-size: 12px; color: var(--text-dim); margin-top: 2px; }
+        .alert-warning { background: var(--warning-soft); border: 1px solid rgba(245,158,11,0.3); color: var(--warning); }
+        .alert-warning .alert-title { color: var(--warning); }
+        .alert-danger { background: var(--danger-soft); border: 1px solid rgba(239,68,68,0.3); color: var(--danger); }
+
+        /* === Toasts === */
+        .toast-stack { position: fixed; top: 16px; right: 16px; z-index: 9999; display: flex; flex-direction: column; gap: 8px; pointer-events: none; }
+        .toast {
+            display: flex; align-items: center; gap: 10px;
+            padding: 10px 14px; min-width: 240px; max-width: 380px;
+            background: var(--bg-card); border: 1px solid var(--border-strong);
+            border-radius: var(--radius); box-shadow: var(--shadow-lg);
+            font-size: 13px; pointer-events: auto;
+            border-left-width: 3px;
+        }
+        .toast-ok { border-left-color: var(--success); }
+        .toast-err { border-left-color: var(--danger); }
+        .toast-warn { border-left-color: var(--warning); }
+        .toast-icon { font-size: 14px; font-weight: 700; }
+        .toast-ok .toast-icon { color: var(--success); }
+        .toast-err .toast-icon { color: var(--danger); }
+        .toast-warn .toast-icon { color: var(--warning); }
+        .toast-msg { flex: 1; }
+        .toast-close { background: none; border: none; color: var(--text-mute); cursor: pointer; font-size: 16px; padding: 0 4px; font-family: inherit; }
+        .toast-close:hover { color: var(--text); }
+        .toast-enter-active, .toast-leave-active { transition: all 0.22s ease; }
+        .toast-enter-from { opacity: 0; transform: translateX(20px); }
+        .toast-leave-to { opacity: 0; transform: translateX(20px); }
+
+        /* === Modal === */
+        .modal-backdrop {
+            position: fixed; inset: 0; z-index: 100;
+            background: rgba(5, 8, 16, 0.7); backdrop-filter: blur(4px);
+            display: flex; align-items: center; justify-content: center;
+            padding: 24px;
+        }
+        .modal {
+            background: var(--bg-card); border: 1px solid var(--border-strong);
+            border-radius: var(--radius-lg); box-shadow: var(--shadow-lg);
+            width: 100%; max-width: 540px; max-height: 90vh; overflow: auto;
+            display: flex; flex-direction: column;
+        }
+        .modal-head { display: flex; justify-content: space-between; align-items: center; padding: 20px 24px; border-bottom: 1px solid var(--border); }
+        .modal-head h2 { font-size: 16px; font-weight: 600; }
+        .modal-body { padding: 20px 24px; }
+        .modal-foot { display: flex; justify-content: flex-end; gap: 8px; padding: 16px 24px; border-top: 1px solid var(--border); background: var(--bg-elev); border-bottom-left-radius: var(--radius-lg); border-bottom-right-radius: var(--radius-lg); }
+        .modal-enter-active, .modal-leave-active { transition: opacity 0.2s; }
+        .modal-enter-active .modal, .modal-leave-active .modal { transition: transform 0.2s, opacity 0.2s; }
+        .modal-enter-from, .modal-leave-to { opacity: 0; }
+        .modal-enter-from .modal, .modal-leave-to .modal { transform: scale(0.95) translateY(-10px); opacity: 0; }
+
+        /* === Utility === */
+        .text-dim { color: var(--text-dim); }
+        .text-mute { color: var(--text-mute); }
+        .text-accent { color: var(--accent); }
+        .text-success { color: var(--success); }
+        .text-danger { color: var(--danger); }
+    </style>
+</head>
+<body>
+    <div id="app">
+
+        <!-- Toasts -->
+        <transition-group name="toast" tag="div" class="toast-stack">
+            <div v-for="t in toasts" :key="t.id" class="toast" :class="'toast-' + t.type">
+                <span class="toast-icon">{{ t.type === 'ok' ? '✓' : t.type === 'err' ? '!' : '⚠' }}</span>
+                <span class="toast-msg">{{ t.msg }}</span>
+                <button class="toast-close" @click="dismissToast(t.id)">×</button>
+            </div>
+        </transition-group>
+
+        <!-- Login -->
+        <div v-if="!apiKey" class="login-screen">
+            <div class="login-card">
+                <div class="login-logo">TTS</div>
+                <h1>管理后台</h1>
+                <div class="sub">输入 OPENAI_TTS_API_KEY 登录</div>
+                <input v-model="keyInput" type="password" placeholder="API Key" @keyup.enter="login" autofocus class="login-input">
+                <button class="btn btn-primary btn-lg" @click="login" :disabled="!keyInput" style="width: 100%;">登 录</button>
+                <div v-if="loginErr" class="login-err">⚠ {{ loginErr }}</div>
+            </div>
+        </div>
+
+        <!-- App shell -->
+        <div v-else class="app-shell">
+            <aside class="sidebar">
+                <div class="brand">
+                    <div class="brand-logo">TTS</div>
+                    <div>
+                        <div class="brand-name">控制台</div>
+                        <div class="brand-version">v{{ overview.version || '—' }} · {{ overview.mode || '...' }}</div>
+                    </div>
+                </div>
+                <nav class="nav">
+                    <div class="nav-group">
+                        <div class="nav-label">概览</div>
+                        <div class="nav-item" :class="{active: tab==='dashboard'}" @click="tab='dashboard'">
+                            <span class="nav-icon">▦</span><span>仪表盘</span>
+                        </div>
+                    </div>
+                    <div class="nav-group">
+                        <div class="nav-label">管理</div>
+                        <div class="nav-item" :class="{active: tab==='voices'}" @click="tab='voices'">
+                            <span class="nav-icon">♪</span><span>音色</span>
+                            <span class="nav-badge">{{ voices.length }}</span>
+                        </div>
+                        <div class="nav-item" :class="{active: tab==='settings'}" @click="tab='settings'">
+                            <span class="nav-icon">⚙</span><span>设置</span>
+                            <span v-if="settings && !settings.cors_configured" class="nav-dot" title="CORS 未配置"></span>
+                        </div>
+                    </div>
+                </nav>
+                <div class="sidebar-foot">
+                    <button class="btn-icon" @click="reloadAll" title="刷新">↻ 刷新</button>
+                    <button class="btn-icon" @click="logout" title="登出">⏻ 登出</button>
+                </div>
+            </aside>
+
+            <main class="main">
+                <div v-if="settings && !settings.cors_configured && tab !== 'settings'" class="alert alert-warning">
+                    <span class="alert-icon">⚠</span>
+                    <div class="alert-body">
+                        <div class="alert-title">跨域 CORS 未配置</div>
+                        <div class="alert-desc">同源可用,跨域请求会被 403。在「设置」中配置允许的来源。</div>
+                    </div>
+                    <button class="btn btn-sm" @click="tab='settings'">去设置</button>
+                </div>
+
+                <header class="page-head">
+                    <div>
+                        <h1 class="page-title">{{ pageTitle }}</h1>
+                        <p class="page-sub">{{ pageSub }}</p>
+                    </div>
+                    <div class="page-actions">
+                        <button v-if="tab==='voices'" class="btn btn-primary" @click="openAdd">+ 新增音色</button>
+                    </div>
+                </header>
+
+                <!-- Dashboard -->
+                <section v-if="tab==='dashboard'">
+                    <div class="stat-grid">
+                        <div class="stat-card">
+                            <div class="stat-top">
+                                <span class="stat-label">运行模式</span>
+                                <span class="pill" :class="overview.installed ? 'pill-success' : 'pill-accent'">
+                                    <span class="pill-dot"></span>
+                                    {{ overview.installed ? '已就绪' : '待配置' }}
+                                </span>
+                            </div>
+                            <div class="stat-value" :class="overview.installed ? 'text-success' : 'text-accent'">{{ overview.mode || '—' }}</div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-top"><span class="stat-label">音色</span></div>
+                            <div class="stat-value">{{ overview.voice_count ?? 0 }}<span class="stat-unit">条</span></div>
+                            <div class="stat-foot">
+                                <span class="text-success">{{ overview.voice_enabled_count ?? 0 }}</span> 启用 ·
+                                <span class="text-dim">{{ (overview.voice_count ?? 0) - (overview.voice_enabled_count ?? 0) }}</span> 停用
+                            </div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-top"><span class="stat-label">运行时间</span></div>
+                            <div class="stat-value">{{ formatUptime(overview.uptime_seconds) }}</div>
+                            <div class="stat-foot text-dim">{{ formatStart(overview.start_time) }}</div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-top"><span class="stat-label">数据库</span></div>
+                            <div class="stat-value mono" style="font-size: 15px; word-break: break-all;">{{ shortPath(overview.db_path) || '—' }}</div>
+                            <div class="stat-foot text-dim mono" style="font-size: 10px; word-break: break-all;">{{ overview.db_path || '' }}</div>
+                        </div>
+                    </div>
+
+                    <div class="card">
+                        <div class="card-head">
+                            <div>
+                                <div class="card-title">系统信息</div>
+                                <div class="card-sub">运行版本与资源</div>
+                            </div>
+                        </div>
+                        <dl class="kv">
+                            <div class="kv-row"><dt>Commit</dt><dd class="mono">{{ overview.commit || 'dev' }}</dd></div>
+                            <div class="kv-row"><dt>版本</dt><dd class="mono">{{ overview.version || '—' }}</dd></div>
+                            <div class="kv-row"><dt>运行模式</dt><dd>{{ overview.mode || '—' }}</dd></div>
+                            <div class="kv-row"><dt>数据库路径</dt><dd class="mono text-dim">{{ overview.db_path || '—' }}</dd></div>
+                            <div class="kv-row"><dt>锁文件</dt><dd class="mono text-dim">{{ overview.lock_path || '—' }}</dd></div>
+                            <div class="kv-row">
+                                <dt>内存</dt>
+                                <dd class="mono text-dim">
+                                    goroutines {{ overview.memory?.goroutines ?? '—' }} · heap {{ formatBytes(overview.memory?.heap_alloc) }}
+                                </dd>
+                            </div>
+                        </dl>
+                    </div>
+                </section>
+
+                <!-- Voices -->
+                <section v-if="tab==='voices'">
+                    <div class="toolbar">
+                        <div class="toolbar-left">
+                            <div class="search">
+                                <span class="search-icon">⌕</span>
+                                <input v-model="voiceSearch" placeholder="搜索名称、Speaker、资源 ID...">
+                            </div>
+                            <div class="seg">
+                                <button class="seg-btn" :class="{active: voiceFilter===null}" @click="voiceFilter=null">全部</button>
+                                <button class="seg-btn" :class="{active: voiceFilter==='on'}" @click="voiceFilter='on'">启用</button>
+                                <button class="seg-btn" :class="{active: voiceFilter==='off'}" @click="voiceFilter='off'">停用</button>
+                            </div>
+                        </div>
+                        <div class="toolbar-right">
+                            <span v-if="voiceSearch || voiceFilter !== null">{{ filteredVoices.length }} / {{ voices.length }}</span>
+                            <span v-else>共 {{ voices.length }} 条</span>
+                        </div>
+                    </div>
+
+                    <div v-if="actionErr" class="alert alert-danger">
+                        <span class="alert-icon">⚠</span>
+                        <div class="alert-body">
+                            <div class="alert-title">操作失败</div>
+                            <div class="alert-desc">{{ actionErr }}</div>
+                        </div>
+                    </div>
+
+                    <div class="data-card">
+                        <table class="data-table" v-if="filteredVoices.length">
+                            <thead>
+                                <tr>
+                                    <th>名称</th>
+                                    <th>Speaker</th>
+                                    <th>资源 ID</th>
+                                    <th>Model</th>
+                                    <th>状态</th>
+                                    <th class="th-actions">操作</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <tr v-for="v in filteredVoices" :key="v.name">
+                                    <td>
+                                        <div class="cell-name">{{ v.name }}</div>
+                                        <div v-if="v.description" class="cell-sub">{{ v.description }}</div>
+                                    </td>
+                                    <td><span class="mono text-dim">{{ v.speaker }}</span></td>
+                                    <td><span class="mono text-dim">{{ v.resource_id }}</span></td>
+                                    <td><span class="mono text-dim">{{ v.model || '—' }}</span></td>
+                                    <td>
+                                        <span class="pill" :class="v.enabled ? 'pill-success' : 'pill-mute'">
+                                            <span class="pill-dot"></span>
+                                            {{ v.enabled ? '启用' : '停用' }}
+                                        </span>
+                                    </td>
+                                    <td class="th-actions">
+                                        <label class="switch" :title="v.enabled ? '点击停用' : '点击启用'" style="margin-right: 12px;">
+                                            <input type="checkbox" :checked="v.enabled" @change="toggle(v)">
+                                            <span class="switch-track"></span>
+                                        </label>
+                                        <button class="btn btn-sm btn-danger-ghost" @click="remove(v)">删除</button>
+                                    </td>
+                                </tr>
+                            </tbody>
+                        </table>
+
+                        <div v-else-if="voices.length === 0" class="empty">
+                            <div class="empty-icon">♪</div>
+                            <div class="empty-title">还没有音色</div>
+                            <div class="empty-desc">点击右上角「+ 新增音色」开始添加第一个火山 TTS 音色</div>
+                            <button class="btn btn-primary" @click="openAdd">+ 新增音色</button>
+                        </div>
+
+                        <div v-else class="empty">
+                            <div class="empty-icon">⌕</div>
+                            <div class="empty-title">没有匹配的音色</div>
+                            <div class="empty-desc">尝试调整搜索词或筛选条件</div>
+                            <button class="btn" @click="voiceSearch=''; voiceFilter=null">清除筛选</button>
+                        </div>
+                    </div>
+                </section>
+
+                <!-- Settings -->
+                <section v-if="tab==='settings'">
+                    <div class="settings-grid">
+                        <div class="card">
+                            <div class="card-head">
+                                <div>
+                                    <div class="card-title">鉴权 Key</div>
+                                    <div class="card-sub">客户端调用 <code>/v1/audio/speech</code> 与登录 /admin 共用</div>
+                                </div>
+                                <span class="pill pill-accent">敏感</span>
+                            </div>
+                            <div class="field">
+                                <label>当前 Key</label>
+                                <div class="input-static">{{ settings.auth_key || '(未设置)' }}</div>
+                            </div>
+                            <div class="field">
+                                <label>替换为新 Key</label>
+                                <div class="input-group">
+                                    <input type="password" v-model="authKeyInput" :placeholder="settings.auth_key_set ? '不改留空' : '输入新 Key'">
+                                    <button class="btn btn-primary" @click="saveAuthKey" :disabled="!authKeyInput">更新</button>
+                                </div>
+                                <div class="hint">改了之后,你的浏览器 401 自动跳回登录页,用新 Key 重登。</div>
+                            </div>
+                        </div>
+
+                        <div class="card">
+                            <div class="card-head">
+                                <div>
+                                    <div class="card-title">火山 TTS 上游凭证</div>
+                                    <div class="card-sub">调火山 v3 上游用的凭证与默认路由</div>
+                                </div>
+                            </div>
+                            <div class="field">
+                                <label>当前 API Key</label>
+                                <div class="input-static">{{ settings.api_key || '(未设置)' }}</div>
+                            </div>
+                            <div class="field">
+                                <label>替换为新 API Key</label>
+                                <div class="input-group">
+                                    <input type="password" v-model="apiKeyInput" :placeholder="settings.api_key_set ? '不改留空' : '输入新 API Key'">
+                                    <button class="btn btn-primary" @click="saveApiKey" :disabled="!apiKeyInput">更新</button>
+                                </div>
+                                <div class="hint">独立端点 PUT /api/settings/api-key,与其他字段分开传输</div>
+                            </div>
+                            <div class="divider"></div>
+                            <div class="grid-2">
+                                <div class="field">
+                                    <label>默认资源 ID</label>
+                                    <input v-model="settingsForm.default_resource_id" placeholder="seed-icl-2.0">
+                                </div>
+                                <div class="field">
+                                    <label>默认音色 (name)</label>
+                                    <select v-model="settingsForm.default_speaker">
+                                        <option value="">— 选择 —</option>
+                                        <option v-for="v in voices" :key="v.name" :value="v.name">{{ v.name }}</option>
+                                    </select>
+                                    <div class="hint">必须是「音色」tab 里存在的 name</div>
+                                </div>
+                                <div class="field">
+                                    <label>默认输出格式</label>
+                                    <select v-model="settingsForm.default_format">
+                                        <option value="mp3">mp3</option>
+                                        <option value="wav">wav</option>
+                                        <option value="opus">opus (ogg_opus)</option>
+                                        <option value="pcm">pcm</option>
+                                        <option value="aac">aac</option>
+                                        <option value="flac">flac</option>
+                                    </select>
+                                </div>
+                                <div class="field">
+                                    <label>采样率 (Hz)</label>
+                                    <input type="number" v-model.number="settingsForm.sample_rate" min="8000" max="48000" step="1000">
+                                </div>
+                                <div class="field" style="grid-column: 1 / -1;">
+                                    <label>Model (可选)</label>
+                                    <input v-model="settingsForm.model" placeholder="seed-tts-2.0-standard">
+                                </div>
+                            </div>
+                            <div class="actions">
+                                <button class="btn" @click="resetSettingsForm">重置</button>
+                                <button class="btn btn-primary" @click="saveSettings" :disabled="savingSettings">{{ savingSettings ? '保存中...' : '保存设置' }}</button>
+                            </div>
+                        </div>
+
+                        <div class="card">
+                            <div class="card-head">
+                                <div>
+                                    <div class="card-title">跨域 CORS</div>
+                                    <div class="card-sub">控制哪些前端域名能跨域调 <code>/v1/audio/speech</code></div>
+                                </div>
+                                <span class="pill" :class="settings.cors_configured ? 'pill-success' : 'pill-mute'">
+                                    <span class="pill-dot"></span>
+                                    {{ settings.cors_configured ? '已配置' : '未配置' }}
+                                </span>
+                            </div>
+                            <div class="field">
+                                <label class="check">
+                                    <input type="checkbox" v-model="corsForm.allow_all">
+                                    <span>允许所有来源 (<code>*</code>)</span>
+                                </label>
+                                <div class="hint">勾上后下面白名单失效。仅测试用</div>
+                            </div>
+                            <div class="field" v-if="!corsForm.allow_all">
+                                <label>允许的来源</label>
+                                <textarea v-model="corsForm.origins" rows="4" placeholder="https://app.example.com&#10;https://admin.example.com" class="textarea"></textarea>
+                                <div class="hint">一行一个。当前: <span class="text-accent mono">{{ corsCurrentLabel }}</span></div>
+                            </div>
+                            <div class="actions">
+                                <button class="btn btn-primary" @click="saveCors" :disabled="savingCors">{{ savingCors ? '保存中...' : '保存 CORS' }}</button>
+                            </div>
+                        </div>
+                    </div>
+                </section>
+            </main>
+        </div>
+
+        <!-- Add modal -->
+        <teleport to="body">
+            <transition name="modal">
+                <div v-if="showAdd" class="modal-backdrop" @click.self="showAdd=false">
+                    <div class="modal" @click.stop>
+                        <div class="modal-head">
+                            <h2>新增音色</h2>
+                            <button class="btn-icon" @click="showAdd=false" title="关闭" style="flex: 0; padding: 4px 10px;">×</button>
+                        </div>
+                        <div class="modal-body">
+                            <div class="grid-2">
+                                <div class="field">
+                                    <label>对外名 (voice) <span class="req">*</span></label>
+                                    <input v-model="form.name" placeholder="qian" class="mono">
+                                </div>
+                                <div class="field">
+                                    <label>Speaker (火山音色 ID) <span class="req">*</span></label>
+                                    <input v-model="form.speaker" placeholder="S_xxx" class="mono">
+                                </div>
+                                <div class="field">
+                                    <label>资源 ID <span class="req">*</span></label>
+                                    <input v-model="form.resource_id" placeholder="seed-icl-2.0" class="mono">
+                                </div>
+                                <div class="field">
+                                    <label>Model</label>
+                                    <input v-model="form.model" placeholder="seed-tts-2.0-standard" class="mono">
+                                </div>
+                                <div class="field">
+                                    <label>Language</label>
+                                    <input v-model="form.language" placeholder="zh" class="mono">
+                                </div>
+                                <div class="field">
+                                    <label>Description</label>
+                                    <input v-model="form.description" placeholder="可选">
+                                </div>
+                            </div>
+                            <div v-if="addErr" class="alert alert-danger" style="margin-top: 14px;">
+                                <span class="alert-icon">⚠</span>
+                                <div class="alert-body">
+                                    <div class="alert-title">提交失败</div>
+                                    <div class="alert-desc">{{ addErr }}</div>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="modal-foot">
+                            <button class="btn" @click="showAdd=false">取消</button>
+                            <button class="btn btn-primary" @click="submitAdd" :disabled="adding">{{ adding ? '提交中...' : '提交' }}</button>
+                        </div>
+                    </div>
+                </div>
+            </transition>
+        </teleport>
+    </div>
+
+    <script>
+    const { createApp, ref, computed, onMounted, watch, nextTick } = Vue;
+    createApp({
+        setup() {
+            const apiKey = ref(sessionStorage.getItem('ttsAdminKey') || '');
+            const keyInput = ref('');
+            const loginErr = ref('');
+            const tab = ref(location.hash.slice(1) || 'dashboard');
+            const overview = ref({});
+            const voices = ref([]);
+            const actionErr = ref('');
+
+            // Toasts
+            const toasts = ref([]);
+            let toastSeq = 0;
+            const toast = (type, msg, ttl) => {
+                const id = ++toastSeq;
+                toasts.value.push({ id, type, msg });
+                if (ttl !== 0) setTimeout(() => dismissToast(id), ttl || 3200);
+            };
+            const dismissToast = (id) => { toasts.value = toasts.value.filter(t => t.id !== id); };
+
+            // Voices: search & filter
+            const voiceSearch = ref('');
+            const voiceFilter = ref(null);
+            const filteredVoices = computed(() => {
+                const q = voiceSearch.value.trim().toLowerCase();
+                return voices.value.filter(v => {
+                    if (voiceFilter.value === 'on' && !v.enabled) return false;
+                    if (voiceFilter.value === 'off' && v.enabled) return false;
+                    if (!q) return true;
+                    return (v.name || '').toLowerCase().includes(q)
+                        || (v.speaker || '').toLowerCase().includes(q)
+                        || (v.resource_id || '').toLowerCase().includes(q);
+                });
+            });
+
+            // Add voice modal
+            const showAdd = ref(false);
+            const adding = ref(false);
+            const addErr = ref('');
+            const form = ref({ name: '', speaker: '', resource_id: 'seed-icl-2.0', model: 'seed-tts-2.0-standard', language: '', description: '' });
+
+            // Settings
+            const settings = ref({});
+            const settingsForm = ref({ default_resource_id: '', default_speaker: '', default_format: 'mp3', sample_rate: 24000, model: '' });
+            const apiKeyInput = ref('');
+            const authKeyInput = ref('');
+
+            // CORS
+            const corsForm = ref({ allow_all: false, origins: '' });
+            const corsErr = ref('');
+            const corsOk = ref(false);
+            const savingCors = ref(false);
+            const corsCurrentLabel = computed(() => {
+                if (!settings.value) return '未配置';
+                if (settings.value.cors_allow_all) return '允许所有来源(*)';
+                if (settings.value.cors_origins) return settings.value.cors_origins;
+                return '未配置(同源可用,跨域会被 403)';
+            });
+            const savingSettings = ref(false);
+            const settingsErr = ref('');
+            const settingsOk = ref(false);
+
+            // Page title/sub
+            const pageTitle = computed(() => {
+                return ({ dashboard: '仪表盘', voices: '音色管理', settings: '系统设置' })[tab.value] || '控制台';
+            });
+            const pageSub = computed(() => {
+                if (tab.value === 'dashboard') return '运行状态、版本与资源总览';
+                if (tab.value === 'voices') return '管理火山 TTS 音色及其启用状态';
+                if (tab.value === 'settings') return '鉴权、上游凭证、默认路由与跨域';
+                return '';
+            });
+
+            const http = axios.create({ baseURL: '/api' });
+            http.interceptors.request.use(c => {
+                if (apiKey.value) c.headers.Authorization = 'Bearer ' + apiKey.value;
+                return c;
+            });
+            http.interceptors.response.use(r => r, err => {
+                if (err.response && err.response.status === 401) {
+                    sessionStorage.removeItem('ttsAdminKey');
+                    apiKey.value = '';
+                }
+                return Promise.reject(err);
+            });
+
+            watch(tab, v => { location.hash = v; if (v === 'settings') loadSettings(); });
+            window.addEventListener('hashchange', () => { tab.value = location.hash.slice(1) || 'dashboard'; });
+
+            const login = async () => {
+                loginErr.value = '';
+                try {
+                    apiKey.value = keyInput.value;
+                    await http.get('/admin/overview');
+                    sessionStorage.setItem('ttsAdminKey', keyInput.value);
+                } catch (e) {
+                    apiKey.value = '';
+                    loginErr.value = '鉴权失败: ' + (e.response?.data?.error?.message || e.message);
+                }
+            };
+            const logout = () => { sessionStorage.removeItem('ttsAdminKey'); apiKey.value = ''; };
+
+            const loadOverview = async () => {
+                try { overview.value = (await http.get('/admin/overview')).data; }
+                catch (e) { actionErr.value = '加载概览失败: ' + e.message; }
+            };
+            const loadVoices = async () => {
+                try {
+                    const r = await http.get('/voices');
+                    voices.value = r.data.voices || [];
+                } catch (e) { actionErr.value = '加载音色失败: ' + e.message; }
+            };
+            const loadSettings = async () => {
+                try {
+                    const r = await http.get('/settings');
+                    settings.value = r.data;
+                    settingsForm.value = {
+                        default_resource_id: r.data.default_resource_id || '',
+                        default_speaker: r.data.default_speaker || '',
+                        default_format: r.data.default_format || 'mp3',
+                        sample_rate: r.data.sample_rate || 24000,
+                        model: r.data.model || '',
+                    };
+                    corsForm.value = {
+                        allow_all: !!r.data.cors_allow_all,
+                        origins: r.data.cors_origins || '',
+                    };
+                    settingsErr.value = '';
+                } catch (e) { settingsErr.value = '加载设置失败: ' + (e.response?.data?.error?.message || e.message); }
+            };
+            const saveCors = async () => {
+                corsErr.value = '';
+                savingCors.value = true;
+                try {
+                    await http.put('/settings/cors', {
+                        allow_all: corsForm.value.allow_all,
+                        origins: corsForm.value.origins,
+                    });
+                    await loadSettings();
+                    toast('ok', 'CORS 配置已保存');
+                } catch (e) {
+                    corsErr.value = e.response?.data?.error?.message || e.message;
+                    toast('err', '保存 CORS 失败: ' + corsErr.value);
+                } finally { savingCors.value = false; }
+            };
+            const reloadAll = () => { loadOverview(); loadVoices(); loadSettings(); };
+
+            const saveSettings = async () => {
+                settingsErr.value = '';
+                savingSettings.value = true;
+                try {
+                    await http.put('/settings', {
+                        default_resource_id: settingsForm.value.default_resource_id,
+                        default_speaker: settingsForm.value.default_speaker,
+                        default_format: settingsForm.value.default_format,
+                        sample_rate: settingsForm.value.sample_rate,
+                        model: settingsForm.value.model,
+                    });
+                    await loadSettings();
+                    await loadOverview();
+                    toast('ok', '设置已保存');
+                } catch (e) {
+                    settingsErr.value = e.response?.data?.error?.message || e.message;
+                    toast('err', '保存失败: ' + settingsErr.value);
+                } finally { savingSettings.value = false; }
+            };
+            const saveApiKey = async () => {
+                settingsErr.value = '';
+                if (!apiKeyInput.value) { settingsErr.value = 'API Key 不能为空'; return; }
+                try {
+                    await http.put('/settings/api-key', { api_key: apiKeyInput.value });
+                    apiKeyInput.value = '';
+                    await loadSettings();
+                    toast('ok', 'API Key 已更新');
+                } catch (e) {
+                    settingsErr.value = e.response?.data?.error?.message || e.message;
+                    toast('err', '更新失败: ' + settingsErr.value);
+                }
+            };
+            const saveAuthKey = async () => {
+                settingsErr.value = '';
+                if (!authKeyInput.value) { settingsErr.value = 'Auth Key 不能为空'; return; }
+                try {
+                    await http.put('/settings/auth-key', { auth_key: authKeyInput.value });
+                    authKeyInput.value = '';
+                    setTimeout(() => {
+                        sessionStorage.removeItem('ttsAdminKey');
+                        apiKey.value = '';
+                    }, 200);
+                    toast('ok', 'Auth Key 已更新,请用新 Key 重新登录');
+                } catch (e) {
+                    settingsErr.value = e.response?.data?.error?.message || e.message;
+                    toast('err', '更新失败: ' + settingsErr.value);
+                }
+            };
+            const resetSettingsForm = () => { loadSettings(); };
+
+            const openAdd = () => {
+                form.value = { name: '', speaker: '', resource_id: 'seed-icl-2.0', model: 'seed-tts-2.0-standard', language: '', description: '' };
+                addErr.value = '';
+                showAdd.value = true;
+            };
+            const submitAdd = async () => {
+                addErr.value = '';
+                if (!form.value.name || !form.value.speaker || !form.value.resource_id) {
+                    addErr.value = '请填写名称、Speaker、资源 ID';
+                    return;
+                }
+                adding.value = true;
+                try {
+                    await http.post('/voices', form.value);
+                    showAdd.value = false;
+                    await loadVoices();
+                    await loadOverview();
+                    toast('ok', '音色已添加');
+                } catch (e) {
+                    addErr.value = e.response?.data?.error?.message || e.message;
+                } finally { adding.value = false; }
+            };
+            const toggle = async (v) => {
+                try { await http.patch(`/voices/${v.name}/toggle`, { enabled: !v.enabled }); await loadVoices(); }
+                catch (e) { actionErr.value = '切换失败: ' + (e.response?.data?.error?.message || e.message); toast('err', actionErr.value); }
+            };
+            const remove = async (v) => {
+                if (!confirm(`确定删除音色 "${v.name}" 吗?`)) return;
+                try { await http.delete(`/voices/${v.name}`); await loadVoices(); await loadOverview(); toast('ok', '音色已删除'); }
+                catch (e) { actionErr.value = '删除失败: ' + (e.response?.data?.error?.message || e.message); toast('err', actionErr.value); }
+            };
+
+            const formatUptime = (s) => {
+                if (!s) return '—';
+                const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60);
+                return h > 0 ? `${h}h ${m}m` : `${m}m`;
+            };
+            const shortPath = (p) => p ? p.split(/[\\/]/).pop() : '';
+            const formatBytes = (n) => {
+                if (n === null || n === undefined) return '—';
+                if (n < 1024) return n + ' B';
+                if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB';
+                return (n / 1024 / 1024).toFixed(2) + ' MB';
+            };
+            const formatStart = (iso) => {
+                if (!iso) return '—';
+                try {
+                    const d = new Date(iso);
+                    const pad = (n) => String(n).padStart(2, '0');
+                    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+                } catch (e) { return '—'; }
+            };
+
+            onMounted(() => { if (apiKey.value) reloadAll(); });
+
+            return { apiKey, keyInput, loginErr, login, logout, tab, pageTitle, pageSub, overview, voices, actionErr,
+                voiceSearch, voiceFilter, filteredVoices,
+                showAdd, form, addErr, adding, openAdd, submitAdd, toggle, remove,
+                settings, settingsForm, apiKeyInput, authKeyInput, savingSettings, settingsErr,
+                corsForm, corsErr, savingCors, corsCurrentLabel, saveCors,
+                toasts, toast, dismissToast,
+                loadSettings, saveSettings, saveApiKey, saveAuthKey, resetSettingsForm,
+                formatUptime, shortPath, formatBytes, formatStart, reloadAll };
+        },
+    }).mount('#app');
+    </script>
+</body>
+</html>

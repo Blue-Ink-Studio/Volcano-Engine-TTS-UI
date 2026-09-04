@@ -1,23 +1,32 @@
-version: '3.8'
-
 services:
   tts-api:
     build: .
+    image: volcano-tts-aggregator:latest
     container_name: tts-api
     ports:
       - "${PORT:-8080}:8080"
     environment:
-      - BYTEDANCE_TTS_API_KEY=${BYTEDANCE_TTS_API_KEY}
-      - BYTEDANCE_TTS_RESOURCE_ID=${BYTEDANCE_TTS_RESOURCE_ID}
-      - BYTEDANCE_TTS_SPEAKER=${BYTEDANCE_TTS_SPEAKER}
-      - BYTEDANCE_TTS_TIMEOUT=${BYTEDANCE_TTS_TIMEOUT:-30s}
-      - OPENAI_TTS_API_KEY=${OPENAI_TTS_API_KEY:-}
-      - ALLOWED_ORIGINS=${ALLOWED_ORIGINS:-}
+      # 4 个启动引导 env(仅这 4 个必看)
+      # 业务配置(api_key/resource_id/speaker/格式...)通过 WebUI 设置,
+      # 存到 /data/tts.db 持久化
+      - TTS_ADMIN_KEY=${TTS_ADMIN_KEY:-}
+      - TTS_DB_PATH=/data/tts.db
       - PORT=8080
+      - OPENAI_TTS_API_KEY=${OPENAI_TTS_API_KEY:-}
+      # 可选,装好后也可在 /admin 改
+      - TRUSTED_PROXY_HOPS=${TRUSTED_PROXY_HOPS:-}
+    volumes:
+      # DB + lock 文件必须挂载,否则容器重启后配置全丢
+      - tts-data:/data
     restart: unless-stopped
     healthcheck:
+      # 用 wget 检查,alpine 镜像有
       test: ["CMD", "wget", "-qO-", "http://localhost:8080/health"]
       interval: 30s
       timeout: 5s
       retries: 3
-      start_period: 5s
+      start_period: 10s
+
+volumes:
+  tts-data:
+    name: tts-api-data
