@@ -153,6 +153,12 @@ func (s *Store) VoiceInsert(v Voice) (int64, error) {
 
 // VoiceUpdate 整行替换;name 仍需保持唯一。
 // 不允许把 name 改成空/不合法。
+//
+// 同步 default_speaker:
+//   - 改 name 前,先查旧记录
+//   - 若 settings.default_speaker == 旧 name,把它改成新 name
+//   - 整个 voice UPDATE + settings UPDATE 在同一事务里,
+//     失败回滚,避免"声音改了但 default_speaker 还指向旧名"导致火山查不到
 func (s *Store) VoiceUpdate(v Voice) error {
 	v.Name = strings.TrimSpace(v.Name)
 	v.Speaker = strings.TrimSpace(v.Speaker)
@@ -171,7 +177,47 @@ func (s *Store) VoiceUpdate(v Voice) error {
 		return fmt.Errorf("store: voice update: resource_id is required")
 	}
 
-	res, err := s.db.Exec(`
+	// 整段事务: 读旧名 → 同步 settings → UPDATE voice
+	tx, err := s.db.Begin()
+	if err != nil {
+		return fmt.Errorf("store: voice update begin: %w", err)
+	}
+	defer func() {
+		// commit 成功时 Rollback 返回 sql.ErrTxDone,无害
+		_ = tx.Rollback()
+	}()
+
+	// 1. 读旧名(同事务,避免并发改)
+	var oldName string
+	if err := tx.QueryRow(`SELECT name FROM voices WHERE id = ?`, v.ID).Scan(&oldName); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrNotFound
+		}
+		return fmt.Errorf("store: voice update read old name id=%d: %w", v.ID, err)
+	}
+
+	// 2. 若 name 变了 + 是默认音色 → 同步 default_speaker
+	if oldName != v.Name {
+		var defVal string
+		err := tx.QueryRow(`SELECT value FROM settings WHERE key = 'default_speaker'`).Scan(&defVal)
+		switch {
+		case errors.Is(err, sql.ErrNoRows):
+			// 没设 default_speaker,无事可做
+		case err != nil:
+			return fmt.Errorf("store: voice update read default_speaker: %w", err)
+		case defVal == oldName:
+			// 同步改名为新名
+			if _, err := tx.Exec(`
+				INSERT INTO settings (key, value, updated_at) VALUES ('default_speaker', ?, datetime('now'))
+				ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+				v.Name); err != nil {
+				return fmt.Errorf("store: voice update sync default_speaker: %w", err)
+			}
+		}
+	}
+
+	// 3. UPDATE voice
+	res, err := tx.Exec(`
 		UPDATE voices SET name=?, speaker=?, resource_id=?, model=?, language=?, description=?, enabled=?, updated_at=datetime('now')
 		WHERE id = ?`,
 		v.Name, v.Speaker, v.ResourceID, v.Model, v.Language, v.Description, boolToInt(v.Enabled), v.ID)
@@ -184,6 +230,11 @@ func (s *Store) VoiceUpdate(v Voice) error {
 	n, _ := res.RowsAffected()
 	if n == 0 {
 		return ErrNotFound
+	}
+
+	// 4. 提交
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("store: voice update commit: %w", err)
 	}
 	return nil
 }
