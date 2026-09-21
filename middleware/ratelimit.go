@@ -5,6 +5,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -128,11 +129,32 @@ func (rl *RateLimiter) cleanup() {
 
 	if len(rl.requests) > common.MaxRateLimiterEntries {
 		log.Printf("警告: 限流器条目数 %d 超过上限 %d，触发强制清理", len(rl.requests), common.MaxRateLimiterEntries)
-		for k := range rl.requests {
+		// 【修复】原版用 `for k := range rl.requests` 删,Go map 遍历顺序随机,
+		// 会随机删掉活跃用户(其条目 timestamp 仍在窗口内),导致该用户下次请求
+		// 拿到新配额 — 攻击者可用大量伪造 IP 撑爆 map 触发清理,反而"清洗"
+		// 自己留的活跃条目,绕过限流。
+		// 修复:按"最近一次请求时间(lastTs)"升序排序,删最旧的(最可能已离开/低频),
+		// 保留最活跃用户,语义符合"限流器只淘汰冷条目"的预期。
+		// 排序复杂度 O(n log n),但只在超 10w 条目时触发,代价可接受。
+		type entry struct {
+			key    string
+			lastTs time.Time
+		}
+		entries := make([]entry, 0, len(rl.requests))
+		for k, v := range rl.requests {
+			// 走到这里 v 一定非空(cleanup 第一阶段会把空 timestamps 删掉),
+			// 取最后一个 timestamp 作为"最近活跃时间"。
+			lastTs := v[len(v)-1]
+			entries = append(entries, entry{key: k, lastTs: lastTs})
+		}
+		sort.Slice(entries, func(i, j int) bool {
+			return entries[i].lastTs.Before(entries[j].lastTs)
+		})
+		for _, e := range entries {
 			if len(rl.requests) <= common.MaxRateLimiterEntries/2 {
 				break
 			}
-			delete(rl.requests, k)
+			delete(rl.requests, e.key)
 		}
 	}
 }
