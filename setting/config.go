@@ -8,6 +8,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/volcano-tts/tts-api/adapter/volcano"
@@ -16,30 +17,129 @@ import (
 )
 
 // 全部环境变量读取的单一入口:其它包不允许直接 os.Getenv,只读这里的全局 Config。
-
-// TTSOptions 是火山 v3 TTS 调用的完整参数集合,启动期由 LoadRuntimeConfig 从 store 填充。
-// 业务侧(controller)直接读取并传入 volcano.Synthesis。
+//
+// 并发模型:
+//   - TTSOptions / TTSTimeout / TTSConfigErr / Auth.APIKeys / CORS 是运行期可被
+//     LoadRuntimeConfig(由 PUT /api/settings 触发)整体替换的"运行时配置快照"。
+//     struct 整体赋值不是原子的,若 TTS 请求正在读,可能拿到半写状态。
+//   - 解决: 用 ttsMu(RWMutex)统一保护这些字段;读路径用 Get* 拿快照(RLock),
+//     写路径用 Set* 整体替换(Lock)。读多写少,RWMutex 读不互斥,不会显著拖慢热路径。
+//   - Server.Port / TrustedProxyHops / SetupToken 仅启动期写、运行期读,无并发修改,
+//     保持原样不加锁。
 var (
-	TTSOptions   volcano.Options
-	TTSConfigErr error
-	// TTSTimeout 单次合成请求的超时;controller 用来派生 context。
-	TTSTimeout time.Duration = common.DefaultTimeout
+	ttsMu       sync.RWMutex
+	ttsOptions  volcano.Options
+	ttsTimeout  time.Duration = common.DefaultTimeout
+	ttsConfigErr error
+	authAPIKeys []string
+	// corsAllowAll / corsOrigins 拆成两个独立字段,各自在 RLock 下读取,
+	// 避免 CORSConfig 整体读时被 Lock 阻塞热路径。
+	corsAllowAll bool
+	corsOrigins  []string
 )
 
-// AuthConfig OpenAI 兼容接口的客户端 API Key 鉴权配置。
-type AuthConfig struct {
-	APIKeys []string
+// GetTTSOptions 读 TTSOptions 快照(值类型,使用方可以放心使用,不会被并发写破坏)。
+// 提供给业务侧(controller)的统一读取入口;LoadRuntimeConfig 写入时用 SetTTSOptions 整体替换。
+// 业务侧不要缓存这个值跨 goroutine 使用(应该每次调用时重新拿)。
+func GetTTSOptions() volcano.Options {
+	ttsMu.RLock()
+	defer ttsMu.RUnlock()
+	return ttsOptions
 }
 
-var Auth AuthConfig
-
-// CORSConfig 跨域白名单配置。
-type CORSConfig struct {
-	Origins  []string
-	AllowAll bool
+// SetTTSOptions 整体替换 TTSOptions。LoadRuntimeConfig 写路径专用。
+func SetTTSOptions(o volcano.Options) {
+	ttsMu.Lock()
+	defer ttsMu.Unlock()
+	ttsOptions = o
 }
 
-var CORS CORSConfig
+// GetTTSTimeout 读当前超时;controller 用它派生 context。
+func GetTTSTimeout() time.Duration {
+	ttsMu.RLock()
+	defer ttsMu.RUnlock()
+	return ttsTimeout
+}
+
+// SetTTSTimeout 整体替换超时。
+func SetTTSTimeout(d time.Duration) {
+	ttsMu.Lock()
+	defer ttsMu.Unlock()
+	ttsTimeout = d
+}
+
+// GetTTSConfigErr 读运行时配置错误;nil 表示就绪。
+func GetTTSConfigErr() error {
+	ttsMu.RLock()
+	defer ttsMu.RUnlock()
+	return ttsConfigErr
+}
+
+// SetTTSConfigErr 设运行时配置错误;nil 表示清错。
+func SetTTSConfigErr(err error) {
+	ttsMu.Lock()
+	defer ttsMu.Unlock()
+	ttsConfigErr = err
+}
+
+// GetAuthAPIKeys 读鉴权 key 列表;返回拷贝防止业务侧持有底层 slice 后被并发写破坏。
+// 外部不应直接读 Auth.APIKeys,统一走 Get*。
+func GetAuthAPIKeys() []string {
+	ttsMu.RLock()
+	defer ttsMu.RUnlock()
+	if len(authAPIKeys) == 0 {
+		return nil
+	}
+	out := make([]string, len(authAPIKeys))
+	copy(out, authAPIKeys)
+	return out
+}
+
+// SetAuthAPIKeys 整体替换鉴权 key 列表;入参被复制以防外部后续修改影响内部状态。
+func SetAuthAPIKeys(keys []string) {
+	ttsMu.Lock()
+	defer ttsMu.Unlock()
+	if len(keys) == 0 {
+		authAPIKeys = nil
+		return
+	}
+	out := make([]string, len(keys))
+	copy(out, keys)
+	authAPIKeys = out
+}
+
+// GetCORSAllowAll 读 CORS 是否放行所有来源。
+func GetCORSAllowAll() bool {
+	ttsMu.RLock()
+	defer ttsMu.RUnlock()
+	return corsAllowAll
+}
+
+// GetCORSOrigins 读 CORS 白名单;返回拷贝防止业务侧持有后被并发写破坏。
+func GetCORSOrigins() []string {
+	ttsMu.RLock()
+	defer ttsMu.RUnlock()
+	if len(corsOrigins) == 0 {
+		return nil
+	}
+	out := make([]string, len(corsOrigins))
+	copy(out, corsOrigins)
+	return out
+}
+
+// SetCORS 整体替换 CORS 配置;LoadRuntimeConfig 和 PUT /api/settings/cors 写路径专用。
+func SetCORS(allowAll bool, origins []string) {
+	ttsMu.Lock()
+	defer ttsMu.Unlock()
+	corsAllowAll = allowAll
+	if len(origins) == 0 {
+		corsOrigins = nil
+		return
+	}
+	out := make([]string, len(origins))
+	copy(out, origins)
+	corsOrigins = out
+}
 
 // ServerConfig HTTP 服务监听配置。
 type ServerConfig struct {
@@ -52,6 +152,8 @@ var Server ServerConfig
 // 表示当前 XFF 解析模式:0=启发式,N>0=精确 N 跳。
 // setting.LogStartupSummary 读这个字段以展示运行期配置,
 // 不直接调用 middleware(避免循环 import)。
+//
+// 【并发】仅启动期被 InitRateLimiter 写一次,运行期只读,无并发问题,不加锁。
 var TrustedProxyHops int
 
 // SetupToken 是安装模式下的初始化凭证。
@@ -60,6 +162,8 @@ var TrustedProxyHops int
 //     打印到日志(/api/setup 提交时必须带这个 token)
 //
 // 安装完成后,/api/setup 端点永久关闭,SetupToken 失去意义但保留在内存。
+//
+// 【并发】仅 setup 阶段使用,运行期不会再写,无并发问题,不加锁。
 var SetupToken string
 
 // SetupTokenSource 标记 SetupToken 的来源,便于日志区分。
@@ -87,7 +191,7 @@ func InitServerConfig() {
 func InitAuthConfig() {
 	raw := os.Getenv("OPENAI_TTS_API_KEY")
 	if raw == "" {
-		Auth.APIKeys = nil
+		SetAuthAPIKeys(nil)
 		return
 	}
 	parts := strings.Split(raw, ",")
@@ -98,27 +202,27 @@ func InitAuthConfig() {
 			keys = append(keys, k)
 		}
 	}
-	Auth.APIKeys = keys
+	SetAuthAPIKeys(keys)
 }
 
 func InitCORSConfig() {
 	raw := os.Getenv("ALLOWED_ORIGINS")
-	CORS.Origins = nil
-	CORS.AllowAll = false
-	if raw == "" {
-		return
-	}
-	for _, p := range strings.Split(raw, ",") {
-		o := strings.TrimSpace(p)
-		if o == "" {
-			continue
+	allowAll := false
+	var origins []string
+	if raw != "" {
+		for _, p := range strings.Split(raw, ",") {
+			o := strings.TrimSpace(p)
+			if o == "" {
+				continue
+			}
+			if o == "*" {
+				allowAll = true
+				continue
+			}
+			origins = append(origins, normalizeOrigin(o))
 		}
-		if o == "*" {
-			CORS.AllowAll = true
-			continue
-		}
-		CORS.Origins = append(CORS.Origins, normalizeOrigin(o))
 	}
+	SetCORS(allowAll, origins)
 }
 
 func normalizeOrigin(origin string) string {
@@ -129,7 +233,7 @@ func normalizeOrigin(origin string) string {
 
 // SplitOriginsForCORS 解析逗号/换行/空格分隔的 origins 列表,
 // 全部小写、trim 末尾 / 后面统一比较。导出供 controller 复用
-// (PUT /api/settings/cors 写完立即刷新 setting.CORS 用)。
+// (PUT /api/settings/cors 写完立即刷新 CORS 用)。
 func SplitOriginsForCORS(s string) []string {
 	return splitAndLowerOrigins(s)
 }
@@ -160,6 +264,9 @@ func splitAndLowerOrigins(s string) []string {
 //   - 失败时 TTSConfigErr 被设置,/v1/audio/speech 路由会返 503
 //   - 成功时清空 TTSConfigErr
 //
+// 【并发】所有写都走 Set* 系列函数,在 ttsMu.Lock 下完成;运行中的 TTS 请求
+// 用 Get* 拿快照不会读到半写状态。
+//
 // 字段映射(原 env → store key):
 //   BYTEDANCE_TTS_API_KEY        → api_key
 //   BYTEDANCE_TTS_RESOURCE_ID    → default_resource_id
@@ -180,8 +287,9 @@ func splitAndLowerOrigins(s string) []string {
 func LoadRuntimeConfig(s Store) error {
 	all, err := s.SettingsGetAll()
 	if err != nil {
-		TTSConfigErr = fmt.Errorf("read settings failed: %w", err)
-		return TTSConfigErr
+		wrapped := fmt.Errorf("read settings failed: %w", err)
+		SetTTSConfigErr(wrapped)
+		return wrapped
 	}
 
 	apiKey := all["api_key"]
@@ -198,8 +306,9 @@ func LoadRuntimeConfig(s Store) error {
 		missing = append(missing, "default_speaker")
 	}
 	if len(missing) > 0 {
-		TTSConfigErr = fmt.Errorf("missing required settings: %v", missing)
-		return TTSConfigErr
+		wrapped := fmt.Errorf("missing required settings: %v", missing)
+		SetTTSConfigErr(wrapped)
+		return wrapped
 	}
 
 	// 【BUG 修复 · 第二轮】default_speaker 是 voice **名字**(如 "chun"),
@@ -248,14 +357,15 @@ func LoadRuntimeConfig(s Store) error {
 		}
 	}
 
-	TTSTimeout = common.DefaultTimeout
+	timeout := common.DefaultTimeout
 	if v, err := s.SettingsGetDuration("timeout", common.DefaultTimeout); err == nil {
-		TTSTimeout = v
+		timeout = v
 	} else {
-		TTSTimeout = common.DefaultTimeout
+		timeout = common.DefaultTimeout
 	}
+	SetTTSTimeout(timeout)
 
-	TTSOptions = volcano.Options{
+	SetTTSOptions(volcano.Options{
 		APIKey:         apiKey,
 		ResourceID:     resourceId,
 		UID:            "uid",
@@ -268,18 +378,17 @@ func LoadRuntimeConfig(s Store) error {
 		LoudnessRate:   0,
 		EnableSubtitle: enableSubtitle,
 		Additions:      adds,
-	}
+	})
 
 	// 鉴权 key:DB > env(向后兼容)
 	authKey := all["auth_key"]
 	if authKey == "" {
 		authKey = os.Getenv("OPENAI_TTS_API_KEY")
 	}
-	// 用临时 slice 避免和 InitAuthConfig 抢同一个 Auth.APIKeys 底层
 	if authKey != "" {
-		Auth.APIKeys = []string{authKey}
+		SetAuthAPIKeys([]string{authKey})
 	} else {
-		Auth.APIKeys = nil
+		SetAuthAPIKeys(nil)
 	}
 
 	// CORS 配置:DB > env
@@ -298,17 +407,14 @@ func LoadRuntimeConfig(s Store) error {
 		originsStr = os.Getenv("ALLOWED_ORIGINS")
 	}
 	if corsAllowAll {
-		CORS.AllowAll = true
-		CORS.Origins = nil
+		SetCORS(true, nil)
 	} else if originsStr != "" {
-		CORS.AllowAll = false
-		CORS.Origins = SplitOriginsForCORS(originsStr)
+		SetCORS(false, SplitOriginsForCORS(originsStr))
 	} else {
-		CORS.AllowAll = false
-		CORS.Origins = nil
+		SetCORS(false, nil)
 	}
 
-	TTSConfigErr = nil
+	SetTTSConfigErr(nil)
 	return nil
 }
 
@@ -388,10 +494,16 @@ func InitSetupToken() {
 
 // CheckEnvironmentVariables 返回 /health 用的环境变量状态快照。
 func CheckEnvironmentVariables() map[string]interface{} {
+	// 一次性拿所有需要的快照,缩短锁占用窗口;后续只读本地变量。
+	opts := GetTTSOptions()
+	authKeys := GetAuthAPIKeys()
+	allowAll := GetCORSAllowAll()
+	origins := GetCORSOrigins()
+
 	required := map[string]bool{
-		"BYTEDANCE_TTS_API_KEY":     TTSOptions.APIKey != "",
-		"BYTEDANCE_TTS_RESOURCE_ID": TTSOptions.ResourceID != "",
-		"BYTEDANCE_TTS_SPEAKER":     TTSOptions.Speaker != "",
+		"BYTEDANCE_TTS_API_KEY":     opts.APIKey != "",
+		"BYTEDANCE_TTS_RESOURCE_ID": opts.ResourceID != "",
+		"BYTEDANCE_TTS_SPEAKER":     opts.Speaker != "",
 	}
 	missing := []string{}
 	for k, ok := range required {
@@ -400,12 +512,12 @@ func CheckEnvironmentVariables() map[string]interface{} {
 		}
 	}
 	optional := map[string]bool{
-		"BYTEDANCE_TTS_MODEL":             TTSOptions.Model != "",
-		"BYTEDANCE_TTS_FORMAT":            TTSOptions.Format != "mp3",
-		"BYTEDANCE_TTS_SAMPLE_RATE":       TTSOptions.SampleRate != 24000,
-		"BYTEDANCE_TTS_EXPLICIT_LANGUAGE": TTSOptions.Additions != nil && TTSOptions.Additions.ExplicitLanguage != "",
-		"OPENAI_TTS_API_KEY":              len(Auth.APIKeys) > 0,
-		"ALLOWED_ORIGINS":                 CORS.AllowAll || len(CORS.Origins) > 0,
+		"BYTEDANCE_TTS_MODEL":             opts.Model != "",
+		"BYTEDANCE_TTS_FORMAT":            opts.Format != "mp3",
+		"BYTEDANCE_TTS_SAMPLE_RATE":       opts.SampleRate != 24000,
+		"BYTEDANCE_TTS_EXPLICIT_LANGUAGE": opts.Additions != nil && opts.Additions.ExplicitLanguage != "",
+		"OPENAI_TTS_API_KEY":              len(authKeys) > 0,
+		"ALLOWED_ORIGINS":                 allowAll || len(origins) > 0,
 		"PORT":                            Server.Port != common.DefaultPort,
 	}
 	return map[string]interface{}{
@@ -421,18 +533,21 @@ func LogStartupSummary() {
 	log.Printf("=== 环境配置汇总 ===")
 	log.Printf("服务端口: %s", Server.Port)
 
-	if len(Auth.APIKeys) == 0 {
+	authKeys := GetAuthAPIKeys()
+	if len(authKeys) == 0 {
 		log.Printf("OPENAI_TTS_API_KEY: 未设置(所有请求无需鉴权)")
 	} else {
-		log.Printf("OPENAI_TTS_API_KEY: 已设置 %d 个有效密钥", len(Auth.APIKeys))
+		log.Printf("OPENAI_TTS_API_KEY: 已设置 %d 个有效密钥", len(authKeys))
 	}
 
-	if CORS.AllowAll {
+	allowAll := GetCORSAllowAll()
+	origins := GetCORSOrigins()
+	if allowAll {
 		log.Printf("ALLOWED_ORIGINS: *(允许所有跨域;不可与鉴权共用)")
-	} else if len(CORS.Origins) == 0 {
+	} else if len(origins) == 0 {
 		log.Printf("ALLOWED_ORIGINS: 未设置(跨域请求将被拒绝)")
 	} else {
-		log.Printf("ALLOWED_ORIGINS: 已配置 %d 个允许的跨域来源白名单", len(CORS.Origins))
+		log.Printf("ALLOWED_ORIGINS: 已配置 %d 个允许的跨域来源白名单", len(origins))
 	}
 
 	if h := TrustedProxyHops; h == 0 {
@@ -441,6 +556,9 @@ func LogStartupSummary() {
 		log.Printf("TRUSTED_PROXY_HOPS: 精确模式,信任 %d 跳反代", h)
 	}
 
+	// 一次性拿 TTSOptions 快照;后续只读本地变量,避免在多个 log.Printf 调用之间
+	// 被 LoadRuntimeConfig 整体替换导致打印出不连贯的数据。
+	opts := GetTTSOptions()
 	log.Printf("火山 TTS 必填项状态:")
 	type ttsCheck struct {
 		name  string
@@ -448,10 +566,10 @@ func LogStartupSummary() {
 		ok    bool
 	}
 	checks := []ttsCheck{
-		{"BYTEDANCE_TTS_API_KEY", maskAPIKey(TTSOptions.APIKey), TTSOptions.APIKey != ""},
-		{"BYTEDANCE_TTS_RESOURCE_ID", telemetry.MaskResourceID(TTSOptions.ResourceID), TTSOptions.ResourceID != ""},
+		{"BYTEDANCE_TTS_API_KEY", maskAPIKey(opts.APIKey), opts.APIKey != ""},
+		{"BYTEDANCE_TTS_RESOURCE_ID", telemetry.MaskResourceID(opts.ResourceID), opts.ResourceID != ""},
 		// speaker 是火山复刻音色 ID(用户付费资产),日志里打码,避免明文落盘
-		{"BYTEDANCE_TTS_SPEAKER", telemetry.MaskSpeaker(TTSOptions.Speaker), TTSOptions.Speaker != ""},
+		{"BYTEDANCE_TTS_SPEAKER", telemetry.MaskSpeaker(opts.Speaker), opts.Speaker != ""},
 	}
 	missingCount := 0
 	for _, c := range checks {
@@ -467,7 +585,7 @@ func LogStartupSummary() {
 		log.Printf("  %s %s: %s", mark, c.name, val)
 	}
 
-	if TTSConfigErr != nil {
+	if err := GetTTSConfigErr(); err != nil {
 		log.Printf("火山 TTS 整体: 初始化失败(%d 个必填项缺失),/v1/audio/speech 路由将全部返回 500", missingCount)
 	} else {
 		log.Printf("火山 TTS 整体: 初始化成功")

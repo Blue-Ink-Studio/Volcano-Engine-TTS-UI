@@ -15,7 +15,7 @@ import (
 //   - Authorization 头 Bearer token 在列表中 → 放行
 //   - 其它 → 401 + JSON {error: 'unauthorized', code: 'admin_auth_failed'}
 //
-// 设计: 与现有 /v1/audio/speech 用的 setting.Auth 共享同一份 keys,
+// 设计: 与现有 /v1/audio/speech 用的鉴权 key 列表(setting.GetAuthAPIKeys)共享同一份 keys,
 // 用户只用管一个 env 变量(OPENAI_TTS_API_KEY)。
 func RequireAdmin(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -25,7 +25,7 @@ func RequireAdmin(next http.Handler) http.Handler {
 			return
 		}
 
-		keys := setting.Auth.APIKeys
+		keys := setting.GetAuthAPIKeys()
 		if len(keys) == 0 {
 			// 没配 admin key,等同无鉴权
 			next.ServeHTTP(w, r)

@@ -261,7 +261,7 @@ type SettingsAuthKeyRequest struct {
 }
 
 // SettingsAuthKeyHandler PUT /api/settings/auth-key
-// 鉴权: RequireAdmin。改完立即更新 setting.Auth.APIKeys(进程内生效),
+// 鉴权: RequireAdmin。改完立即刷新鉴权 key 列表(setting.SetAuthAPIKeys,进程内生效),
 // 下一个请求就用新 key — admin 自己改完要等下一次请求才能验证(避免改完立刻自踢)。
 func SettingsAuthKeyHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPut {
@@ -292,7 +292,7 @@ func SettingsAuthKeyHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	// 立即生效:不重新 LoadRuntimeConfig(那会覆盖其它字段),
 	// 只单独刷新 Auth.APIKeys
-	setting.Auth.APIKeys = []string{key}
+	setting.SetAuthAPIKeys([]string{key})
 	log.Printf("[settings] auth_key updated, runtime active (next request uses new key)")
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
@@ -309,7 +309,7 @@ type SettingsCORSRequest struct {
 }
 
 // SettingsCORSHandler PUT /api/settings/cors
-// 鉴权: RequireAdmin。改完立即更新 setting.CORS(进程内生效,跨域请求从下个请求开始按新配置)。
+// 鉴权: RequireAdmin。改完立即刷新 CORS(setting.SetCORS,进程内生效,跨域请求从下个请求开始按新配置)。
 // 同源豁免由 middleware/cors.go 的 isSameOrigin 处理,不在这里管。
 func SettingsCORSHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPut {
@@ -369,7 +369,7 @@ func SettingsCORSHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 立即刷新 setting.CORS,跨域请求从下个请求开始按新配置生效
+	// 立即刷新 CORS(setting.SetCORS),跨域请求从下个请求开始按新配置生效
 	// 复用 LoadRuntimeConfig 的解析逻辑(只取 cors 部分,避免覆盖其它运行时字段)
 	corsAllowAll, _ := s.SettingsGetBool("cors_allow_all", false)
 	originsStr := ""
@@ -377,20 +377,17 @@ func SettingsCORSHandler(w http.ResponseWriter, r *http.Request) {
 		originsStr = v
 	}
 	if corsAllowAll {
-		setting.CORS.AllowAll = true
-		setting.CORS.Origins = nil
+		setting.SetCORS(true, nil)
 	} else if originsStr != "" {
-		setting.CORS.AllowAll = false
-		setting.CORS.Origins = setting.SplitOriginsForCORS(originsStr)
+		setting.SetCORS(false, setting.SplitOriginsForCORS(originsStr))
 	} else {
-		setting.CORS.AllowAll = false
-		setting.CORS.Origins = nil
+		setting.SetCORS(false, nil)
 	}
-	log.Printf("[settings] cors updated (allow_all=%v origins=%q), runtime active", setting.CORS.AllowAll, originsStr)
+	log.Printf("[settings] cors updated (allow_all=%v origins=%q), runtime active", setting.GetCORSAllowAll(), originsStr)
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"ok":           true,
-		"allow_all":    setting.CORS.AllowAll,
+		"allow_all":    setting.GetCORSAllowAll(),
 		"origins":      originsStr,
 		"cors_active":  true,
 	})

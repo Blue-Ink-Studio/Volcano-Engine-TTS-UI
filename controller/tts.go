@@ -40,7 +40,7 @@ func truncateForLog(b []byte, max int) string {
 }
 
 // resolveClientFormat 把 OpenAI 风格的 response_format 映射为最终输出格式;
-// 不识别或未指定时回退到 setting.TTSOptions.Format。
+// 不识别或未指定时回退到 setting.GetTTSOptions().Format。
 func resolveClientFormat(reqFmt string) string {
 	switch strings.ToLower(reqFmt) {
 	case "mp3", "wav", "opus", "pcm", "aac", "flac":
@@ -49,7 +49,7 @@ func resolveClientFormat(reqFmt string) string {
 		}
 		return strings.ToLower(reqFmt)
 	}
-	return setting.TTSOptions.Format
+	return setting.GetTTSOptions().Format
 }
 
 // OpenaiTTSHandler 是 /v1/audio/speech 的入口。
@@ -81,9 +81,9 @@ func OpenaiTTSHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if setting.TTSConfigErr != nil {
+	if err := setting.GetTTSConfigErr(); err != nil {
 		log.Printf("警告: TTS配置未就绪,拒绝请求 - 错误=%v 路径=%s 客户端=%s",
-			setting.TTSConfigErr, r.URL.Path, middleware.GetClientIP(r))
+			err, r.URL.Path, middleware.GetClientIP(r))
 		middleware.SendJSONError(w, http.StatusServiceUnavailable, "TTS service configuration error. Please check environment variables and restart the service.", "configuration_error", "service_unavailable")
 		return
 	}
@@ -151,7 +151,7 @@ func OpenaiTTSHandler(w http.ResponseWriter, r *http.Request) {
 
 	clientFormat := resolveClientFormat(req.ResponseFormat)
 
-	opts := setting.TTSOptions
+	opts := setting.GetTTSOptions()
 	opts.Text = req.Input
 
 	// M3: voice 路由
@@ -183,7 +183,7 @@ func OpenaiTTSHandler(w http.ResponseWriter, r *http.Request) {
 				"voice lookup failed", "server_error", "db_read_failed")
 			return
 		}
-		// 覆盖 opts(API key / UID 保留自 setting.TTSOptions)
+		// 覆盖 opts(API key / UID 保留自 setting.GetTTSOptions 快照)
 		if !v.Enabled {
 			log.Printf("警告: voice=%q 已禁用 - 客户端=%s", req.Voice, middleware.GetClientIP(r))
 			middleware.SendJSONError(w, http.StatusForbidden,
@@ -200,7 +200,7 @@ func OpenaiTTSHandler(w http.ResponseWriter, r *http.Request) {
 			req.Voice, telemetry.MaskSpeaker(v.Speaker), telemetry.MaskResourceID(v.ResourceID), v.Model, middleware.GetClientIP(r))
 	}
 
-	ctx, cancel := context.WithTimeout(r.Context(), setting.TTSTimeout)
+	ctx, cancel := context.WithTimeout(r.Context(), setting.GetTTSTimeout())
 	defer cancel()
 
 	result, err := volcano.Synthesis(ctx, volcanoClient, opts, req.Input, clientFormat, speed, adapterRec)
@@ -282,7 +282,7 @@ func HealthHandler(w http.ResponseWriter, r *http.Request) {
 	mode := installer.GetMode()
 	if mode == installer.ModeSetup {
 		w.WriteHeader(http.StatusOK) // 200,因为进程活着,只是还没初始化
-	} else if setting.TTSConfigErr != nil {
+	} else if setting.GetTTSConfigErr() != nil {
 		w.WriteHeader(http.StatusServiceUnavailable)
 	} else {
 		w.WriteHeader(http.StatusOK)
@@ -308,8 +308,8 @@ func HealthHandler(w http.ResponseWriter, r *http.Request) {
 		Memory:    collectMemorySnapshot(),
 		ConfigStatus: dto.ConfigStatusResponse{
 			AllRequiredVarsSet: allRequired,
-			ConfigError:        setting.TTSConfigErr != nil,
-			Error:              configErrorMessage(setting.TTSConfigErr),
+			ConfigError:        setting.GetTTSConfigErr() != nil,
+			Error:              configErrorMessage(setting.GetTTSConfigErr()),
 		},
 		Installed: mode == installer.ModeNormal,
 		Mode:      mode.String(),
@@ -317,7 +317,7 @@ func HealthHandler(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(resp)
 }
 
-// configErrorMessage 把 setting.TTSConfigErr 安全地转成可对外暴露的字符串。
+// configErrorMessage 把运行时配置错误(setting.GetTTSConfigErr())安全地转成可对外暴露的字符串。
 // 仅在 normal 模式且有错时调用, error 为 nil 时返 "" (被 omitempty 跳过)。
 func configErrorMessage(err error) string {
 	if err == nil {

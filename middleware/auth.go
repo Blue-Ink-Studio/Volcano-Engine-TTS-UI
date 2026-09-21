@@ -10,7 +10,8 @@ import (
 )
 
 func ValidateAPIKey(r *http.Request) bool {
-	if len(setting.Auth.APIKeys) == 0 {
+	keys := setting.GetAuthAPIKeys()
+	if len(keys) == 0 {
 		return true
 	}
 
@@ -24,7 +25,7 @@ func ValidateAPIKey(r *http.Request) bool {
 	}
 
 	token := strings.TrimPrefix(authHeader, "Bearer ")
-	for _, validKey := range setting.Auth.APIKeys {
+	for _, validKey := range keys {
 		if subtle.ConstantTimeCompare([]byte(token), []byte(validKey)) == 1 {
 			return true
 		}

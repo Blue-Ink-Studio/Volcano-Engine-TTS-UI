@@ -169,11 +169,11 @@ func SetupSubmitHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 立即把 auth_key 灌到 setting.Auth.APIKeys,这样后续 /v1/audio/speech 和 /admin
-	// 在本进程内能立刻用新 key(无需等 LoadRuntimeConfig)。
+	// 立即把 auth_key 灌到鉴权 key 列表(setting.SetAuthAPIKeys),这样后续
+	// /v1/audio/speech 和 /admin 在本进程内能立刻用新 key(无需等 LoadRuntimeConfig)。
 	authKey := strings.TrimSpace(body.Settings["auth_key"])
 	if authKey != "" {
-		setting.Auth.APIKeys = []string{authKey}
+		setting.SetAuthAPIKeys([]string{authKey})
 	}
 
 	// 装完 reload TTS 全局配置(让 TTSOptions 立即有可用的 api_key/speaker/resource_id,

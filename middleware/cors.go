@@ -29,11 +29,11 @@ func matchOrigin(origin string) (string, bool) {
 	if !isValidOrigin(origin) {
 		return "", false
 	}
-	if setting.CORS.AllowAll {
+	if setting.GetCORSAllowAll() {
 		return "*", true
 	}
 	normalized := strings.ToLower(strings.TrimRight(strings.TrimSpace(origin), "/"))
-	for _, allowed := range setting.CORS.Origins {
+	for _, allowed := range setting.GetCORSOrigins() {
 		if allowed == normalized {
 			return origin, true
 		}
