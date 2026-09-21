@@ -36,6 +36,11 @@ var ErrInUse = errors.New("store: voice is referenced by default_speaker")
 // ErrNotFound 表示按 id/name 找不到;controller 翻译为 404。
 var ErrNotFound = errors.New("store: voice not found")
 
+// ErrInvalid 表示客户端输入不合法(name 格式 / 必填字段缺失);
+// controller 用 errors.Is(err, ErrInvalid) 翻译为 400。
+// 服务端错误(DB 失败等)不会被 wrap,controller 应翻译为 500。
+var ErrInvalid = errors.New("store: voice invalid")
+
 // voiceNameRe 限制 voice 名为 [a-zA-Z0-9_-]{1,64};SQL 注入 + 路径穿越防护。
 var voiceNameRe = regexp.MustCompile(`^[a-zA-Z0-9_-]{1,64}$`)
 
@@ -115,7 +120,9 @@ func (s *Store) GetVoiceForTTS(name string) (speaker, resourceID, model string, 
 }
 
 // VoiceInsert 新增音色;name 冲突返回 ErrDuplicate。
-// 空字符串/格式不合法返回 error;不依赖 SQLite 约束作为唯一校验。
+// 客户端输入错误(name 格式 / 必填字段缺失)返回 wrap ErrInvalid 的 error;
+// 服务端错误(DB 失败等)不被 wrap,controller 用 errors.Is 区分。
+// 不依赖 SQLite 约束作为唯一校验。
 func (s *Store) VoiceInsert(v Voice) (int64, error) {
 	v.Name = strings.TrimSpace(v.Name)
 	v.Speaker = strings.TrimSpace(v.Speaker)
@@ -125,13 +132,14 @@ func (s *Store) VoiceInsert(v Voice) (int64, error) {
 	v.Description = strings.TrimSpace(v.Description)
 
 	if err := validateVoiceName(v.Name); err != nil {
-		return 0, err
+		// validateVoiceName 返纯文本;这里 wrap 进 ErrInvalid 让 controller 用 errors.Is 判定。
+		return 0, fmt.Errorf("%w: %s", ErrInvalid, err.Error())
 	}
 	if v.Speaker == "" {
-		return 0, fmt.Errorf("store: voice insert: speaker is required")
+		return 0, fmt.Errorf("%w: speaker is required", ErrInvalid)
 	}
 	if v.ResourceID == "" {
-		return 0, fmt.Errorf("store: voice insert: resource_id is required")
+		return 0, fmt.Errorf("%w: resource_id is required", ErrInvalid)
 	}
 
 	res, err := s.db.Exec(`

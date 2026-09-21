@@ -2,9 +2,11 @@ package controller
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -191,14 +193,23 @@ func AdminVoiceCreateHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	id, err := s.VoiceInsert(v)
 	if err != nil {
-		switch err {
-		case store.ErrDuplicate:
+		switch {
+		case err == store.ErrDuplicate:
 			middleware.SendJSONError(w, http.StatusConflict,
 				fmt.Sprintf("voice name %q already exists", v.Name),
 				"invalid_request_error", "voice_duplicate")
+		case errors.Is(err, store.ErrInvalid):
+			// 客户端输入不合法(name 格式 / speaker / resource_id 缺失):400。
+			// 走 ErrInvalid 哨兵 + 原始 detail,前端可以直接显示。
+			middleware.SendJSONError(w, http.StatusBadRequest,
+				stripInvalidPrefix(err.Error()),
+				"invalid_request_error", "voice_invalid")
 		default:
+			// 兜底:DB 连接失败 / Exec 错误 / LastInsertId 失败等都是服务端问题,
+			// 返 500 + 通用 message,详细 err 走日志(不直接暴露给前端,避免信息泄漏)。
 			log.Printf("[admin] voice insert: %v", err)
-			middleware.SendJSONError(w, http.StatusBadRequest, err.Error(), "invalid_request_error", "voice_invalid")
+			middleware.SendJSONError(w, http.StatusInternalServerError,
+				"failed to insert voice", "server_error", "voice_insert_failed")
 		}
 		return
 	}
@@ -298,4 +309,15 @@ func AdminVoiceToggleHandler(w http.ResponseWriter, r *http.Request) {
 	updated, _ := s.VoiceGet(v.ID)
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	_ = json.NewEncoder(w).Encode(updated)
+}
+
+// stripInvalidPrefix 把 wrap 后的 ErrInvalid 错误字符串中的 "store: voice invalid: " 前缀剥掉,
+// 只保留底层 detail(例如 "speaker is required"),让前端能直接展示用户友好文案。
+// 如果上游 wrap 形态变化(没匹配到前缀),原样返回,避免误删关键信息。
+func stripInvalidPrefix(s string) string {
+	const prefix = "store: voice invalid: "
+	if strings.HasPrefix(s, prefix) {
+		return s[len(prefix):]
+	}
+	return s
 }
