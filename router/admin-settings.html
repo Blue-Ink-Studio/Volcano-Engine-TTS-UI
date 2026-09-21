@@ -1,0 +1,270 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>火山 TTS · 系统设置</title>
+    <script src="https://cdn.bootcdn.net/ajax/libs/vue/3.4.21/vue.global.prod.js"></script>
+    <script src="https://cdn.bootcdn.net/ajax/libs/axios/1.6.7/axios.min.js"></script>
+    <link rel="stylesheet" href="/admin/admin.css">
+</head>
+<body>
+    <div id="app">
+        <div class="app-shell">
+            <aside id="admin-sidebar"></aside>
+
+            <main class="main">
+                <header class="page-head">
+                    <div>
+                        <h1 class="page-title">系统设置</h1>
+                        <p class="page-sub">鉴权、上游凭证、默认路由与跨域</p>
+                    </div>
+                </header>
+
+                <div v-if="settings && !settings.cors_configured" class="alert alert-warning">
+                    <span class="alert-icon">⚠</span>
+                    <div class="alert-body">
+                        <div class="alert-title">跨域 CORS 未配置</div>
+                        <div class="alert-desc">同源可用,跨域请求会被 403。在下方「跨域 CORS」卡片中配置允许的来源。</div>
+                    </div>
+                </div>
+
+                <div class="settings-grid">
+                    <div class="card">
+                        <div class="card-head">
+                            <div>
+                                <div class="card-title">鉴权 Key</div>
+                                <div class="card-sub">客户端调用 <code>/v1/audio/speech</code> 与登录 /admin 共用</div>
+                            </div>
+                            <span class="pill pill-accent">敏感</span>
+                        </div>
+                        <div class="field">
+                            <label>当前 Key</label>
+                            <div class="input-static">{{ settings.auth_key || '(未设置)' }}</div>
+                        </div>
+                        <div class="field">
+                            <label>替换为新 Key</label>
+                            <div class="input-group">
+                                <input type="password" v-model="authKeyInput" :placeholder="settings.auth_key_set ? '不改留空' : '输入新 Key'">
+                                <button class="btn btn-primary" @click="saveAuthKey" :disabled="!authKeyInput">更新</button>
+                            </div>
+                            <div class="hint">改了之后,你的浏览器 401 自动跳回登录页,用新 Key 重登。</div>
+                        </div>
+                    </div>
+
+                    <div class="card">
+                        <div class="card-head">
+                            <div>
+                                <div class="card-title">火山 TTS 上游凭证</div>
+                                <div class="card-sub">调火山 v3 上游用的凭证与默认路由</div>
+                            </div>
+                        </div>
+                        <div class="field">
+                            <label>当前 API Key</label>
+                            <div class="input-static">{{ settings.api_key || '(未设置)' }}</div>
+                        </div>
+                        <div class="field">
+                            <label>替换为新 API Key</label>
+                            <div class="input-group">
+                                <input type="password" v-model="apiKeyInput" :placeholder="settings.api_key_set ? '不改留空' : '输入新 API Key'">
+                                <button class="btn btn-primary" @click="saveApiKey" :disabled="!apiKeyInput">更新</button>
+                            </div>
+                            <div class="hint">独立端点 PUT /api/settings/api-key,与其他字段分开传输</div>
+                        </div>
+                        <div class="divider"></div>
+                        <div class="grid-2">
+                            <div class="field">
+                                <label>默认资源 ID</label>
+                                <input v-model="settingsForm.default_resource_id" placeholder="seed-icl-2.0">
+                            </div>
+                            <div class="field">
+                                <label>默认音色 (name)</label>
+                                <select v-model="settingsForm.default_speaker">
+                                    <option value="">— 选择 —</option>
+                                    <option v-for="v in voices" :key="v.name" :value="v.name">{{ v.name }}</option>
+                                </select>
+                                <div class="hint">必须是「音色」tab 里存在的 name</div>
+                            </div>
+                            <div class="field">
+                                <label>默认输出格式</label>
+                                <select v-model="settingsForm.default_format">
+                                    <option value="mp3">mp3</option>
+                                    <option value="wav">wav</option>
+                                    <option value="opus">opus (ogg_opus)</option>
+                                    <option value="pcm">pcm</option>
+                                    <option value="aac">aac</option>
+                                    <option value="flac">flac</option>
+                                </select>
+                            </div>
+                            <div class="field">
+                                <label>采样率 (Hz)</label>
+                                <input type="number" v-model.number="settingsForm.sample_rate" min="8000" max="48000" step="1000">
+                            </div>
+                            <div class="field" style="grid-column: 1 / -1;">
+                                <label>Model (可选)</label>
+                                <input v-model="settingsForm.model" placeholder="seed-tts-2.0-standard">
+                            </div>
+                        </div>
+                        <div class="actions">
+                            <button class="btn" @click="resetSettingsForm">重置</button>
+                            <button class="btn btn-primary" @click="saveSettings" :disabled="savingSettings">{{ savingSettings ? '保存中...' : '保存设置' }}</button>
+                        </div>
+                    </div>
+
+                    <div class="card">
+                        <div class="card-head">
+                            <div>
+                                <div class="card-title">跨域 CORS</div>
+                                <div class="card-sub">控制哪些前端域名能跨域调 <code>/v1/audio/speech</code></div>
+                            </div>
+                            <span class="pill" :class="settings.cors_configured ? 'pill-success' : 'pill-mute'">
+                                <span class="pill-dot"></span>
+                                {{ settings.cors_configured ? '已配置' : '未配置' }}
+                            </span>
+                        </div>
+                        <div class="field">
+                            <label class="check">
+                                <input type="checkbox" v-model="corsForm.allow_all">
+                                <span>允许所有来源 (<code>*</code>)</span>
+                            </label>
+                            <div class="hint">勾上后下面白名单失效。仅测试用</div>
+                        </div>
+                        <div class="field" v-if="!corsForm.allow_all">
+                            <label>允许的来源</label>
+                            <textarea v-model="corsForm.origins" rows="4" placeholder="https://app.example.com&#10;https://admin.example.com" class="textarea"></textarea>
+                            <div class="hint">一行一个。当前: <span class="text-accent mono">{{ corsCurrentLabel }}</span></div>
+                        </div>
+                        <div class="actions">
+                            <button class="btn btn-primary" @click="saveCors" :disabled="savingCors">{{ savingCors ? '保存中...' : '保存 CORS' }}</button>
+                        </div>
+                    </div>
+                </div>
+            </main>
+        </div>
+    </div>
+
+    <script src="/admin/admin-shell.js"></script>
+    <script>
+    const { createApp, ref, computed, onMounted } = Vue;
+    const { http, getKey, setKey, clearKey, toast, mountShell } = window.admin;
+    createApp({
+        setup() {
+            const overview = ref({});
+            const voices = ref([]);
+            const settings = ref({});
+            const settingsForm = ref({ default_resource_id: '', default_speaker: '', default_format: 'mp3', sample_rate: 24000, model: '' });
+            const apiKeyInput = ref('');
+            const authKeyInput = ref('');
+
+            const corsForm = ref({ allow_all: false, origins: '' });
+            const savingCors = ref(false);
+            const corsCurrentLabel = computed(() => {
+                if (!settings.value) return '未配置';
+                if (settings.value.cors_allow_all) return '允许所有来源(*)';
+                if (settings.value.cors_origins) return settings.value.cors_origins;
+                return '未配置(同源可用,跨域会被 403)';
+            });
+
+            const savingSettings = ref(false);
+
+            const loadSettings = async () => {
+                const r = await http.get('/settings');
+                settings.value = r.data;
+                settingsForm.value = {
+                    default_resource_id: r.data.default_resource_id || '',
+                    default_speaker: r.data.default_speaker || '',
+                    default_format: r.data.default_format || 'mp3',
+                    sample_rate: r.data.sample_rate || 24000,
+                    model: r.data.model || '',
+                };
+                corsForm.value = {
+                    allow_all: !!r.data.cors_allow_all,
+                    origins: r.data.cors_origins || '',
+                };
+            };
+            const loadVoices = async () => {
+                const r = await http.get('/voices');
+                voices.value = r.data.voices || [];
+            };
+            const loadOverview = async () => {
+                overview.value = (await http.get('/admin/overview')).data;
+            };
+            const reloadAll = () => { loadSettings(); loadVoices(); loadOverview(); };
+
+            const saveCors = async () => {
+                savingCors.value = true;
+                try {
+                    await http.put('/settings/cors', { allow_all: corsForm.value.allow_all, origins: corsForm.value.origins });
+                    await loadSettings();
+                    toast('ok', 'CORS 配置已保存');
+                } catch (e) {
+                    toast('err', '保存 CORS 失败: ' + (e.response?.data?.error?.message || e.message));
+                } finally { savingCors.value = false; }
+            };
+            const saveSettings = async () => {
+                savingSettings.value = true;
+                try {
+                    await http.put('/settings', {
+                        default_resource_id: settingsForm.value.default_resource_id,
+                        default_speaker: settingsForm.value.default_speaker,
+                        default_format: settingsForm.value.default_format,
+                        sample_rate: settingsForm.value.sample_rate,
+                        model: settingsForm.value.model,
+                    });
+                    await loadSettings();
+                    await loadOverview();
+                    toast('ok', '设置已保存');
+                } catch (e) {
+                    toast('err', '保存失败: ' + (e.response?.data?.error?.message || e.message));
+                } finally { savingSettings.value = false; }
+            };
+            const saveApiKey = async () => {
+                if (!apiKeyInput.value) return;
+                try {
+                    await http.put('/settings/api-key', { api_key: apiKeyInput.value });
+                    apiKeyInput.value = '';
+                    await loadSettings();
+                    toast('ok', 'API Key 已更新');
+                } catch (e) {
+                    toast('err', '更新失败: ' + (e.response?.data?.error?.message || e.message));
+                }
+            };
+            const saveAuthKey = async () => {
+                if (!authKeyInput.value) return;
+                try {
+                    await http.put('/settings/auth-key', { auth_key: authKeyInput.value });
+                    authKeyInput.value = '';
+                    setTimeout(() => {
+                        clearKey();
+                        location.href = '/admin/login';
+                    }, 200);
+                    toast('ok', 'Auth Key 已更新,请用新 Key 重新登录');
+                } catch (e) {
+                    toast('err', '更新失败: ' + (e.response?.data?.error?.message || e.message));
+                }
+            };
+            const resetSettingsForm = () => { loadSettings(); };
+
+            onMounted(() => {
+                if (!getKey()) { location.href = '/admin/login'; return; }
+                mountShell({
+                    activeNav: 'settings',
+                    overview: overview.value,
+                    corsConfigured: !!(settings.value && settings.value.cors_configured),
+                    onReload: reloadAll,
+                });
+                reloadAll();
+            });
+
+            return {
+                overview, voices, settings, settingsForm, apiKeyInput, authKeyInput,
+                savingSettings, savingCors,
+                corsForm, corsCurrentLabel, saveCors,
+                saveSettings, saveApiKey, saveAuthKey, resetSettingsForm,
+                reloadAll,
+            };
+        },
+    }).mount('#app');
+    </script>
+</body>
+</html>

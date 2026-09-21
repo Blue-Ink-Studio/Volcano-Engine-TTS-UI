@@ -1,0 +1,260 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>火山 TTS · 音色管理</title>
+    <script src="https://cdn.bootcdn.net/ajax/libs/vue/3.4.21/vue.global.prod.js"></script>
+    <script src="https://cdn.bootcdn.net/ajax/libs/axios/1.6.7/axios.min.js"></script>
+    <link rel="stylesheet" href="/admin/admin.css">
+</head>
+<body>
+    <div id="app">
+        <div class="app-shell">
+            <aside id="admin-sidebar"></aside>
+
+            <main class="main">
+                <header class="page-head">
+                    <div>
+                        <h1 class="page-title">音色管理</h1>
+                        <p class="page-sub">管理火山 TTS 音色及其启用状态</p>
+                    </div>
+                    <div class="page-actions">
+                        <button class="btn btn-primary" @click="openAdd">+ 新增音色</button>
+                    </div>
+                </header>
+
+                <div class="toolbar">
+                    <div class="toolbar-left">
+                        <div class="search">
+                            <span class="search-icon">⌕</span>
+                            <input v-model="voiceSearch" placeholder="搜索名称、Speaker、资源 ID...">
+                        </div>
+                        <div class="seg">
+                            <button class="seg-btn" :class="{active: voiceFilter===null}" @click="voiceFilter=null">全部</button>
+                            <button class="seg-btn" :class="{active: voiceFilter==='on'}" @click="voiceFilter='on'">启用</button>
+                            <button class="seg-btn" :class="{active: voiceFilter==='off'}" @click="voiceFilter='off'">停用</button>
+                        </div>
+                    </div>
+                    <div class="toolbar-right">
+                        <span v-if="voiceSearch || voiceFilter !== null">{{ filteredVoices.length }} / {{ voices.length }}</span>
+                        <span v-else>共 {{ voices.length }} 条</span>
+                    </div>
+                </div>
+
+                <div v-if="actionErr" class="alert alert-danger">
+                    <span class="alert-icon">⚠</span>
+                    <div class="alert-body">
+                        <div class="alert-title">操作失败</div>
+                        <div class="alert-desc">{{ actionErr }}</div>
+                    </div>
+                </div>
+
+                <div class="data-card">
+                    <table class="data-table" v-if="filteredVoices.length">
+                        <thead>
+                            <tr>
+                                <th>名称</th>
+                                <th>Speaker</th>
+                                <th>资源 ID</th>
+                                <th>Model</th>
+                                <th>状态</th>
+                                <th class="th-actions">操作</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr v-for="v in filteredVoices" :key="v.name">
+                                <td>
+                                    <div class="cell-name">{{ v.name }}</div>
+                                    <div v-if="v.description" class="cell-sub">{{ v.description }}</div>
+                                </td>
+                                <td><span class="mono text-dim">{{ v.speaker }}</span></td>
+                                <td><span class="mono text-dim">{{ v.resource_id }}</span></td>
+                                <td><span class="mono text-dim">{{ v.model || '—' }}</span></td>
+                                <td>
+                                    <span class="pill" :class="v.enabled ? 'pill-success' : 'pill-mute'">
+                                        <span class="pill-dot"></span>
+                                        {{ v.enabled ? '启用' : '停用' }}
+                                    </span>
+                                </td>
+                                <td class="th-actions">
+                                    <label class="switch" :title="v.enabled ? '点击停用' : '点击启用'" style="margin-right: 12px;">
+                                        <input type="checkbox" :checked="v.enabled" @change="toggle(v)">
+                                        <span class="switch-track"></span>
+                                    </label>
+                                    <button class="btn btn-sm btn-danger-ghost" @click="remove(v)">删除</button>
+                                </td>
+                            </tr>
+                        </tbody>
+                    </table>
+
+                    <div v-else-if="voices.length === 0" class="empty">
+                        <div class="empty-icon">♪</div>
+                        <div class="empty-title">还没有音色</div>
+                        <div class="empty-desc">点击右上角「+ 新增音色」开始添加第一个火山 TTS 音色</div>
+                        <button class="btn btn-primary" @click="openAdd">+ 新增音色</button>
+                    </div>
+
+                    <div v-else class="empty">
+                        <div class="empty-icon">⌕</div>
+                        <div class="empty-title">没有匹配的音色</div>
+                        <div class="empty-desc">尝试调整搜索词或筛选条件</div>
+                        <button class="btn" @click="voiceSearch=''; voiceFilter=null">清除筛选</button>
+                    </div>
+                </div>
+            </main>
+        </div>
+
+        <!-- Add modal -->
+        <teleport to="body">
+            <transition name="modal">
+                <div v-if="showAdd" class="modal-backdrop" @click.self="showAdd=false">
+                    <div class="modal" @click.stop>
+                        <div class="modal-head">
+                            <h2>新增音色</h2>
+                            <button class="btn-icon" @click="showAdd=false" title="关闭" style="flex: 0; padding: 4px 10px;">×</button>
+                        </div>
+                        <div class="modal-body">
+                            <div class="grid-2">
+                                <div class="field">
+                                    <label>对外名 (voice) <span class="req">*</span></label>
+                                    <input v-model="form.name" placeholder="qian" class="mono">
+                                </div>
+                                <div class="field">
+                                    <label>Speaker (火山音色 ID) <span class="req">*</span></label>
+                                    <input v-model="form.speaker" placeholder="S_xxx" class="mono">
+                                </div>
+                                <div class="field">
+                                    <label>资源 ID <span class="req">*</span></label>
+                                    <input v-model="form.resource_id" placeholder="seed-icl-2.0" class="mono">
+                                </div>
+                                <div class="field">
+                                    <label>Model</label>
+                                    <input v-model="form.model" placeholder="seed-tts-2.0-standard" class="mono">
+                                </div>
+                                <div class="field">
+                                    <label>Language</label>
+                                    <input v-model="form.language" placeholder="zh" class="mono">
+                                </div>
+                                <div class="field">
+                                    <label>Description</label>
+                                    <input v-model="form.description" placeholder="可选">
+                                </div>
+                            </div>
+                            <div v-if="addErr" class="alert alert-danger" style="margin-top: 14px;">
+                                <span class="alert-icon">⚠</span>
+                                <div class="alert-body">
+                                    <div class="alert-title">提交失败</div>
+                                    <div class="alert-desc">{{ addErr }}</div>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="modal-foot">
+                            <button class="btn" @click="showAdd=false">取消</button>
+                            <button class="btn btn-primary" @click="submitAdd" :disabled="adding">{{ adding ? '提交中...' : '提交' }}</button>
+                        </div>
+                    </div>
+                </div>
+            </transition>
+        </teleport>
+    </div>
+
+    <script src="/admin/admin-shell.js"></script>
+    <script>
+    const { createApp, ref, computed, onMounted } = Vue;
+    const { http, getKey, toast, mountShell } = window.admin;
+    createApp({
+        setup() {
+            const overview = ref({});
+            const voices = ref([]);
+            const actionErr = ref('');
+
+            const voiceSearch = ref('');
+            const voiceFilter = ref(null);
+            const filteredVoices = computed(() => {
+                const q = voiceSearch.value.trim().toLowerCase();
+                return voices.value.filter(v => {
+                    if (voiceFilter.value === 'on' && !v.enabled) return false;
+                    if (voiceFilter.value === 'off' && v.enabled) return false;
+                    if (!q) return true;
+                    return (v.name || '').toLowerCase().includes(q)
+                        || (v.speaker || '').toLowerCase().includes(q)
+                        || (v.resource_id || '').toLowerCase().includes(q);
+                });
+            });
+
+            const showAdd = ref(false);
+            const adding = ref(false);
+            const addErr = ref('');
+            const form = ref({ name: '', speaker: '', resource_id: 'seed-icl-2.0', model: 'seed-tts-2.0-standard', language: '', description: '' });
+
+            const loadOverview = async () => {
+                try { overview.value = (await http.get('/admin/overview')).data; }
+                catch (e) { actionErr.value = '加载概览失败: ' + e.message; }
+            };
+            const loadVoices = async () => {
+                try { const r = await http.get('/voices'); voices.value = r.data.voices || []; }
+                catch (e) { actionErr.value = '加载音色失败: ' + e.message; }
+            };
+            const reloadAll = () => { loadOverview(); loadVoices(); };
+
+            const openAdd = () => {
+                form.value = { name: '', speaker: '', resource_id: 'seed-icl-2.0', model: 'seed-tts-2.0-standard', language: '', description: '' };
+                addErr.value = '';
+                showAdd.value = true;
+            };
+            const submitAdd = async () => {
+                addErr.value = '';
+                if (!form.value.name || !form.value.speaker || !form.value.resource_id) {
+                    addErr.value = '请填写名称、Speaker、资源 ID';
+                    return;
+                }
+                adding.value = true;
+                try {
+                    await http.post('/voices', form.value);
+                    showAdd.value = false;
+                    await loadVoices();
+                    await loadOverview();
+                    toast('ok', '音色已添加');
+                } catch (e) {
+                    addErr.value = e.response?.data?.error?.message || e.message;
+                } finally { adding.value = false; }
+            };
+            const toggle = async (v) => {
+                try { await http.patch(`/voices/${v.name}/toggle`, { enabled: !v.enabled }); await loadVoices(); }
+                catch (e) {
+                    actionErr.value = '切换失败: ' + (e.response?.data?.error?.message || e.message);
+                    toast('err', actionErr.value);
+                }
+            };
+            const remove = async (v) => {
+                if (!confirm(`确定删除音色 "${v.name}" 吗?`)) return;
+                try { await http.delete(`/voices/${v.name}`); await loadVoices(); await loadOverview(); toast('ok', '音色已删除'); }
+                catch (e) {
+                    actionErr.value = '删除失败: ' + (e.response?.data?.error?.message || e.message);
+                    toast('err', actionErr.value);
+                }
+            };
+
+            onMounted(() => {
+                if (!getKey()) { location.href = '/admin/login'; return; }
+                mountShell({
+                    activeNav: 'voices',
+                    overview: overview.value,
+                    voiceCount: voices.value.length,
+                    onReload: reloadAll,
+                });
+                reloadAll();
+            });
+
+            return {
+                overview, voices, actionErr,
+                voiceSearch, voiceFilter, filteredVoices,
+                showAdd, form, addErr, adding, openAdd, submitAdd, toggle, remove,
+                reloadAll,
+            };
+        },
+    }).mount('#app');
+    </script>
+</body>
+</html>

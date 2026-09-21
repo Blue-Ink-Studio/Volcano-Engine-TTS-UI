@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>管理后台 · 登录</title>
+    <script src="https://cdn.bootcdn.net/ajax/libs/vue/3.4.21/vue.global.prod.js"></script>
+    <script src="https://cdn.bootcdn.net/ajax/libs/axios/1.6.7/axios.min.js"></script>
+    <link rel="stylesheet" href="/admin/admin.css">
+</head>
+<body>
+    <div id="app">
+        <div class="login-screen">
+            <div class="login-card">
+                <div class="login-logo">TTS</div>
+                <h1>管理后台</h1>
+                <div class="sub">输入 OPENAI_TTS_API_KEY 登录</div>
+                <input v-model="keyInput" type="password" placeholder="API Key" @keyup.enter="onLogin" autofocus class="login-input">
+                <button class="btn btn-primary btn-lg" @click="onLogin" :disabled="!keyInput" style="width: 100%;">登 录</button>
+                <div v-if="loginErr" class="login-err">⚠ {{ loginErr }}</div>
+            </div>
+        </div>
+    </div>
+
+    <script src="/admin/admin-shell.js"></script>
+    <script>
+    const { createApp, ref } = Vue;
+    const { http, setKey, clearKey, getKey } = window.admin;
+    createApp({
+        setup() {
+            const keyInput = ref('');
+            const loginErr = ref('');
+
+            // 已登录则直接跳 dashboard
+            if (getKey()) {
+                http.get('/admin/overview').then(() => {
+                    location.href = '/admin';
+                }).catch(() => { clearKey(); });
+            }
+
+            const onLogin = async () => {
+                loginErr.value = '';
+                try {
+                    await window.admin.login(keyInput.value);
+                    location.href = '/admin';
+                } catch (e) {
+                    loginErr.value = '鉴权失败: ' + (e.response?.data?.error?.message || e.message);
+                }
+            };
+
+            return { keyInput, loginErr, onLogin };
+        },
+    }).mount('#app');
+    </script>
+</body>
+</html>
