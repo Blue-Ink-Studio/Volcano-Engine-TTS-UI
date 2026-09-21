@@ -2,6 +2,7 @@ package controller
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -163,9 +164,54 @@ func SetupSubmitHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	settingsKV["initialized"] = "1"
 	settingsKV["installed_at"] = time.Now().UTC().Format(time.RFC3339)
-	if err := s.SettingsSetBatch(settingsKV); err != nil {
-		log.Printf("[setup] 写 settings 失败: %v", err)
-		middleware.SendJSONError(w, http.StatusInternalServerError, "failed to write settings", "server_error", "db_write_failed")
+
+	// 【修复】原版先写 settings 再循环插 voice,任一 voice 失败时已写入的
+	// settings 不回滚 → db 处于半残状态(用户重启还要踩"已装但配置不完整"的坑)。
+	// 改用 store.SetupApply 一次性事务:settings + voices 任一失败整体回滚,
+	// db 保持 setup 前的状态(无脏数据)。
+	//
+	// voice 行的 resource_id 留空时,自动用 settings.default_resource_id 兜底。
+	// 用户在 step 2 填了 default_resource_id 后,step 3 的 voice 行 resource_id
+	// 可以不填 — 保持一致。否则会出现 "settings 里 seed-icl-2.0,voice 里 volc.megatts.icl"
+	// 这种 mismatch,运行时 500。
+	voices := make([]store.Voice, 0, len(body.Voices))
+	defaultResourceID := settingsKV["default_resource_id"]
+	for _, v := range body.Voices {
+		voiceResourceID := v.ResourceID
+		if voiceResourceID == "" {
+			voiceResourceID = defaultResourceID
+			log.Printf("[setup] voice %q resource_id 留空,自动用 default_resource_id=%q", v.Name, defaultResourceID)
+		}
+		voices = append(voices, store.Voice{
+			Name:       v.Name,
+			Speaker:    v.Speaker,
+			ResourceID: voiceResourceID,
+			Model:      v.Model,
+			Language:   v.Language,
+			Enabled:    true,
+		})
+	}
+
+	// 预检 voices 数量(避免空提交也走事务);setup 校验已要求至少 1 条,
+	// 防御性兜底。
+	if len(voices) == 0 {
+		middleware.SendJSONError(w, http.StatusBadRequest,
+			"at least one voice is required", "invalid_request_error", "no_voices")
+		return
+	}
+
+	inserted, err := s.SetupApply(settingsKV, voices)
+	if err != nil {
+		log.Printf("[setup] 提交失败,事务回滚 - 错误=%v", err)
+		// 区分客户端/服务端错误,沿用 admin.go 的 400/500 模式
+		if errors.Is(err, store.ErrInvalid) {
+			middleware.SendJSONError(w, http.StatusBadRequest,
+				err.Error(), "invalid_request_error", "voice_invalid")
+			return
+		}
+		middleware.SendJSONError(w, http.StatusInternalServerError,
+			fmt.Sprintf("failed to apply setup: %v", err),
+			"server_error", "db_write_failed")
 		return
 	}
 
@@ -182,49 +228,7 @@ func SetupSubmitHandler(w http.ResponseWriter, r *http.Request) {
 		log.Printf("[setup] warning: 装完 LoadRuntimeConfig 失败: %v(下次启动会恢复)", err)
 	}
 
-	// 清空旧 voices 再插入(假设是首次安装;若不是,name 冲突会变成 409)
-	// 这里选择 "清空+插入" 语义,符合"setup 是首次安装"的产品定位
-	// 如果想保留旧 voices,可以改成 UPSERT,但 M1 不做
-	if existing, _ := s.VoiceList(true); len(existing) > 0 {
-		// 留作未来:如果是非首次 setup(M2 加 reset 功能),这里需要更精细处理
-		log.Printf("[setup] 检测到 %d 条已存在 voices,本次将跳过清空(name 冲突由 ErrDuplicate 处理)", len(existing))
-	}
-	inserted := 0
-	// 【UX 改进】voice 行的 resource_id 留空时,自动用 settings.default_resource_id 兜底。
-	// 用户在 step 2 填了 default_resource_id 后,step 3 的 voice 行 resource_id
-	// 可以不填 — 保持一致。否则会出现 "settings 里 seed-icl-2.0,voice 里 volc.megatts.icl"
-	// 这种 mismatch,运行时 500。
-	defaultResourceID := settingsKV["default_resource_id"]
-	for _, v := range body.Voices {
-		voiceResourceID := v.ResourceID
-		if voiceResourceID == "" {
-			voiceResourceID = defaultResourceID
-			log.Printf("[setup] voice %q resource_id 留空,自动用 default_resource_id=%q", v.Name, defaultResourceID)
-		}
-		_, err := s.VoiceInsert(store.Voice{
-			Name:       v.Name,
-			Speaker:    v.Speaker,
-			ResourceID: voiceResourceID,
-			Model:      v.Model,
-			Language:   v.Language,
-			Enabled:    true,
-		})
-		if err != nil {
-			log.Printf("[setup] 插入 voice %q 失败: %v", v.Name, err)
-			// 不回滚 settings(用户重启后会重新 setup)
-			// 但已插入的 voices 会留着,下次 setup 会撞 ErrDuplicate
-			// 安全:把 ErrDuplicate 视作可继续(用户重复 setup 同一组 voice)
-			if err == store.ErrDuplicate {
-				continue
-			}
-			middleware.SendJSONError(w, http.StatusInternalServerError,
-				fmt.Sprintf("failed to insert voice %q: %v", v.Name, err),
-				"server_error", "voice_insert_failed")
-			return
-		}
-		inserted++
-	}
-	log.Printf("[setup] 写入 settings=%d, voices=%d/%d", len(settingsKV), inserted, len(body.Voices))
+	log.Printf("[setup] 写入 settings=%d, voices=%d/%d (事务原子提交)", len(settingsKV), inserted, len(voices))
 
 	// 写 lock(原子):从这一刻起,/api/setup 永久关闭
 	if err := installer.CreateLock(GetSetupDBPath()); err != nil {
