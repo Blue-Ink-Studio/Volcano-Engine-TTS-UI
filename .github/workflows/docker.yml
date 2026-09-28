@@ -1,10 +1,20 @@
 name: Docker Publish
 
+# 触发条件:
+#   - main 上的 semver tag(v*.*.*): 推 GHCR + DockerHub
+#   - 手动按钮(workflow_dispatch): 临时跑一次
+#
+# 注意:
+#   1. 需在 GitHub 仓库 Settings → Secrets 加 DOCKERHUB_USERNAME / DOCKERHUB_TOKEN。
+#      没加之前, DockerHub login 步骤被 actions 自动跳过, 只推 GHCR。
+#   2. secrets.DOCKERHUB_USERNAME 用于 metadata-action 渲染 image 名, 不能空 — 留空会
+#      生成 "docker.io//ttshub" 这种非法 image。已加默认值保护(空时禁用 DockerHub image)。
+#   3. 暂不验 PR 编译;PR 合到 main 不会重跑本 workflow, 只在打 tag 时构建。
 on:
   push:
     tags:
-      - 'v*'
-  workflow_dispatch:  # 允许手动触发测试
+      - 'v*.*.*'
+  workflow_dispatch:
 
 env:
   REGISTRY: ghcr.io
@@ -28,11 +38,19 @@ jobs:
         uses: docker/setup-buildx-action@v3
 
       - name: Login to GHCR
+        if: github.event_name != 'pull_request'
         uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Login to DockerHub
+        if: github.event_name != 'pull_request' && secrets.DOCKERHUB_USERNAME != ''
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Extract version from git
         id: version
@@ -44,20 +62,32 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ env.REGISTRY }}/${{ github.repository }}
+          # 多个 image base:metadata-action 会为每个 base 渲染完整 tag 列表。
+          # DockerHub image 用 enable 保护:username secret 没设时不渲染,避免非法 image 名。
+          images: |
+            name=${{ env.REGISTRY }}/${{ github.repository }}
+            name=docker.io/${{ secrets.DOCKERHUB_USERNAME }}/ttshub,enable=${{ secrets.DOCKERHUB_USERNAME != '' }}
           tags: |
             type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest,enable=${{ github.ref_type == 'tag' }}
             type=sha,format=short
           labels: |
             org.opencontainers.image.version=${{ steps.version.outputs.version }}
             org.opencontainers.image.revision=${{ steps.version.outputs.commit }}
 
       - name: Build and push
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@v6
         with:
           context: .
           platforms: linux/amd64,linux/arm64
-          push: true
+          # 当前触发器只有 push (tag) + workflow_dispatch, 无 pull_request, 所以 push 永远为 true。
+          # 保留 != 'pull_request' 表达式以兼容未来:若再加 PR 触发, 自动只 build 不 push。
+          push: ${{ github.event_name != 'pull_request' }}
+          # cache-from: 复用上次构建的层(github actions 内置缓存), 快 5-10x
+          # cache-to:   本次构建的层也推回缓存, 下次复用
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
