@@ -41,14 +41,29 @@ func SpeakerLabel(s string) string {
 //   - 其它 → 前 4 + **** + 后 4 (保留前缀便于肉眼区分 "S_xx 开头" vs "BV001_...")
 // 例子: "S_G8tEKnaJ1" → "S_G8****naJ1"
 func MaskSpeaker(s string) string {
+	return maskWithAffix(s, "(未设置)")
+}
+
+// MaskResourceID 把火山 TTS 资源 ID 部分打码用于日志输出。
+// 资源 ID 同样属于用户付费/敏感资产(指向 V3 复刻项目),与 speaker 走同一规则。
+//   - 空 → "(未设置)"
+//   - 长度 ≤ 4 → 全打码
+//   - 其它 → 前 4 + **** + 后 4
+// 例子: "volc.megatts.icl" → "volc****.icl"; "seed-icl-2.0" → "seed****2.0"
+func MaskResourceID(s string) string {
+	return maskWithAffix(s, "(未设置)")
+}
+
+// maskWithAffix 共用的"前 4 + **** + 后 4"打码逻辑,空串返回 emptyLabel。
+func maskWithAffix(s, emptyLabel string) string {
 	if s == "" {
-		return "(未设置)"
+		return emptyLabel
 	}
 	if len(s) <= 4 {
 		return strings.Repeat("*", len(s))
 	}
 	// 找前 4 字符中第一个非 [A-Za-z0-9_] 字符做截断,避免截到奇怪位置
-	// (虽然火山 ID 实际都是 S_xxx 字母数字组合,这里保险)
+	// (虽然火山 ID 实际都是字母数字组合,这里保险)
 	prefix := s[:4]
 	suffix := s[len(s)-4:]
 	return prefix + "****" + suffix

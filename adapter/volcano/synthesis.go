@@ -84,7 +84,7 @@ func Synthesis(
 
 	if common.DebugLog {
 		log.Printf("TTS upstream: resource_id=%s speaker=%s model=%q format=%s sample_rate=%d speech_rate=%d additions=%q",
-			opts.ResourceID, telemetry.MaskSpeaker(opts.Speaker), opts.Model, opts.Format, opts.SampleRate, opts.SpeechRate, extractAdditionsForLog(body))
+			telemetry.MaskResourceID(opts.ResourceID), telemetry.MaskSpeaker(opts.Speaker), opts.Model, opts.Format, opts.SampleRate, opts.SpeechRate, extractAdditionsForLog(body))
 	}
 
 	resp, err := client.PostStream(ctx, "https://openspeech.bytedance.com/api/v3/tts/unidirectional", headers, body)

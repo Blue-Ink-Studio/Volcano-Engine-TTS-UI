@@ -21,6 +21,21 @@ var setupHTML []byte
 //go:embed admin.html
 var adminHTML []byte
 
+//go:embed admin-login.html
+var adminLoginHTML []byte
+
+//go:embed admin-voices.html
+var adminVoicesHTML []byte
+
+//go:embed admin-settings.html
+var adminSettingsHTML []byte
+
+//go:embed admin.css
+var adminCSS []byte
+
+//go:embed admin-shell.js
+var adminShellJS []byte
+
 // Setup 返回主路由。
 // 中间件顺序(由外向内):
 //   SecurityHeaders → InstallGuard → RateLimit → ConcurrencyLimit → Logger → handler
@@ -64,9 +79,21 @@ func Setup() *mux.Router {
 	// /admin 管理后台(M2);HTML 本身公开,鉴权由前端 JS 拦截
 	// (sessionStorage 没 key 就显示登录页;有 key 调 /api/admin/overview 触发 401 跳登录)
 	// API 端点(/api/admin/* /api/voices*)才需要 RequireAdmin。
-	r.HandleFunc("/admin", func(w http.ResponseWriter, req *http.Request) {
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		_, _ = w.Write(adminHTML)
+	//
+	// 拆分后 admin.html / admin-login.html / admin-voices.html / admin-settings.html
+	// 各自独立,URL 路由切换;共享 admin.css + admin-shell.js 由 adminStatic 提供。
+	r.HandleFunc("/admin", serveAdmin(adminHTML)).Methods("GET")
+	r.HandleFunc("/admin/login", serveAdmin(adminLoginHTML)).Methods("GET")
+	r.HandleFunc("/admin/voices", serveAdmin(adminVoicesHTML)).Methods("GET")
+	r.HandleFunc("/admin/settings", serveAdmin(adminSettingsHTML)).Methods("GET")
+	// admin 静态资源
+	r.HandleFunc("/admin/admin.css", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/css; charset=utf-8")
+		_, _ = w.Write(adminCSS)
+	}).Methods("GET")
+	r.HandleFunc("/admin/admin-shell.js", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
+		_, _ = w.Write(adminShellJS)
 	}).Methods("GET")
 
 	// /api/admin/overview (鉴权)
@@ -131,4 +158,13 @@ func acceptsHTML(accept string) bool {
 		}
 	}
 	return false
+}
+
+// serveAdmin 返回一个把 embed 的 HTML bytes 以 text/html 写出的 handler。
+// 抽出来只为让 /admin/voices 等多条路由的注册保持单行,避免重复 4 段。
+func serveAdmin(body []byte) http.HandlerFunc {
+	return func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = w.Write(body)
+	}
 }

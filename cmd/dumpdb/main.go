@@ -11,6 +11,7 @@ import (
 	"database/sql"
 	"fmt"
 	"os"
+	"strings"
 
 	_ "modernc.org/sqlite"
 )
@@ -116,14 +117,13 @@ func main() {
 }
 
 func isSensitive(key string) bool {
-	lowK := key
-	// 简单 contains (不引 strings 包保持精简)
-	markers := []string{"key", "token", "speaker"}
-	for _, m := range markers {
-		for i := 0; i+len(m) <= len(lowK); i++ {
-			if lowK[i:i+len(m)] == m {
-				return true
-			}
+	// 标记 key 名包含 "key" / "token" / "speaker" 即视为敏感,值打码。
+	// 大小写不敏感: API_KEY / Auth_Token 等大写 key 也会被命中
+	// (避免漏打码)。
+	low := strings.ToLower(key)
+	for _, m := range []string{"key", "token", "speaker"} {
+		if strings.Contains(low, m) {
+			return true
 		}
 	}
 	return false

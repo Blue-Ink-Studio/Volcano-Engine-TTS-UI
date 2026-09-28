@@ -36,6 +36,11 @@ var ErrInUse = errors.New("store: voice is referenced by default_speaker")
 // ErrNotFound 表示按 id/name 找不到;controller 翻译为 404。
 var ErrNotFound = errors.New("store: voice not found")
 
+// ErrInvalid 表示客户端输入不合法(name 格式 / 必填字段缺失);
+// controller 用 errors.Is(err, ErrInvalid) 翻译为 400。
+// 服务端错误(DB 失败等)不会被 wrap,controller 应翻译为 500。
+var ErrInvalid = errors.New("store: voice invalid")
+
 // voiceNameRe 限制 voice 名为 [a-zA-Z0-9_-]{1,64};SQL 注入 + 路径穿越防护。
 var voiceNameRe = regexp.MustCompile(`^[a-zA-Z0-9_-]{1,64}$`)
 
@@ -115,7 +120,9 @@ func (s *Store) GetVoiceForTTS(name string) (speaker, resourceID, model string, 
 }
 
 // VoiceInsert 新增音色;name 冲突返回 ErrDuplicate。
-// 空字符串/格式不合法返回 error;不依赖 SQLite 约束作为唯一校验。
+// 客户端输入错误(name 格式 / 必填字段缺失)返回 wrap ErrInvalid 的 error;
+// 服务端错误(DB 失败等)不被 wrap,controller 用 errors.Is 区分。
+// 不依赖 SQLite 约束作为唯一校验。
 func (s *Store) VoiceInsert(v Voice) (int64, error) {
 	v.Name = strings.TrimSpace(v.Name)
 	v.Speaker = strings.TrimSpace(v.Speaker)
@@ -125,13 +132,14 @@ func (s *Store) VoiceInsert(v Voice) (int64, error) {
 	v.Description = strings.TrimSpace(v.Description)
 
 	if err := validateVoiceName(v.Name); err != nil {
-		return 0, err
+		// validateVoiceName 返纯文本;这里 wrap 进 ErrInvalid 让 controller 用 errors.Is 判定。
+		return 0, fmt.Errorf("%w: %s", ErrInvalid, err.Error())
 	}
 	if v.Speaker == "" {
-		return 0, fmt.Errorf("store: voice insert: speaker is required")
+		return 0, fmt.Errorf("%w: speaker is required", ErrInvalid)
 	}
 	if v.ResourceID == "" {
-		return 0, fmt.Errorf("store: voice insert: resource_id is required")
+		return 0, fmt.Errorf("%w: resource_id is required", ErrInvalid)
 	}
 
 	res, err := s.db.Exec(`
@@ -153,6 +161,12 @@ func (s *Store) VoiceInsert(v Voice) (int64, error) {
 
 // VoiceUpdate 整行替换;name 仍需保持唯一。
 // 不允许把 name 改成空/不合法。
+//
+// 同步 default_speaker:
+//   - 改 name 前,先查旧记录
+//   - 若 settings.default_speaker == 旧 name,把它改成新 name
+//   - 整个 voice UPDATE + settings UPDATE 在同一事务里,
+//     失败回滚,避免"声音改了但 default_speaker 还指向旧名"导致火山查不到
 func (s *Store) VoiceUpdate(v Voice) error {
 	v.Name = strings.TrimSpace(v.Name)
 	v.Speaker = strings.TrimSpace(v.Speaker)
@@ -171,7 +185,47 @@ func (s *Store) VoiceUpdate(v Voice) error {
 		return fmt.Errorf("store: voice update: resource_id is required")
 	}
 
-	res, err := s.db.Exec(`
+	// 整段事务: 读旧名 → 同步 settings → UPDATE voice
+	tx, err := s.db.Begin()
+	if err != nil {
+		return fmt.Errorf("store: voice update begin: %w", err)
+	}
+	defer func() {
+		// commit 成功时 Rollback 返回 sql.ErrTxDone,无害
+		_ = tx.Rollback()
+	}()
+
+	// 1. 读旧名(同事务,避免并发改)
+	var oldName string
+	if err := tx.QueryRow(`SELECT name FROM voices WHERE id = ?`, v.ID).Scan(&oldName); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrNotFound
+		}
+		return fmt.Errorf("store: voice update read old name id=%d: %w", v.ID, err)
+	}
+
+	// 2. 若 name 变了 + 是默认音色 → 同步 default_speaker
+	if oldName != v.Name {
+		var defVal string
+		err := tx.QueryRow(`SELECT value FROM settings WHERE key = 'default_speaker'`).Scan(&defVal)
+		switch {
+		case errors.Is(err, sql.ErrNoRows):
+			// 没设 default_speaker,无事可做
+		case err != nil:
+			return fmt.Errorf("store: voice update read default_speaker: %w", err)
+		case defVal == oldName:
+			// 同步改名为新名
+			if _, err := tx.Exec(`
+				INSERT INTO settings (key, value, updated_at) VALUES ('default_speaker', ?, datetime('now'))
+				ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+				v.Name); err != nil {
+				return fmt.Errorf("store: voice update sync default_speaker: %w", err)
+			}
+		}
+	}
+
+	// 3. UPDATE voice
+	res, err := tx.Exec(`
 		UPDATE voices SET name=?, speaker=?, resource_id=?, model=?, language=?, description=?, enabled=?, updated_at=datetime('now')
 		WHERE id = ?`,
 		v.Name, v.Speaker, v.ResourceID, v.Model, v.Language, v.Description, boolToInt(v.Enabled), v.ID)
@@ -184,6 +238,11 @@ func (s *Store) VoiceUpdate(v Voice) error {
 	n, _ := res.RowsAffected()
 	if n == 0 {
 		return ErrNotFound
+	}
+
+	// 4. 提交
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("store: voice update commit: %w", err)
 	}
 	return nil
 }

@@ -29,11 +29,11 @@ func matchOrigin(origin string) (string, bool) {
 	if !isValidOrigin(origin) {
 		return "", false
 	}
-	if setting.CORS.AllowAll {
+	if setting.GetCORSAllowAll() {
 		return "*", true
 	}
 	normalized := strings.ToLower(strings.TrimRight(strings.TrimSpace(origin), "/"))
-	for _, allowed := range setting.CORS.Origins {
+	for _, allowed := range setting.GetCORSOrigins() {
 		if allowed == normalized {
 			return origin, true
 		}
@@ -148,7 +148,7 @@ func CORS(next http.Handler) http.Handler {
 
 		// Origin 匹配:设置 CORS 响应头
 		w.Header().Set("Access-Control-Allow-Origin", allowOrigin)
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
 		w.Header().Set("Access-Control-Expose-Headers", "X-Request-Id")
 		w.Header().Set("Access-Control-Max-Age", corsMaxAgeHeader)

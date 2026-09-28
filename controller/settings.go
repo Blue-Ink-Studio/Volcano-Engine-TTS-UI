@@ -121,7 +121,7 @@ func SettingsUpdateHandler(w http.ResponseWriter, r *http.Request) {
 	// 收集要更新的键值对
 	updates := make(map[string]string)
 	if body.DefaultResourceID != nil {
-		v := trimAll(*body.DefaultResourceID)
+		v := strings.TrimSpace(*body.DefaultResourceID)
 		if v == "" {
 			middleware.SendJSONError(w, http.StatusBadRequest, "default_resource_id cannot be empty", "invalid_request_error", "missing_field")
 			return
@@ -129,7 +129,7 @@ func SettingsUpdateHandler(w http.ResponseWriter, r *http.Request) {
 		updates["default_resource_id"] = v
 	}
 	if body.DefaultSpeaker != nil {
-		v := trimAll(*body.DefaultSpeaker)
+		v := strings.TrimSpace(*body.DefaultSpeaker)
 		if v == "" {
 			middleware.SendJSONError(w, http.StatusBadRequest, "default_speaker cannot be empty", "invalid_request_error", "missing_field")
 			return
@@ -144,7 +144,7 @@ func SettingsUpdateHandler(w http.ResponseWriter, r *http.Request) {
 		updates["default_speaker"] = v
 	}
 	if body.DefaultFormat != nil {
-		v := trimAll(*body.DefaultFormat)
+		v := strings.TrimSpace(*body.DefaultFormat)
 		if !isValidFormat(v) {
 			middleware.SendJSONError(w, http.StatusBadRequest,
 				fmt.Sprintf("default_format %q invalid; valid: mp3/wav/opus/pcm/aac/flac", v),
@@ -163,13 +163,13 @@ func SettingsUpdateHandler(w http.ResponseWriter, r *http.Request) {
 		updates["sample_rate"] = strconv.Itoa(v)
 	}
 	if body.Model != nil {
-		updates["model"] = trimAll(*body.Model)
+		updates["model"] = strings.TrimSpace(*body.Model)
 	}
 	if body.ModelType != nil {
 		updates["model_type"] = strconv.Itoa(*body.ModelType)
 	}
 	if body.ExplicitLanguage != nil {
-		updates["explicit_language"] = trimAll(*body.ExplicitLanguage)
+		updates["explicit_language"] = strings.TrimSpace(*body.ExplicitLanguage)
 	}
 	if body.EnableSubtitle != nil {
 		updates["enable_subtitle"] = boolToStr(*body.EnableSubtitle)
@@ -232,7 +232,7 @@ func SettingsAPIKeyHandler(w http.ResponseWriter, r *http.Request) {
 		middleware.SendJSONError(w, http.StatusBadRequest, "invalid JSON body", "invalid_request_error", "bad_request")
 		return
 	}
-	key := trimAll(body.APIKey)
+	key := strings.TrimSpace(body.APIKey)
 	if key == "" {
 		middleware.SendJSONError(w, http.StatusBadRequest, "api_key cannot be empty", "invalid_request_error", "missing_field")
 		return
@@ -261,7 +261,7 @@ type SettingsAuthKeyRequest struct {
 }
 
 // SettingsAuthKeyHandler PUT /api/settings/auth-key
-// 鉴权: RequireAdmin。改完立即更新 setting.Auth.APIKeys(进程内生效),
+// 鉴权: RequireAdmin。改完立即刷新鉴权 key 列表(setting.SetAuthAPIKeys,进程内生效),
 // 下一个请求就用新 key — admin 自己改完要等下一次请求才能验证(避免改完立刻自踢)。
 func SettingsAuthKeyHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPut {
@@ -280,7 +280,7 @@ func SettingsAuthKeyHandler(w http.ResponseWriter, r *http.Request) {
 		middleware.SendJSONError(w, http.StatusBadRequest, "invalid JSON body", "invalid_request_error", "bad_request")
 		return
 	}
-	key := trimAll(body.AuthKey)
+	key := strings.TrimSpace(body.AuthKey)
 	if key == "" {
 		middleware.SendJSONError(w, http.StatusBadRequest, "auth_key cannot be empty", "invalid_request_error", "missing_field")
 		return
@@ -292,23 +292,24 @@ func SettingsAuthKeyHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	// 立即生效:不重新 LoadRuntimeConfig(那会覆盖其它字段),
 	// 只单独刷新 Auth.APIKeys
-	setting.Auth.APIKeys = []string{key}
+	setting.SetAuthAPIKeys([]string{key})
 	log.Printf("[settings] auth_key updated, runtime active (next request uses new key)")
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
 }
 
 // SettingsCORSRequest 是 PUT /api/settings/cors 的 body。
-// 两个字段都可选(至少给一个):
-//   - allow_all: true → 任意 Origin 都接受(*);设了之后 origins 失效
-//   - origins: 一行一个 origin,后端 trim + lower + 去末尾 /
+// 两个字段都可选(至少给一个),用指针区分"未传"和"传空串":
+//   - allow_all 指针: nil=未传(不动)  *true=开 *false=关
+//   - origins  字符串: nil=未传(不动)  ""=传空串(清空)  "url1\nurl2"=覆盖
+// 这样用户能精确表达意图(保留 / 改 / 清空),不会被 0/"" 歧义坑死。
 type SettingsCORSRequest struct {
-	AllowAll *bool  `json:"allow_all,omitempty"`
-	Origins  string `json:"origins,omitempty"` // 也接受 string 数组(任一形式)
+	AllowAll *bool   `json:"allow_all,omitempty"`
+	Origins  *string `json:"origins,omitempty"` // *string 区分"未传(nil)"和"传空串"
 }
 
 // SettingsCORSHandler PUT /api/settings/cors
-// 鉴权: RequireAdmin。改完立即更新 setting.CORS(进程内生效,跨域请求从下个请求开始按新配置)。
+// 鉴权: RequireAdmin。改完立即刷新 CORS(setting.SetCORS,进程内生效,跨域请求从下个请求开始按新配置)。
 // 同源豁免由 middleware/cors.go 的 isSameOrigin 处理,不在这里管。
 func SettingsCORSHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPut {
@@ -327,10 +328,9 @@ func SettingsCORSHandler(w http.ResponseWriter, r *http.Request) {
 		middleware.SendJSONError(w, http.StatusBadRequest, "invalid JSON body", "invalid_request_error", "bad_request")
 		return
 	}
-	if body.AllowAll == nil && trimAll(body.Origins) == "" && body.Origins != "" {
-		// 空 body 不算错误,用户可能是想"清空"(只清 origins 保留现状)
-	}
-	if body.AllowAll == nil && body.Origins == "" {
+	// 至少要给一个字段(allow_all 或 origins)
+	// 指针为 nil 表示"未传",不计入
+	if body.AllowAll == nil && body.Origins == nil {
 		middleware.SendJSONError(w, http.StatusBadRequest,
 			"at least one of allow_all / origins required",
 			"invalid_request_error", "no_fields")
@@ -341,22 +341,27 @@ func SettingsCORSHandler(w http.ResponseWriter, r *http.Request) {
 	if body.AllowAll != nil {
 		updates["cors_allow_all"] = boolToStr(*body.AllowAll)
 	}
-	if body.Origins != "" {
-		// 校验每个 origin 至少像 http(s)://... (防止用户填空或填乱字符)
-		for _, line := range strings.Split(body.Origins, "\n") {
-			line = strings.TrimSpace(line)
-			if line == "" {
-				continue
-			}
-			low := strings.ToLower(line)
-			if !strings.HasPrefix(low, "http://") && !strings.HasPrefix(low, "https://") {
-				middleware.SendJSONError(w, http.StatusBadRequest,
-					fmt.Sprintf("invalid origin: %q (must start with http:// or https://)", line),
-					"invalid_request_error", "origin_invalid")
-				return
+	if body.Origins != nil {
+		// *Origins == "" 表示用户要清空(保留 nil 表示"不动")
+		origins := *body.Origins
+		if origins != "" {
+			// 校验每个 origin 至少像 http(s)://... (防止用户填乱字符)
+			for _, line := range strings.Split(origins, "\n") {
+				line = strings.TrimSpace(line)
+				if line == "" {
+					continue
+				}
+				low := strings.ToLower(line)
+				if !strings.HasPrefix(low, "http://") && !strings.HasPrefix(low, "https://") {
+					middleware.SendJSONError(w, http.StatusBadRequest,
+						fmt.Sprintf("invalid origin: %q (must start with http:// or https://)", line),
+						"invalid_request_error", "origin_invalid")
+					return
+				}
 			}
 		}
-		updates["cors_origins"] = body.Origins
+		// 空串也能存(表示"清空");trim/lower 在 LoadRuntimeConfig 那侧做
+		updates["cors_origins"] = origins
 	}
 	if err := s.SettingsSetBatch(updates); err != nil {
 		log.Printf("[settings] cors set: %v", err)
@@ -364,7 +369,7 @@ func SettingsCORSHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 立即刷新 setting.CORS,跨域请求从下个请求开始按新配置生效
+	// 立即刷新 CORS(setting.SetCORS),跨域请求从下个请求开始按新配置生效
 	// 复用 LoadRuntimeConfig 的解析逻辑(只取 cors 部分,避免覆盖其它运行时字段)
 	corsAllowAll, _ := s.SettingsGetBool("cors_allow_all", false)
 	originsStr := ""
@@ -372,20 +377,17 @@ func SettingsCORSHandler(w http.ResponseWriter, r *http.Request) {
 		originsStr = v
 	}
 	if corsAllowAll {
-		setting.CORS.AllowAll = true
-		setting.CORS.Origins = nil
+		setting.SetCORS(true, nil)
 	} else if originsStr != "" {
-		setting.CORS.AllowAll = false
-		setting.CORS.Origins = setting.SplitOriginsForCORS(originsStr)
+		setting.SetCORS(false, setting.SplitOriginsForCORS(originsStr))
 	} else {
-		setting.CORS.AllowAll = false
-		setting.CORS.Origins = nil
+		setting.SetCORS(false, nil)
 	}
-	log.Printf("[settings] cors updated (allow_all=%v origins=%q), runtime active", setting.CORS.AllowAll, originsStr)
+	log.Printf("[settings] cors updated (allow_all=%v origins=%q), runtime active", setting.GetCORSAllowAll(), originsStr)
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"ok":           true,
-		"allow_all":    setting.CORS.AllowAll,
+		"allow_all":    setting.GetCORSAllowAll(),
 		"origins":      originsStr,
 		"cors_active":  true,
 	})
@@ -402,18 +404,6 @@ func maskAPIKeyField(s string) string {
 	}
 	// 仿 setting.maskAPIKey: 但这里打的是 TTS 服务用的 key,可能含字母数字和连字符
 	return s[:4] + "****" + s[len(s)-4:]
-}
-
-func trimAll(s string) string {
-	// 简单 trim 前后空白;不剥中间空格
-	out := s
-	for len(out) > 0 && (out[0] == ' ' || out[0] == '\t' || out[0] == '\n' || out[0] == '\r') {
-		out = out[1:]
-	}
-	for len(out) > 0 && (out[len(out)-1] == ' ' || out[len(out)-1] == '\t' || out[len(out)-1] == '\n' || out[len(out)-1] == '\r') {
-		out = out[:len(out)-1]
-	}
-	return out
 }
 
 func isValidFormat(s string) bool {
