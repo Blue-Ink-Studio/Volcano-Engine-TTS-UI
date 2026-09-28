@@ -25,6 +25,11 @@ jobs:
     permissions:
       contents: read
       packages: write
+    # secrets 不能在 step 的 if: 表达式里直接引用(GitHub 沙箱限制),
+    # 必须先经 job 级 env 透传,再用 env.XXX != '' 判断。
+    env:
+      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+      DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -46,11 +51,11 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Login to DockerHub
-        if: github.event_name != 'pull_request' && secrets.DOCKERHUB_USERNAME != ''
+        if: env.DOCKERHUB_USERNAME != ''
         uses: docker/login-action@v3
         with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          username: ${{ env.DOCKERHUB_USERNAME }}
+          password: ${{ env.DOCKERHUB_TOKEN }}
 
       - name: Extract version from git
         id: version
@@ -63,10 +68,11 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           # 多个 image base:metadata-action 会为每个 base 渲染完整 tag 列表。
-          # DockerHub image 用 enable 保护:username secret 没设时不渲染,避免非法 image 名。
+          # DockerHub image 用 enable 保护:username 未配置(secret 未设)时不渲染,
+          # 避免生成 "docker.io//ttshub" 这种非法 image 名导致 metadata 步骤报错。
           images: |
             name=${{ env.REGISTRY }}/${{ github.repository }}
-            name=docker.io/${{ secrets.DOCKERHUB_USERNAME }}/ttshub,enable=${{ secrets.DOCKERHUB_USERNAME != '' }}
+            name=docker.io/${{ env.DOCKERHUB_USERNAME }}/ttshub,enable=${{ env.DOCKERHUB_USERNAME != '' }}
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
