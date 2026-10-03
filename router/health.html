@@ -6,6 +6,7 @@
     <title>TTS 服务监控</title>
     <script src="https://cdn.bootcdn.net/ajax/libs/vue/3.4.21/vue.global.prod.js"></script>
     <script src="https://cdn.bootcdn.net/ajax/libs/axios/1.6.7/axios.min.js"></script>
+    <link rel="stylesheet" href="/dashboard/admin.css">
     <style>
         :root {
             --bg: #0b0f1a;
@@ -148,6 +149,7 @@
                 </div>
             </div>
             <div class="row-flex">
+                <a class="btn" href="/dashboard" style="text-decoration:none;">← 返回控制台</a>
                 <span class="status-badge" :class="health.status === 'ok' ? 'ok' : 'error'">
                     <span class="status-dot" :class="{ live: health.status === 'ok' }"></span>
                     {{ health.status === 'ok' ? '运行中' : (health.status || '加载中') }}
@@ -377,8 +379,11 @@
         </div>
     </div>
 
+    <script src="/dashboard/admin-shell.js"></script>
     <script>
     const { createApp, ref, computed, onMounted } = Vue;
+    // v0.3.0:/health 与 /metrics 已收口到鉴权接口,统一走带凭证头的 /api/admin/*
+    const { http, getKey } = window.admin;
 
     function parseProm(text) {
         const out = {};
@@ -597,16 +602,16 @@
 
             const fetchHealth = async () => {
                 try {
-                    const r = await axios.get("/health");
+                    const r = await http.get("/admin/health");
                     health.value = r.data;
                 } catch (e) {
-                    error.value = "无法获取健康状态: " + (e.message || "未知错误");
+                    error.value = "无法获取健康状态: " + (e.response?.data?.error?.message || e.message || "未知错误");
                 }
             };
 
             const fetchMetrics = async () => {
                 try {
-                    const r = await axios.get("/metrics");
+                    const r = await http.get("/admin/metrics");
                     metrics.value = parseProm(r.data);
                 } catch (e) {
                     // 不覆盖 error,让 health 错误更显眼
@@ -650,6 +655,8 @@
             };
 
             onMounted(() => {
+                // v0.3.0:本页已收口到管理鉴权,未登录先回登录页
+                if (!getKey()) { location.href = '/dashboard/login'; return; }
                 refresh();
                 setInterval(refresh, 10000);
             });

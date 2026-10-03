@@ -112,19 +112,25 @@
     <nav class="nav">
         <div class="nav-group">
             <div class="nav-label">概览</div>
-            <a class="nav-item${activeNav === 'dashboard' ? ' active' : ''}" href="/admin">
+            <a class="nav-item${activeNav === 'dashboard' ? ' active' : ''}" href="/dashboard">
                 <span class="nav-icon">▦</span><span>仪表盘</span>
             </a>
         </div>
         <div class="nav-group">
             <div class="nav-label">管理</div>
-            <a class="nav-item${activeNav === 'voices' ? ' active' : ''}" href="/admin/voices">
+            <a class="nav-item${activeNav === 'voices' ? ' active' : ''}" href="/dashboard/voices">
                 <span class="nav-icon">♪</span><span>音色</span>
                 <span class="nav-badge">${voiceCount}</span>
             </a>
-            <a class="nav-item${activeNav === 'settings' ? ' active' : ''}" href="/admin/settings">
+            <a class="nav-item${activeNav === 'settings' ? ' active' : ''}" href="/dashboard/settings">
                 <span class="nav-icon">⚙</span><span>设置</span>
                 ${corsConfigured ? '' : '<span class="nav-dot" title="CORS 未配置"></span>'}
+            </a>
+        </div>
+        <div class="nav-group">
+            <div class="nav-label">观测</div>
+            <a class="nav-item${activeNav === 'status' ? ' active' : ''}" href="/dashboard/status">
+                <span class="nav-icon">♥</span><span>详细状态</span>
             </a>
         </div>
     </nav>
@@ -142,7 +148,7 @@
         if (btnLogout) btnLogout.addEventListener('click', () => {
             clearKey();
             if (typeof options.onLogout === 'function') options.onLogout();
-            else location.href = '/admin/login';
+            else location.href = '/dashboard/login';
         });
         return {};
     };

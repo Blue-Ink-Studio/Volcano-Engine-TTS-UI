@@ -6,7 +6,7 @@
     <title>火山 TTS · 仪表盘</title>
     <script src="https://cdn.bootcdn.net/ajax/libs/vue/3.4.21/vue.global.prod.js"></script>
     <script src="https://cdn.bootcdn.net/ajax/libs/axios/1.6.7/axios.min.js"></script>
-    <link rel="stylesheet" href="/admin/admin.css">
+    <link rel="stylesheet" href="/dashboard/admin.css">
 </head>
 <body>
     <div id="app">
@@ -77,7 +77,7 @@
         </div>
     </div>
 
-    <script src="/admin/admin-shell.js"></script>
+    <script src="/dashboard/admin-shell.js"></script>
     <script>
     const { createApp, ref, onMounted } = Vue;
     const { http, getKey, formatUptime, shortPath, formatBytes, formatStart, mountShell } = window.admin;
@@ -93,7 +93,7 @@
             };
 
             onMounted(() => {
-                if (!getKey()) { location.href = '/admin/login'; return; }
+                if (!getKey()) { location.href = '/dashboard/login'; return; }
                 mountShell({ activeNav: 'dashboard', overview: overview.value, voiceCount: overview.value.voice_count, onReload: loadOverview });
                 loadOverview();
             });
