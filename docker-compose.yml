@@ -13,15 +13,23 @@ services:
       - TTS_DB_PATH=/data/tts.db
       - PORT=8080
       - OPENAI_TTS_API_KEY=${OPENAI_TTS_API_KEY:-}
-      # 可选,装好后也可在 /admin 改
+      # 可选,装好后也可在 /dashboard 改
       - TRUSTED_PROXY_HOPS=${TRUSTED_PROXY_HOPS:-}
+      # v0.3.0 新增(可选):根路径 /metrics 的内网 CIDR 白名单,逗号分隔。
+      # 不配置时根路径 /metrics 完全不注册(Prometheus 请改用鉴权版 /api/admin/metrics)。
+      # ⚠️ 这里必须填「容器内网网段」,不要填 127.0.0.1/32 ——
+      #    那是容器自身回环,Prometheus 在宿主机/其他容器里根本进不来。
+      # 例:METRICS_ALLOW_CIDR=172.16.0.0/12
+      - METRICS_ALLOW_CIDR=${METRICS_ALLOW_CIDR:-}
     volumes:
       # DB + lock 文件必须挂载,否则容器重启后配置全丢
       - tts-data:/data
     restart: unless-stopped
     healthcheck:
-      # 用 wget 检查,alpine 镜像有
-      test: ["CMD", "wget", "-qO-", "http://localhost:8080/health"]
+      # v0.3.0:必须用 /healthz(匿名存活探针)。
+      # /health 现在需要管理凭证,而健康检查不带 Authorization ——
+      # 继续用 /health 会让容器一直被判定为 unhealthy。
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/healthz"]
       interval: 30s
       timeout: 5s
       retries: 3
