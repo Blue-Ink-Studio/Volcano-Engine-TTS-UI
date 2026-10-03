@@ -6,7 +6,7 @@
     <title>管理后台 · 登录</title>
     <script src="https://cdn.bootcdn.net/ajax/libs/vue/3.4.21/vue.global.prod.js"></script>
     <script src="https://cdn.bootcdn.net/ajax/libs/axios/1.6.7/axios.min.js"></script>
-    <link rel="stylesheet" href="/admin/admin.css">
+    <link rel="stylesheet" href="/dashboard/admin.css">
 </head>
 <body>
     <div id="app">
@@ -22,7 +22,7 @@
         </div>
     </div>
 
-    <script src="/admin/admin-shell.js"></script>
+    <script src="/dashboard/admin-shell.js"></script>
     <script>
     const { createApp, ref } = Vue;
     const { http, setKey, clearKey, getKey } = window.admin;
@@ -34,7 +34,7 @@
             // 已登录则直接跳 dashboard
             if (getKey()) {
                 http.get('/admin/overview').then(() => {
-                    location.href = '/admin';
+                    location.href = '/dashboard';
                 }).catch(() => { clearKey(); });
             }
 
@@ -42,7 +42,7 @@
                 loginErr.value = '';
                 try {
                     await window.admin.login(keyInput.value);
-                    location.href = '/admin';
+                    location.href = '/dashboard';
                 } catch (e) {
                     loginErr.value = '鉴权失败: ' + (e.response?.data?.error?.message || e.message);
                 }

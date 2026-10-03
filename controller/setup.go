@@ -244,7 +244,7 @@ func SetupSubmitHandler(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"ok":       true,
 		"message":  "installed",
-		"redirect": "/admin",
+		"redirect": "/dashboard", // v0.3.0: 管理入口由 /admin 迁至 /dashboard
 		"settings": len(settingsKV),
 		"voices":   inserted,
 	})

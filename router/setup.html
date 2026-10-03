@@ -202,7 +202,7 @@
             <div class="field">
                 <label>OpenAI 鉴权 Key <span class="req">*</span></label>
                 <input type="password" v-model="form.auth_key" placeholder="自定,例如 my-secret-key-2024" autocomplete="off">
-                <div class="hint">客户端用这个 Key 调 <code>/v1/audio/speech</code>,也是登录 <code>/admin</code> 的密码。装完可在 <code>/admin → 设置</code> 改。</div>
+                <div class="hint">客户端用这个 Key 调 <code>/v1/audio/speech</code>,也是登录 <code>/dashboard</code> 的密码。装完可在 <code>/dashboard → 设置</code> 改(可另配独立 <code>admin_key</code> 用于后台登录,避免与业务 Key 共用)。</div>
             </div>
             <div class="field">
                 <label>火山 TTS API Key <span class="req">*</span></label>
@@ -216,7 +216,7 @@
             <div class="card-head">
                 <div>
                     <div class="card-title">默认路由与格式</div>
-                    <div class="card-sub">未传 voice/format 时使用。装完可在 <code>/admin → 设置</code> 改。</div>
+                    <div class="card-sub">未传 voice/format 时使用。装完可在 <code>/dashboard → 设置</code> 改。</div>
                 </div>
                 <span class="step-badge">第 2 步</span>
             </div>
@@ -261,7 +261,7 @@
             <div class="card-head">
                 <div>
                     <div class="card-title">音色列表 <span style="font-weight: 400; color: var(--text-dim); font-size: 12px;">(至少 1 条)</span></div>
-                    <div class="card-sub">填入火山 TTS 音色 ID(S_ 开头的为复刻音色)。可后续在 /admin 中增删。</div>
+                    <div class="card-sub">填入火山 TTS 音色 ID(S_ 开头的为复刻音色)。可后续在 /dashboard 中增删。</div>
                 </div>
                 <span class="step-badge">第 3 步</span>
             </div>
@@ -322,7 +322,7 @@
         <!-- Nav -->
         <div class="actions">
             <button class="btn" @click="prev" :disabled="step===1 || submitting">← 上一步</button>
-            <div class="hint-text">提交后立即进入正常模式;后续管理请访问 <code>/admin</code>。</div>
+            <div class="hint-text">提交后立即进入正常模式;后续管理请访问 <code>/dashboard</code>。</div>
             <div style="display: flex; gap: 8px;">
                 <button v-if="step < 4" class="btn btn-primary" @click="next">下一步 →</button>
                 <button v-else class="btn btn-primary" @click="submit" :disabled="submitting">
@@ -412,7 +412,7 @@
                         },
                         voices: form.value.voices,
                     });
-                    window.location.href = r.data.redirect || '/admin';
+                    window.location.href = r.data.redirect || '/dashboard';
                 } catch (e) {
                     const msg = e.response?.data?.error?.message || e.message;
                     errorMsg.value = '安装失败: ' + msg;
