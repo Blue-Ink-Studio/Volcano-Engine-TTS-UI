@@ -36,7 +36,10 @@ USER appuser
 
 EXPOSE 8080
 
+# v0.3.0:健康检查必须用 /healthz(匿名存活探针)。
+# /health 现在需要管理凭证,而 HEALTHCHECK 不带 Authorization ——
+# 继续用 /health 会让镜像一直被判定为 unhealthy。
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD wget -qO- http://localhost:8080/health || exit 1
+    CMD wget -qO- http://localhost:8080/healthz || exit 1
 
 ENTRYPOINT ["./tts-api"]

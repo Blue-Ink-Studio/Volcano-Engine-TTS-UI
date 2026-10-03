@@ -6,11 +6,14 @@
 
 - 完全兼容 OpenAI `/v1/audio/speech` API
 - **引导式安装**: 首次启动自动进入 `/setup` 向导,无需手写 env
-- **WebUI 后台** `/admin`: 音色管理 / 全局设置 / CORS 配置 / 鉴权
+- **WebUI 后台** `/dashboard`: 音色管理 / 全局设置 / CORS 配置 / 鉴权
 - **音色库**: 多 voice 动态路由,未知 / 禁用 voice 返回明确错误
 - **多格式输出**: mp3 / ogg_opus / pcm / wav (内部转 pcm + 本地拼头) / aac / flac
 - **鉴权 + 限流**: API Key 校验, IP 速率限制, 全局并发限制
-- **观测**: Prometheus 文本格式 `/metrics` + 服务状态 `/health`, 零外部依赖
+- **凭证分离**(v0.3.0): 管理后台可配独立 `admin_key`,业务调用 Key 无法访问管理接口
+- **观测**: Prometheus 文本格式 + 服务状态, **默认无匿名监控端点**(v0.3.0 起)
+  - `/healthz` 匿名存活探针(不含任何字段)· `/api/admin/metrics` 与 `/api/admin/health` 需鉴权
+  - 根路径 `/metrics` 默认 404,需 `METRICS_ALLOW_CIDR` 内网白名单才注册
 - **跨平台**: Windows / Linux / macOS / Docker
 
 ## 快速开始
@@ -35,7 +38,7 @@ go build -o tts-api .
 3. 音色列表: 每个 voice 的对外名 + 火山 speaker ID
 4. 确认提交
 
-完成后自动跳转到 `/admin`,从这里登录管理。
+完成后自动跳转到 `/dashboard`,从这里登录管理。
 
 ### 3. 调用
 
@@ -56,9 +59,19 @@ curl -X POST http://localhost:8080/v1/audio/speech \
 | `TTS_ADMIN_KEY` | ✓ (生产) | `/api/setup` 安装 token,首次安装时校验 |
 | `TTS_DB_PATH` | ✗ | DB 路径,默认 `./tts.db` |
 | `PORT` | ✗ | 监听端口,默认 `8080` |
-| `OPENAI_TTS_API_KEY` | ✗ (生产) | OpenAI 端鉴权 key,可不设(内网) |
+| `OPENAI_TTS_API_KEY` | ✓ (生产) | 业务端鉴权 key;未设 `admin_key` 时**也用于管理后台登录** |
 
-**所有业务配置**(`api_key` / `default_resource_id` / `default_speaker` / `default_format` / `sample_rate` / `model` / `model_type` / `explicit_language` / `enable_subtitle` / `timeout` / `cors_origins` / `cors_allow_all` / `auth_key` / `trusted_proxy_hops`) — 全部在 `/admin` 设置,持久化到 SQLite。
+v0.3.0 新增(均可选):
+
+| 变量 | 用途 |
+|---|---|
+| `METRICS_ALLOW_CIDR` | 根路径 `/metrics` 的内网 CIDR 白名单(逗号分隔)。不配则根路径完全不注册 |
+
+> ⚠️ **v0.3.0 起,normal 模式下未配置任何管理凭证(DB `admin_key` / DB `auth_key` /
+> env `OPENAI_TTS_API_KEY` 三者皆空)时服务将拒绝启动** —— 因为管理接口在无凭证时会拒绝
+> 所有请求,启动一个进不去后台的实例没有意义。
+
+**所有业务配置**(`api_key` / `default_resource_id` / `default_speaker` / `default_format` / `sample_rate` / `model` / `model_type` / `explicit_language` / `enable_subtitle` / `timeout` / `cors_origins` / `cors_allow_all` / `auth_key` / **`admin_key`** / `trusted_proxy_hops`) — 全部在 `/dashboard` 设置,持久化到 SQLite。
 
 env 仍可作为 fallback 读(老用户兼容),但**新用户应通过 WebUI 配**。
 
@@ -70,9 +83,9 @@ env 仍可作为 fallback 读(老用户兼容),但**新用户应通过 WebUI 配
 1. **凭证**: 火山 API Key (必填) + OpenAI 鉴权 Key (可选)
 2. **默认路由**: 默认资源 ID (`seed-icl-2.0`) + 默认音色名 + 默认格式 + 采样率
 3. **音色列表**: 每个 voice 一行,填对外名 + 火山 speaker ID
-4. **确认**: 提交写入 DB,自动跳 `/admin`
+4. **确认**: 提交写入 DB,自动跳 `/dashboard`
 
-### `/admin` 日常管理
+### `/dashboard` 日常管理
 
 | Tab | 用途 |
 |---|---|
@@ -121,17 +134,31 @@ OpenAI 兼容,鉴权 `Authorization: Bearer <OPENAI_TTS_API_KEY>`(若已设)。
 | `pcm` | pcm | `audio/pcm` |
 | `aac` / `flac` | mp3 (降级) | `audio/mpeg` |
 
-### `GET /health`
+### `GET /healthz`
 
-无鉴权,返回:
+**无鉴权**。存活探针,**只返回 `200` 与字面量 `ok`,不含任何字段**。
+
+供 K8s `livenessProbe`/`readinessProbe`、Docker `HEALTHCHECK`、负载均衡健康检查使用 ——
+这些探针默认不带 `Authorization`,不能指向需要鉴权的 `/health`。
+
+```bash
+curl http://localhost:8080/healthz
+# ok
+```
+
+### `GET /health`(v0.3.0 起需鉴权)
+
+**需管理凭证**(`Authorization: Bearer <admin_key>`)。返回完整健康数据:
 
 ```json
 {
   "status": "ok",                            // ok | not_installed | configuration_error
   "service": "ByteDance TTS to OpenAI API Adapter",
-  "version": "v0.2.0",
-  "commit": "621f9f8",
+  "version": "v0.3.0",
+  "commit": "abc1234",
   "uptime": "3600 seconds",
+  "start_time": "2026-10-04T00:00:00Z",
+  "memory": { "heap_alloc": 0, "heap_inuse": 0, "goroutines": 0 },
   "config_status": {
     "all_required_vars_set": true,
     "config_error": false,
@@ -145,16 +172,41 @@ OpenAI 兼容,鉴权 `Authorization: Bearer <OPENAI_TTS_API_KEY>`(若已设)。
 - 正常: HTTP 200, `status: "ok"`
 - 未安装: HTTP 200, `status: "not_installed"`
 - 配置损坏: HTTP 503, `status: "configuration_error"`, `error` 字段有原因
+- 无凭证: HTTP **401**
+
+> v0.3.0 之前本端点是匿名的,会泄漏版本、commit、运行时长、内存与配置错误文本,现已收口。
+> 管理面板内使用鉴权版 **`GET /api/admin/health`**(返回同样的数据)。
 
 ### `GET /metrics`
 
-Prometheus 文本格式,无鉴权。主要指标见 [观测 / Metrics](#观测--metrics)。
+**默认不注册**(访问 404)。两种使用方式:
 
-### `GET /admin`, `GET /setup`, `GET /dashboard`
+1. **配置 `METRICS_ALLOW_CIDR`**(内网 CIDR 白名单,逗号分隔):
+   根路径 `/metrics` 仅对白名单来源开放,**非白名单返回 404**(不是 403,避免确认端点存在)。
+   ```bash
+   METRICS_ALLOW_CIDR=10.0.0.0/8,172.16.0.0/12
+   ```
+   ⚠️ Docker 部署请填**容器内网网段**,不要填 `127.0.0.1/32`(那是容器自身回环)。
+2. **使用鉴权版 `GET /api/admin/metrics`**,带 `Authorization: Bearer <管理凭证>`。
+   Prometheus 侧需配 `authorization: { credentials: <管理凭证> }`。
 
-- `/admin`: 后台 (Vue SPA),需鉴权
-- `/setup`: 引导式安装页 (Vue SPA),无鉴权,装完自动跳转
-- `/dashboard`: 服务状态预览页 (无鉴权)
+Prometheus 文本格式。主要指标见 [观测 / Metrics](#观测--metrics)。
+
+### 管理页面与安装页
+
+| 路径 | 说明 | 鉴权 |
+|---|---|---|
+| `GET /dashboard` | 管理看板 | 需鉴权(浏览器请求返回页面外壳,数据走 API) |
+| `GET /dashboard/voices` | 音色管理 | 同上 |
+| `GET /dashboard/settings` | 全局设置 | 同上 |
+| `GET /dashboard/status` | 详细服务状态(健康 + 指标看板) | 同上 |
+| `GET /dashboard/login` | 登录页 | **公开**(否则无法登录) |
+| `GET /setup` | 引导式安装页 | 无鉴权,装完自动跳转 |
+| `GET /admin` 等旧路径 | 301 永久重定向到对应 `/dashboard/*` | — |
+
+> **为什么页面是"需鉴权"却又能直接打开?** 浏览器的 `Accept` 含 `text/html` 时返回页面外壳,
+> 由前端根据 `sessionStorage` 里的凭证决定显示登录视图;非 HTML 请求(脚本、抓取工具)
+> 无凭证一律 401。页面外壳不含任何数据,数据全部来自鉴权后的 `/api/admin/*` 接口。
 
 ## 老用户迁移 (从 v0.1.0 → v0.2.0)
 
@@ -162,19 +214,19 @@ v0.1.0 用 env 配 11 个 `BYTEDANCE_TTS_*` 变量。v0.2.0 起改 WebUI:
 
 | 旧 env | v0.2.0 配置入口 |
 |---|---|
-| `BYTEDANCE_TTS_API_KEY` | `/admin` 设置 → API Key |
-| `BYTEDANCE_TTS_RESOURCE_ID` | `/admin` 设置 → 默认资源 ID |
-| `BYTEDANCE_TTS_SPEAKER` | `/admin` 设置 → 默认音色 (填 voice **名字**,不是 speaker ID) |
-| `BYTEDANCE_TTS_FORMAT` | `/admin` 设置 → 默认格式 |
-| `BYTEDANCE_TTS_SAMPLE_RATE` | `/admin` 设置 → 采样率 |
-| `BYTEDANCE_TTS_BIT_RATE` | `/admin` 设置 → MP3 比特率 |
-| `BYTEDANCE_TTS_MODEL` | `/admin` 设置 → 子模型 |
-| `BYTEDANCE_TTS_MODEL_TYPE` | `/admin` 设置 → 模型类型 |
-| `BYTEDANCE_TTS_EXPLICIT_LANGUAGE` | `/admin` 设置 → 显式语言 |
-| `BYTEDANCE_TTS_ENABLE_SUBTITLE` | `/admin` 设置 → 启用字级时间戳 |
+| `BYTEDANCE_TTS_API_KEY` | `/dashboard` 设置 → API Key |
+| `BYTEDANCE_TTS_RESOURCE_ID` | `/dashboard` 设置 → 默认资源 ID |
+| `BYTEDANCE_TTS_SPEAKER` | `/dashboard` 设置 → 默认音色 (填 voice **名字**,不是 speaker ID) |
+| `BYTEDANCE_TTS_FORMAT` | `/dashboard` 设置 → 默认格式 |
+| `BYTEDANCE_TTS_SAMPLE_RATE` | `/dashboard` 设置 → 采样率 |
+| `BYTEDANCE_TTS_BIT_RATE` | `/dashboard` 设置 → MP3 比特率 |
+| `BYTEDANCE_TTS_MODEL` | `/dashboard` 设置 → 子模型 |
+| `BYTEDANCE_TTS_MODEL_TYPE` | `/dashboard` 设置 → 模型类型 |
+| `BYTEDANCE_TTS_EXPLICIT_LANGUAGE` | `/dashboard` 设置 → 显式语言 |
+| `BYTEDANCE_TTS_ENABLE_SUBTITLE` | `/dashboard` 设置 → 启用字级时间戳 |
 | `BYTEDANCE_TTS_TIMEOUT` | (保留 env 暂未搬 DB) |
-| `ALLOWED_ORIGINS` | `/admin` → CORS → 跨域白名单 |
-| `OPENAI_TTS_API_KEY` | `/admin` 设置 → OpenAI 端鉴权 key |
+| `ALLOWED_ORIGINS` | `/dashboard` → CORS → 跨域白名单 |
+| `OPENAI_TTS_API_KEY` | `/dashboard` 设置 → OpenAI 端鉴权 key |
 
 **逐步迁移建议**:
 
@@ -251,13 +303,29 @@ Prometheus 文本格式,无鉴权。可直接被 Prometheus 抓取或浏览器�
    - 反代**仅**把鉴权后的请求转发到 `:8080`
    - 此时 `OPENAI_TTS_API_KEY` 可不设
 
-**`/metrics` / `/dashboard` / `/health` 均不鉴权**,生产环境务必通过反代保护:
+### v0.3.0 起各端点的暴露面
+
+v0.3.0 已把健康与指标端点收口,**默认不再有匿名可读的监控端点**:
+
+| 端点 | 默认状态 | 说明 |
+|---|---|---|
+| `/healthz` | **匿名可读** | 只回 `200 ok`,**不含任何字段**,专供探针 |
+| `/health` | 需鉴权 | 完整健康数据 |
+| `/metrics`(根路径) | **默认 404** | 需 `METRICS_ALLOW_CIDR` 才注册 |
+| `/dashboard/*` | 需鉴权 | 管理面板(HTML 请求返回外壳,数据走 API) |
+| `/api/admin/*` | 需鉴权 | 管理 API(含 `/api/admin/health`、`/api/admin/metrics`) |
+| `/api/public/*` | 无鉴权 | 预留空壳,当前无业务 |
+
+因此反代**只需**确保业务与管理接口不被匿名滥用;监控端点已由应用自身把关:
 
 ```nginx
-location /metrics { allow 10.0.0.0/8; deny all; }  # 仅 Prometheus 服务器
+# 若未配 METRICS_ALLOW_CIDR,根路径 /metrics 本就 404,无需额外规则。
+# 若希望 Prometheus 走根路径,建议在应用侧配 METRICS_ALLOW_CIDR,而不是在反代做白名单。
 location /dashboard { auth_basic "admin"; auth_basic_user_file /etc/nginx/.htpasswd; }
-location /health { allow 10.0.0.0/8; deny all; }  # 或 K8s liveness probe 直接访问
 ```
+
+> ⚠️ **探针必须指向 `/healthz`**。K8s `livenessProbe`/`readinessProbe`、Docker `HEALTHCHECK`
+> 默认不带 `Authorization`,若仍指向 `/health` 会一律 401,导致 Pod 反复重启 / 容器被判不健康。
 
 ## 部署
 
@@ -269,6 +337,7 @@ docker compose up -d
 ```
 
 `docker-compose.yml` 已配 named volume `tts-api-data` 挂载到容器 `/data`,DB 与 lock 文件持久化,容器重启不丢配置。
+其 `healthcheck` 已使用 `/healthz`。
 
 ### Linux Systemd
 
@@ -282,7 +351,7 @@ docker compose up -d
 | `installer/` | 启动期模式检测,DB 自愈回退 |
 | `setting/` | 全局配置 (TTSOptions / Auth / CORS) + 启动汇总 |
 | `store/` | SQLite 数据访问 (settings / voices) + 自愈 |
-| `controller/` | /v1/audio/speech、/health、/setup、/admin、/api/setup、/api/settings、/api/voices |
+| `controller/` | /v1/audio/speech、/healthz、/health、/setup、/dashboard、/api/setup、/api/admin/* |
 | `middleware/` | SecurityHeaders, CORS, 鉴权, 限流, 并发, 日志, 客户端 IP 提取, install 模式守卫 |
 | `router/` | 路由注册 |
 | `adapter/volcano/` | 火山 v3 HTTP Chunked 客户端 |
@@ -339,12 +408,12 @@ PORT=8081 ./tts-api
 
 如有问题,请检查:
 1. 服务启动后日志第一段 "环境配置汇总" — 火山必填项是否全 ✓
-2. `/health` 返回 `status: "ok"` 且 `config_error: false`
-3. `/admin` → 设置 tab 检查 API Key / 默认资源 ID / 默认音色
-4. `/admin` → 音色管理 tab 检查 voice 是否启用
+2. `/healthz` 返回 `ok`(存活);详细状态用鉴权接口 `/api/admin/health`,应返回 `status: "ok"` 且 `config_error: false`
+3. `/dashboard` → 设置 tab 检查 API Key / 默认资源 ID / 默认音色
+4. `/dashboard` → 音色 tab 检查 voice 是否启用
 5. 火山控制台 → 在线体验同一对 resource + speaker 能合成
 6. 客户端请求 URL 是否以 https:// 开头 (公网)
-7. `/admin` → CORS tab 检查白名单含前端完整 origin
+7. `/dashboard` → 设置 → CORS 检查白名单含前端完整 origin
 
 ## 许可证
 
