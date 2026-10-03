@@ -1,10 +1,13 @@
-# Go build cache
+﻿# Go build cache
 .gocache/
 *.exe
 *.test
 *.out
 
-# Go test sources (prevent accidental commit; tests live outside the repo by policy)
+# Go 测试源码:不入库(测试保留在本地磁盘,由开发者自行 go test ./... -count=1)
+# 理由:测试用例会暴露内部实现细节与断言,不作为交付物外流。
+# 注意:本规则会把测试文件挡在 git 之外,因此仓库内不提供自动化测试;
+#      .github/workflows/ci.yml 里的测试步骤在纯净克隆上无测试可跑。
 *_test.go
 
 # Editor / OS
@@ -38,9 +41,3 @@ tts.db
 tts.db-*
 tts.db.*
 installed.lock
-
-# UI handoff bundle (for external AI redesign work; not deployed)
-ui-handoff/
-
-# Docs (本地草稿,不入库)
-docs/
