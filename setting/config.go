@@ -32,6 +32,14 @@ var (
 	ttsTimeout  time.Duration = common.DefaultTimeout
 	ttsConfigErr error
 	authAPIKeys []string
+	// adminAPIKeys 是**管理接口专用**凭证(admin_key)。
+	// 与 authAPIKeys(业务侧,/v1/audio/speech 用)分离:
+	//   - admin_key 为空时回退到 auth_key/env,老部署行为完全不变
+	//   - admin_key 配了之后,业务 key 无法访问 /api/admin/*,权限隔离成立
+	// 详见 docs/IMPLEMENT_v0.3.0.md 阶段 1。
+	adminAPIKeys []string
+	// adminKeySource 记录管理凭证的来源,仅用于启动摘要与排障。
+	adminKeySource string
 	// corsAllowAll / corsOrigins 拆成两个独立字段,各自在 RLock 下读取,
 	// 避免 CORSConfig 整体读时被 Lock 阻塞热路径。
 	corsAllowAll bool
@@ -106,6 +114,40 @@ func SetAuthAPIKeys(keys []string) {
 	out := make([]string, len(keys))
 	copy(out, keys)
 	authAPIKeys = out
+}
+
+// GetAdminKeys 读**管理接口专用**凭证列表;返回拷贝防止业务侧持有底层 slice。
+// 供 middleware.RequireAdmin 使用;业务侧鉴权请用 GetAuthAPIKeys。
+func GetAdminKeys() []string {
+	ttsMu.RLock()
+	defer ttsMu.RUnlock()
+	if len(adminAPIKeys) == 0 {
+		return nil
+	}
+	out := make([]string, len(adminAPIKeys))
+	copy(out, adminAPIKeys)
+	return out
+}
+
+// SetAdminKeys 整体替换管理凭证;入参被复制。source 仅用于启动摘要展示。
+func SetAdminKeys(keys []string, source string) {
+	ttsMu.Lock()
+	defer ttsMu.Unlock()
+	adminKeySource = source
+	if len(keys) == 0 {
+		adminAPIKeys = nil
+		return
+	}
+	out := make([]string, len(keys))
+	copy(out, keys)
+	adminAPIKeys = out
+}
+
+// GetAdminKeySource 返回管理凭证来源:admin_key / auth_key / env / ""(未配置)。
+func GetAdminKeySource() string {
+	ttsMu.RLock()
+	defer ttsMu.RUnlock()
+	return adminKeySource
 }
 
 // GetCORSAllowAll 读 CORS 是否放行所有来源。
@@ -391,6 +433,18 @@ func LoadRuntimeConfig(s Store) error {
 		SetAuthAPIKeys(nil)
 	}
 
+	// 管理凭证:admin_key(DB) > auth_key(DB) > OPENAI_TTS_API_KEY(env)
+	// 分离的目的:业务调用方拿到的 key 不应同时拥有管理后台权限。
+	// 不配 admin_key 时行为与旧版完全一致(回退用 auth_key),保证向后兼容。
+	switch {
+	case all["admin_key"] != "":
+		SetAdminKeys([]string{all["admin_key"]}, "admin_key")
+	case authKey != "":
+		SetAdminKeys([]string{authKey}, "auth_key")
+	default:
+		SetAdminKeys(nil, "")
+	}
+
 	// CORS 配置:DB > env
 	// cors_allow_all (bool): 允许所有来源(*)
 	// cors_origins (string): 逗号分隔白名单
@@ -538,6 +592,16 @@ func LogStartupSummary() {
 		log.Printf("OPENAI_TTS_API_KEY: 未设置(所有请求无需鉴权)")
 	} else {
 		log.Printf("OPENAI_TTS_API_KEY: 已设置 %d 个有效密钥", len(authKeys))
+	}
+
+	// v0.3.0:管理凭证独立于业务凭证(admin_key > auth_key > env)
+	switch GetAdminKeySource() {
+	case "admin_key":
+		log.Printf("管理凭证: 使用独立 admin_key(业务 key 无法访问管理接口)")
+	case "auth_key":
+		log.Printf("管理凭证: 未单独配置 admin_key,回退使用 auth_key(业务 key 同时拥有管理权限)")
+	default:
+		log.Printf("管理凭证: ✗ 未配置(normal 模式下服务将拒绝启动)")
 	}
 
 	allowAll := GetCORSAllowAll()

@@ -274,6 +274,21 @@ func contentTypeFor(format string) string {
 }
 
 // HealthHandler 暴露运行期状态;无鉴权。
+// HealthzHandler GET /healthz —— 匿名存活探针,**只回 200 与字面量 "ok"**。
+//
+// 为什么单独做这个:v0.3.0 把详细健康数据(/health)收口到管理鉴权之后,
+// 但 K8s liveness/readiness、Docker HEALTHCHECK、负载均衡健康检查默认都不带 Authorization。
+// 若把它们继续指向 /health,加鉴权后会一律 401,导致探针失败、Pod 反复重启。
+//
+// 因此本端点刻意**不返回任何字段**(无版本、无内存、无配置状态、无模式信息),
+// 只用于回答"进程还在不在"。运维要细节请走鉴权后的 /health。
+func HealthzHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte("ok"))
+}
+
 func HealthHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 

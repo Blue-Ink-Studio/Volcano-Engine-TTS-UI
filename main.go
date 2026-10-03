@@ -35,6 +35,8 @@ func main() {
 	setting.InitAllConfigs()
 	metrics.Init()
 	middleware.InitRateLimiter()
+	// v0.3.0:根路径 /metrics 的内网白名单(未配置则根路径完全不注册)
+	middleware.InitMetricsAllowList()
 
 	// 2) 启动期关键步骤:打开/建库 → 检测 lock → 判定模式
 	dbPath := ttsDBPath()
@@ -85,6 +87,21 @@ func main() {
 
 	// 5) 启动摘要日志(此时 Auth.APIKeys 已是 DB 值,日志反映真实状态)
 	setting.LogStartupSummary()
+
+	// 5.1) v0.3.0 前置校验:normal 模式下必须有管理凭证。
+	// 为什么 fail-fast 而不是警告:mware.RequireAdmin 在凭证为空时**拒绝**访问
+	// (不再像 v0.3.0 之前那样放行)。若此处不拦住,服务会正常起来,
+	// 但 /dashboard 与所有 /api/admin/* 全部 401 —— 相当于把自己锁在门外。
+	// 宁可启动失败并打印明确原因,也不要起来一个进不去后台的实例。
+	if installer.GetMode() == installer.ModeNormal && len(setting.GetAdminKeys()) == 0 {
+		log.Printf("[main][FATAL] normal 模式未配置任何管理凭证:admin_key / auth_key / OPENAI_TTS_API_KEY 均为空。")
+		log.Printf("[main][FATAL] 管理接口(含 /dashboard)将全部返回 401,服务拒绝启动。")
+		log.Fatalf("no admin credential configured; set admin_key (or auth_key) before starting in normal mode")
+	}
+	if installer.GetMode() == installer.ModeNormal {
+		log.Printf("[main] 管理凭证来源: %s", setting.GetAdminKeySource())
+	}
+
 	log.Printf("[main] 当前模式: %s (db=%s lock=%s)", res.Mode, dbPath, res.LockPath)
 
 	controller.InitController()
@@ -113,8 +130,13 @@ func main() {
 			log.Printf("OpenAI TTS endpoint: http://localhost:%s/v1/audio/speech", setting.Server.Port)
 			log.Printf("Admin WebUI: http://localhost:%s/admin", setting.Server.Port)
 		}
-		log.Printf("Health check: http://localhost:%s/health", setting.Server.Port)
-		log.Printf("Metrics: http://localhost:%s/metrics", setting.Server.Port)
+		log.Printf("Health check(匿名存活探针): http://localhost:%s/healthz", setting.Server.Port)
+		if middleware.MetricsAllowListConfigured() {
+			log.Printf("Metrics(内网白名单): http://localhost:%s/metrics", setting.Server.Port)
+		} else {
+			log.Printf("Metrics: 根路径 /metrics 未注册(未配置 METRICS_ALLOW_CIDR);请用鉴权版 /api/admin/metrics")
+		}
+		log.Printf("详细健康数据(鉴权): http://localhost:%s/api/admin/health", setting.Server.Port)
 
 		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("Server failed to start: %v", err)

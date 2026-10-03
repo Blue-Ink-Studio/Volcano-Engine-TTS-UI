@@ -16,22 +16,27 @@ import (
 // SettingsResponse 是 GET /api/settings 的响应。
 // API key 永远打码(借用 setting.maskAPIKey 风格,前 4 后 4 中间 ****)。
 type SettingsResponse struct {
-	APIKey           string `json:"api_key"`           // 打码形式,例如 S_G8****naJ1
-	APIKeySet        bool   `json:"api_key_set"`       // 是否已设置(用于前端判断要不要提示必填)
-	AuthKey          string `json:"auth_key"`          // 鉴权 key 打码(客户端访问 + admin 登录用)
-	AuthKeySet       bool   `json:"auth_key_set"`
-	CORSAllowAll     bool   `json:"cors_allow_all"`    // 允许所有来源(*)
-	CORSOrigins      string `json:"cors_origins"`      // 逗号分隔的白名单(原文,含大小写,trim 末尾 /)
-	CORSConfigured   bool   `json:"cors_configured"`   // 是否配了 CORS(给 banner 用)
+	APIKey     string `json:"api_key"`     // 打码形式,例如 S_G8****naJ1
+	APIKeySet  bool   `json:"api_key_set"` // 是否已设置(用于前端判断要不要提示必填)
+	AuthKey    string `json:"auth_key"`    // 鉴权 key 打码(客户端访问 + admin 登录用)
+	AuthKeySet bool   `json:"auth_key_set"`
+	// AdminKey 是**管理接口专用**凭证(v0.3.0 新增,可选)。
+	// 为空表示未单独配置,管理接口回退用 auth_key(向后兼容)。
+	AdminKey          string `json:"admin_key"`        // 打码形式
+	AdminKeySet       bool   `json:"admin_key_set"`    // 是否单独配置了 admin_key
+	AdminKeySource    string `json:"admin_key_source"` // admin_key / auth_key / env / ""(未配置)
+	CORSAllowAll      bool   `json:"cors_allow_all"`   // 允许所有来源(*)
+	CORSOrigins       string `json:"cors_origins"`     // 逗号分隔的白名单(原文,含大小写,trim 末尾 /)
+	CORSConfigured    bool   `json:"cors_configured"`  // 是否配了 CORS(给 banner 用)
 	DefaultResourceID string `json:"default_resource_id"`
-	DefaultSpeaker   string `json:"default_speaker"`
-	DefaultFormat    string `json:"default_format"`
-	SampleRate       int    `json:"sample_rate"`
-	Model            string `json:"model"`
-	ModelType        int    `json:"model_type"`
-	ExplicitLanguage string `json:"explicit_language"`
-	EnableSubtitle   bool   `json:"enable_subtitle"`
-	UpdatedAt        string `json:"updated_at"` // RFC3339,来自 settings.installed_at(沿用)
+	DefaultSpeaker    string `json:"default_speaker"`
+	DefaultFormat     string `json:"default_format"`
+	SampleRate        int    `json:"sample_rate"`
+	Model             string `json:"model"`
+	ModelType         int    `json:"model_type"`
+	ExplicitLanguage  string `json:"explicit_language"`
+	EnableSubtitle    bool   `json:"enable_subtitle"`
+	UpdatedAt         string `json:"updated_at"` // RFC3339,来自 settings.installed_at(沿用)
 }
 
 // SettingsGetHandler GET /api/settings
@@ -58,6 +63,9 @@ func SettingsGetHandler(w http.ResponseWriter, r *http.Request) {
 		APIKeySet:         all["api_key"] != "",
 		AuthKey:           maskAPIKeyField(all["auth_key"]),
 		AuthKeySet:        all["auth_key"] != "",
+		AdminKey:          maskAPIKeyField(all["admin_key"]),
+		AdminKeySet:       all["admin_key"] != "",
+		AdminKeySource:    setting.GetAdminKeySource(),
 		CORSAllowAll:      all["cors_allow_all"] == "1" || all["cors_allow_all"] == "true",
 		CORSOrigins:       all["cors_origins"],
 		CORSConfigured:    all["cors_allow_all"] == "1" || all["cors_allow_all"] == "true" || all["cors_origins"] != "",
@@ -298,10 +306,74 @@ func SettingsAuthKeyHandler(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
 }
 
+// SettingsAdminKeyRequest 是 PUT /api/admin/settings/admin-key 的 body。
+// admin_key 是**管理接口专用**凭证;与 auth_key(业务侧 /v1/audio/speech 鉴权)分离后,
+// 业务调用方拿到的 key 不再能访问管理接口。
+// 传空串表示"清除独立管理凭证",管理接口回退用 auth_key(即旧行为)。
+type SettingsAdminKeyRequest struct {
+	AdminKey string `json:"admin_key"`
+}
+
+// SettingsAdminKeyHandler PUT /api/admin/settings/admin-key
+// 鉴权: RequireAdmin(注意:能用当前凭证改,改完下一个请求即用新凭证)。
+func SettingsAdminKeyHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPut {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	s := GetAdminStore()
+	if s == nil {
+		middleware.SendJSONError(w, http.StatusServiceUnavailable, "database not ready", "configuration_error", "db_not_ready")
+		return
+	}
+
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<10)
+	var body SettingsAdminKeyRequest
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		middleware.SendJSONError(w, http.StatusBadRequest, "invalid JSON body", "invalid_request_error", "bad_request")
+		return
+	}
+	key := strings.TrimSpace(body.AdminKey)
+
+	if key == "" {
+		// 清除独立管理凭证 → 回退 auth_key。回退后若 auth_key 也为空,
+		// 管理接口将全部 401(RequireAdmin 不再空凭证放行),这里必须挡住。
+		authKey, _, _ := s.SettingsGet("auth_key")
+		if authKey == "" {
+			middleware.SendJSONError(w, http.StatusBadRequest,
+				"admin_key cannot be cleared while auth_key is empty (would lock out admin access)",
+				"invalid_request_error", "missing_field")
+			return
+		}
+		if err := s.SettingsDelete("admin_key"); err != nil {
+			log.Printf("[settings] admin-key clear: %v", err)
+			middleware.SendJSONError(w, http.StatusInternalServerError, "clear admin_key failed", "server_error", "db_write_failed")
+			return
+		}
+		setting.SetAdminKeys([]string{authKey}, "auth_key")
+		log.Printf("[settings] admin_key cleared; admin auth falls back to auth_key")
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "admin_key_set": false, "admin_key_source": "auth_key"})
+		return
+	}
+
+	if err := s.SettingsSet("admin_key", key); err != nil {
+		log.Printf("[settings] admin-key set: %v", err)
+		middleware.SendJSONError(w, http.StatusInternalServerError, "write admin_key failed", "server_error", "db_write_failed")
+		return
+	}
+	// 立即生效:只单独刷新管理凭证列表,不重新 LoadRuntimeConfig(那会覆盖其它字段)
+	setting.SetAdminKeys([]string{key}, "admin_key")
+	log.Printf("[settings] admin_key updated, runtime active (next request uses new admin credential)")
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "admin_key_set": true, "admin_key_source": "admin_key"})
+}
+
 // SettingsCORSRequest 是 PUT /api/settings/cors 的 body。
 // 两个字段都可选(至少给一个),用指针区分"未传"和"传空串":
 //   - allow_all 指针: nil=未传(不动)  *true=开 *false=关
 //   - origins  字符串: nil=未传(不动)  ""=传空串(清空)  "url1\nurl2"=覆盖
+//
 // 这样用户能精确表达意图(保留 / 改 / 清空),不会被 0/"" 歧义坑死。
 type SettingsCORSRequest struct {
 	AllowAll *bool   `json:"allow_all,omitempty"`
@@ -386,10 +458,10 @@ func SettingsCORSHandler(w http.ResponseWriter, r *http.Request) {
 	log.Printf("[settings] cors updated (allow_all=%v origins=%q), runtime active", setting.GetCORSAllowAll(), originsStr)
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	_ = json.NewEncoder(w).Encode(map[string]any{
-		"ok":           true,
-		"allow_all":    setting.GetCORSAllowAll(),
-		"origins":      originsStr,
-		"cors_active":  true,
+		"ok":          true,
+		"allow_all":   setting.GetCORSAllowAll(),
+		"origins":     originsStr,
+		"cors_active": true,
 	})
 }
 
