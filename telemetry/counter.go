@@ -36,8 +36,12 @@ func newCounter(name, help string, labelNames []string) *Counter {
 func (c *Counter) Inc(labels Labels) { c.Add(1, labels) }
 
 // Add 累加 v(v 必须 >= 0)。
+//
+// 空接收者(nil *Counter)安全:未初始化的全局指标(如 metrics.Init() 尚未调用时
+// 的 metrics.UpstreamTotal)会被静默忽略,而不是 panic。
+// 这让"直接调用 handler"的测试/复用场景不会因为漏掉指标初始化而崩溃。
 func (c *Counter) Add(v float64, labels Labels) {
-	if v < 0 {
+	if c == nil || v < 0 {
 		return
 	}
 	child := c.getOrCreate(labels)

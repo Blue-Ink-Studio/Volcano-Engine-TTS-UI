@@ -33,7 +33,11 @@ func newGauge(name, help string, labelNames []string) *Gauge {
 }
 
 // Set 直接设置当前值。
+// 空接收者(nil *Gauge)安全,见 Counter.Add 的说明。
 func (g *Gauge) Set(v float64, labels Labels) {
+	if g == nil {
+		return
+	}
 	child := g.getOrCreate(labels)
 	child.bits.Store(float64bits(v))
 }
@@ -45,7 +49,11 @@ func (g *Gauge) Inc(labels Labels) { g.Add(1, labels) }
 func (g *Gauge) Dec(labels Labels) { g.Add(-1, labels) }
 
 // Add 累加 v(可负)。
+// 空接收者(nil *Gauge)安全,见 Counter.Add 的说明。
 func (g *Gauge) Add(v float64, labels Labels) {
+	if g == nil {
+		return
+	}
 	child := g.getOrCreate(labels)
 	for {
 		bits := child.bits.Load()

@@ -5,7 +5,12 @@
 //   - 零外部依赖,只使用标准库;
 //   - label key 在指标注册时锁定,运行期不可新增(避免 cardinality 爆炸);
 //   - 所有并发安全由实现保证,调用方无需加锁;
-//   - Meter 是高层入口,NoopMeter 用于测试。
+//   - Meter 是高层入口,NoopMeter 用于测试;
+//   - **空接收者安全**: 未初始化的 *Counter / *Gauge / *Histogram(即 nil 指针)
+//     上的 Inc/Add/Set/Observe 一律静默忽略,不 panic。
+//     这条约定是为 metrics 包的全局指标变量服务的 —— 它们默认为 nil,只有 main
+//     调用过 metrics.Init() 之后才有值;直接复用 handler 的场景(集成测试、
+//     未来做成库)不应该因为漏掉指标初始化而崩掉整个请求处理。
 package telemetry
 
 import (

@@ -47,7 +47,11 @@ func newHistogram(name, help string, buckets []float64, labelNames []string) *Hi
 }
 
 // Observe 记录一个观测值。
+// 空接收者(nil *Histogram)安全,见 Counter.Add 的说明。
 func (h *Histogram) Observe(v float64, labels Labels) {
+	if h == nil {
+		return
+	}
 	child := h.getOrCreate(labels)
 	for {
 		bits := child.sumBits.Load()
