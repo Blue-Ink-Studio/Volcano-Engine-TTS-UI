@@ -29,7 +29,14 @@ func NewHTTPClient() *HTTPClient {
 
 // PostStream 发送一次流式请求,返回带上下文的 *http.Response。
 // 调用方负责关闭 resp.Body。
+//
+// 空接收者(nil *HTTPClient)安全:返回错误而不是 panic。未初始化的 client 属于
+// 装配错误,应当让该次请求以"上游不可用"失败(controller 归一成 5xx 并记日志),
+// 而不是让整个进程崩掉。
 func (h *HTTPClient) PostStream(ctx context.Context, url string, headers map[string]string, body []byte) (*http.Response, error) {
+	if h == nil || h.client == nil {
+		return nil, fmt.Errorf("volcano: HTTPClient 未初始化,无法发起上游请求")
+	}
 	if ctx == nil {
 		ctx = context.Background()
 	}
