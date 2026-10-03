@@ -1,0 +1,61 @@
+name: CI
+
+# 触发条件:
+#   - push 到 develop / main
+#   - 针对 develop / main 的 PR
+#
+# 为什么单独有这个 workflow:
+#   之前仓库里唯一的 workflow 是 docker.yml,它只在打 tag 时构建镜像,
+#   既不做 go build 也不跑 go vet,提交能不能编译没人自动盯着。
+#
+# ⚠️ 本 workflow 的实际覆盖范围(务必知悉):
+#   测试源码按项目策略**不入库**(见 .gitignore 的 `*_test.go`),因此干净克隆里
+#   没有任何 *_test.go,下面的 go test 步骤会打印 "no test files" 后通过。
+#   也就是说:**CI 只能守住"编译通过 + 静态检查通过",守不住行为回归。**
+#   行为回归要靠开发者在本地(测试文件所在处)自行执行:
+#       go test ./... -count=1
+#   如果哪天测试重新入库,把下面的 go test 步骤改成会真正跑起来的形态即可。
+on:
+  push:
+    branches: [develop, main]
+  pull_request:
+    branches: [develop, main]
+
+# 同一分支的重复推送取消上一次未完成的运行,省 CI 时间。
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          # 以 go.mod 里的 go 指令为准,避免两处版本漂移
+          go-version-file: go.mod
+          cache: true
+
+      - name: 下载依赖
+        run: go mod download
+
+      - name: 编译检查
+        run: go build ./...
+
+      - name: 静态检查
+        run: go vet ./...
+
+      # 以下两步在"测试不入库"策略下是空转(no test files),保留是为了:
+      #   1. 覆盖 lock 判定 / 损坏回退 / voice 路由等关键路径的测试一旦重新入库,
+      #      无需改 workflow 即可直接生效;
+      #   2. -count=1 禁用测试缓存,避免"改坏了却因缓存仍显示通过"。
+      - name: 测试(测试源码不入库时为空转)
+        run: go test ./... -count=1
+
+      - name: 关键路径汇总(integration)
+        run: go test ./test/integration/ -count=1 -v
+

@@ -7,30 +7,27 @@
 ### 修复
 
 - **指标空指针崩溃**: `metrics` 包的全局指标(`UpstreamTotal` 等)默认是 nil,只有 `main` 调过
-  `metrics.Init()` 后才有值。任何**不经过 main** 的调用路径(集成测试、复用 handler)都会在
+  `metrics.Init()` 后才有值。任何**不经过 main** 的调用路径(直接调 handler、复用为库)都会在
   `controller/tts.go` → `adapter/volcano/synthesis.go` → `metrics.AdapterRecorder` 处 nil 解引用 panic。
   现在 `telemetry` 的 `Counter.Add` / `Gauge.Set` / `Gauge.Add` / `Histogram.Observe` 一律
-  **空接收者安全**(nil 静默忽略),并补了 `TestNilMetricHandles_NoPanic` 防回归。
+  **空接收者安全**(nil 静默忽略),并在包注释里写成显式设计约定。
 - **上游 client 空指针**: `volcano.(*HTTPClient).PostStream` 在 client 未初始化时 panic。
   现在返回错误,由 controller 归一成 5xx 并记日志——装配错误不该拖垮进程。
-  补 `TestPostStream_NilClient_ReturnsError` 防回归。
-- **集成测试 sqlite 句柄泄漏**: `bootNormal` 第一次 `installer.Detect` 返回的 store 从未关闭,
-  句柄一直挂在临时库上,Windows 下 `t.TempDir` 清理必然报"文件被另一进程占用"。
-- **集成测试 voice 列表语义用反**: `VoiceList` 参数是 `includeDisabled`
-  (`true`=全部含禁用),集成测试按相反语义调用,导致启用/禁用断言全反。
-- **集成测试断言过时**: voice 创建接口返回 **201 Created**,测试断言 200;
-  直接调 handler 时 `mux.Vars` 取不到路径参数,删除用例必然 400 —— 已显式注入 URL 变量。
-- **`go vet` 告警**: `test/integration/setup_test.go` 3 处在检查错误前使用了 `resp`。
+
+> 上面两个崩溃是**本地测试暴露出来的**:直接调用 handler 而不经过 `main` 的路径,
+> 会跳过 `metrics.Init()` 与 `volcanoClient` 的赋值。生产二进制不受影响。
 
 ### 变更
 
-- **测试文件入库**: `.gitignore` 里的 `*_test.go` 把**全部 8 个单测 + 5 个集成测试**挡在仓库外,
-  造成 CI 无测试可跑、"go test ./... 全绿"从未被真正校验。现改为只排除散落的临时测试文件,
-  正常的 `store/` `telemetry/` `adapter/*/` `installer/` `middleware/` `router/` `test/integration/`
-  测试一律跟踪。
-- **新增 CI 质量门** (`.github/workflows/ci.yml`): push / PR 到 `develop`、`main` 时跑
-  `go build` + `go vet` + `go test -count=1`。此前仓库唯一的 workflow 只在打 tag 时构建 Docker 镜像,
-  不做任何编译或测试校验。
+- **测试源码不再入库**: `.gitignore` 恢复整体屏蔽 `*_test.go`。测试用例会暴露内部实现
+  细节与断言,不作为交付物外流;测试文件保留在本地磁盘,由开发者自行执行
+  `go test ./... -count=1`。
+  ⚠️ 代价必须明确:仓库内**不提供自动化测试**,`.github/workflows/ci.yml` 里的
+  `go test` 步骤在纯净克隆上无测试可跑(会打印 `no test files` 并通过),
+  **CI 只能守住"编译通过 + 静态检查通过",守不住行为回归**。
+- **新增 CI 校验** (`.github/workflows/ci.yml`): push / PR 到 `develop`、`main` 时跑
+  `go build` + `go vet` + `go test -count=1`。此前仓库唯一的 workflow 只在打 tag 时构建
+  Docker 镜像,不做任何编译或测试校验。
 - **文档订正**: `docs/UI_HANDOFF.md` 原为"单文件换皮"外包任务书,其中的
   "admin.html ≤ 35KB / setup.html ≤ 15KB / 只改两个 .html" 等约束在 admin 拆分多页后已作废,
   现标注为历史文档并补上当前真实文件结构与验收清单。

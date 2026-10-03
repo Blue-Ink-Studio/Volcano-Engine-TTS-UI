@@ -1,4 +1,4 @@
-﻿# Go build cache
+# Go build cache
 .gocache/
 *.exe
 *.test
@@ -35,6 +35,14 @@ bin/
 
 # Local dev scripts (per-user; not part of repo)
 start-local.ps1
+
+# Windows / PowerShell 脚本:一律不入库、不外流
+# ui-handoff/serve.ps1 与 start-local.ps1 是本地起服便利脚本(含本机路径与端口),
+# 不属于交付物。这两个文件在文件系统层面删除被拒,因此只能在 git 层屏蔽。
+*.ps1
+
+# UI handoff bundle(改造前的单文件副本 + 离线 mock 预览;仅本地对照,不部署)
+ui-handoff/
 
 # Runtime database artifacts (created by M1 installer flow)
 tts.db
