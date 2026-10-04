@@ -428,14 +428,14 @@ GetVoiceForTTS(name string) (providerName, speakerID, model string, vendorParams
 **本项目测试文件不入库**(`.gitignore` 里的 `*_test.go`),
 测试保留在本地磁盘。这带来两个直接后果,必须知道:
 
-1. **CI 跑不到你的测试**。`.github/workflows/ci.yml` 里的 `go test` 步骤在干净克隆上
-   只会打印 `no test files` 然后通过 —— 它只能守住"编译 + vet"。
-   所以适配器测试**必须在本地跑过再合并**:
+1. **没有任何自动化会跑你的测试**。仓库里不提供 CI 质量门:
+   GitHub 上只有一个 workflow,且它只在**发版打 tag 时构建 Docker 镜像**,
+   既不编译校验也不跑测试。所以适配器测试**必须在本地跑过再合并**:
    ```bash
    go test ./... -count=1
    ```
 2. **不要依赖测试文件来传递知识**。协议细节、踩坑记录要写进**代码注释**和本文档,
-   否则对下一个人(以及在 CI 里)等于不存在。
+   否则对下一个人等于不存在。
 
 适配器测试的**最小可用集合**(按 §2.6 的坑逐条覆盖):
 

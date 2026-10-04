@@ -79,12 +79,9 @@
 - **测试源码不再入库**: `.gitignore` 恢复整体屏蔽 `*_test.go`。测试用例会暴露内部实现
   细节与断言,不作为交付物外流;测试文件保留在本地磁盘,由开发者自行执行
   `go test ./... -count=1`。
-  ⚠️ 代价必须明确:仓库内**不提供自动化测试**,`.github/workflows/ci.yml` 里的
-  `go test` 步骤在纯净克隆上无测试可跑(会打印 `no test files` 并通过),
-  **CI 只能守住"编译通过 + 静态检查通过",守不住行为回归**。
-- **新增 CI 校验** (`.github/workflows/ci.yml`): push / PR 到 `develop`、`main` 时跑
-  `go build` + `go vet` + `go test -count=1`。此前仓库唯一的 workflow 只在打 tag 时构建
-  Docker 镜像,不做任何编译或测试校验。
+  ⚠️ 代价必须明确:仓库内**不提供自动化测试**,也没有自动化质量门。
+  守行为回归只能靠开发者在本地(测试文件所在处)执行测试;
+  CI 仅在发版打 tag 时构建 Docker 镜像。
 - **文档订正**: `docs/UI_HANDOFF.md` 原为"单文件换皮"外包任务书,其中的
   "admin.html ≤ 35KB / setup.html ≤ 15KB / 只改两个 .html" 等约束在 admin 拆分多页后已作废,
   现标注为历史文档并补上当前真实文件结构与验收清单。
