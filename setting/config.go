@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/volcano-tts/tts-api/adapter/provider"
 	"github.com/volcano-tts/tts-api/adapter/volcano"
 	"github.com/volcano-tts/tts-api/common"
 	"github.com/volcano-tts/tts-api/telemetry"
@@ -54,6 +55,27 @@ func GetTTSOptions() volcano.Options {
 	defer ttsMu.RUnlock()
 	return ttsOptions
 }
+
+// GetTTSRequest 返回运行时 TTS 配置映射成的 provider.Request 快照。
+// 阶段0过渡:setting 内部仍构造 volcano.Options,经 volcano.BuildRequest 映射成
+// provider.Request 交给主干;controller 拿到后按本次请求填 Text/Format/Speed,并做 voice 路由覆盖。
+// 阶段2(配置命名空间化)后,此处改为直接构造 provider.Request,不再触碰火山类型。
+func GetTTSRequest() provider.Request {
+	ttsMu.RLock()
+	defer ttsMu.RUnlock()
+	return volcano.BuildRequest(ttsOptions)
+}
+
+// GetDefaultFormat 返回默认输出格式(客户端未指定 response_format 时回退用)。
+func GetDefaultFormat() string {
+	ttsMu.RLock()
+	defer ttsMu.RUnlock()
+	return ttsOptions.Format
+}
+
+// GetDefaultProviderName 返回当前默认上游适配器名。
+// 阶段0:仅火山,恒为 "volcano";阶段2 后改从库表 default_provider 读。
+func GetDefaultProviderName() string { return "volcano" }
 
 // SetTTSOptions 整体替换 TTSOptions。LoadRuntimeConfig 写路径专用。
 func SetTTSOptions(o volcano.Options) {

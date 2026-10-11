@@ -5,9 +5,10 @@
 >
 > ⚠️ **本文档分两部分,请先看清区别**:
 > **第一部分「现状」描述的是代码里已经存在的东西**,可以直接照着读代码。
-> **第二部分「目标架构」是待实施的设计**,代码里**还不存在** ——
-> 里面的接口、表结构、目录都是提案,需要先按 §4 的分阶段计划落地。
-> 不要把第二部分的接口名当成现有 API 去调用。
+> **第二部分「目标架构」分阶段落地**。§3 的 Provider 抽象与 §4 的**阶段 0 已完成落地**
+> (2026-10-11),代码里**已有** `adapter/provider` 包;§4 的**阶段 1~5**(库表、配置命名空间、
+> metrics 加 provider 维度、管理界面、第二个适配器)仍是**待实施**的提案。
+> 读接口时以 `adapter/provider/*.go` 为准,本文 §3 是它的文字说明。
 
 ---
 
@@ -143,14 +144,17 @@ type SynthesisResult struct {
 
 ---
 
-## 3. 目标架构:Provider 抽象(待实施)
+## 3. 目标架构:Provider 抽象(阶段 0 已落地)
 
-以下代码**当前不存在**,是建议落地的设计。
+以下代码已随阶段 0 落地,见 `adapter/provider/provider.go` 与 `adapter/provider/registry.go`。
+新增上游(阶段 5)将严格按此接口实现。
 
 ### 3.1 接口定义
 
-建议新增 `adapter/provider/provider.go`(新包,**不放在** `adapter/volcano` 里,
-避免主干继续依赖具体实现):
+落地于 `adapter/provider/provider.go`(独立包,**不放在** `adapter/volcano` 里,
+避免主干继续依赖具体实现)。**注**:阶段 0 还顺带把通用上游错误 `UpstreamError`
+一并迁入 `provider` 包,火山适配器通过类型别名 `type UpstreamError = provider.UpstreamError`
+沿用旧名(见 `adapter/volcano/errors.go`),controller 判断上游错误不再依赖具体实现。
 
 ```go
 // Provider 是一个上游 TTS 服务的统一抽象。
@@ -235,21 +239,30 @@ import (
 **强烈建议按阶段做,每阶段结束都能编译、能跑、行为不变。**
 一次性重构"配置 + 路由 + 库表 + 前端 + metrics"五个面,几乎必然做出半成品。
 
-### 阶段 0 · 抽出接口,零行为变更(纯重构)
+### 阶段 0 · 抽出接口,零行为变更(纯重构) — ✅ 已完成 2026-10-11
 
 目标:主干不再依赖具体实现,但**行为完全不变**,回归风险最低。
 
-- [ ] 新增 `adapter/provider` 包,放 `Provider` / `Capabilities` / `Request` / `Credentials` / `MetricsRecorder`
-- [ ] 让 `volcano` 包实现 `Provider`(本质是把 `Options` 包一层适配,`Synthesis` 改成方法)
-- [ ] `controller/tts.go`:把 `volcanoClient` + `volcano.Synthesis` 换成 `provider.Get(name).Synthesize`
-- [ ] `MetricsRecorder` 从 `adapter/volcano` **移出**到 `provider` 包(否则接口还是火山专属)
-- [ ] `setting.LoadRuntimeConfig` 暂时继续构造 `volcano.Options`,通过一个
-      「volcano provider 的配置映射函数」转成 `provider.Request`
-- [ ] 验收:`go build ./... && go vet ./... && go test ./... -count=1` 全绿,
-      且 `/v1/audio/speech` 行为与重构前逐字节一致(拿同一段文本对比音频长度与格式)
+- [x] 新增 `adapter/provider` 包,放 `Provider` / `Capabilities` / `Request` / `Credentials` / `MetricsRecorder`
+- [x] 让 `volcano` 包实现 `Provider`(`adapter/volcano/provider.go`;`Synthesis` 收敛为包内私有
+      `synthesize`,由 `Provider.Synthesize` 从 `provider.Request` 还原 Options 后调用;
+      另提供 `BuildRequest(Options) provider.Request` 供 setting 过渡期映射)
+- [x] `controller/tts.go`:去掉 `volcano` import,`volcanoClient`/`volcano.Synthesis` 换成
+      `provider.Get(setting.GetDefaultProviderName()).Synthesize`;voice 路由改在
+      `provider.Request` 上覆盖(VoiceKey / Credentials.Scope["resource_id"] / Model)
+- [x] `MetricsRecorder` 从 `adapter/volcano` 移出到 `provider` 包;`metrics.AdapterRecorder`
+      加编译期断言 `var _ provider.MetricsRecorder = AdapterRecorder{}`
+- [x] `setting` 新增 `GetTTSRequest()`(内部仍构造 `volcano.Options`,经 `volcano.BuildRequest`
+      映射成 `provider.Request`)、`GetDefaultFormat()`、`GetDefaultProviderName()`(阶段 0 恒 "volcano")
+- [x] `UpstreamError` 迁入 `provider` 包;火山用 `type UpstreamError = provider.UpstreamError`
+      别名沿用旧名,构造处零改动
+- [x] `main.go` 显式空导入 `_ "github.com/volcano-tts/tts-api/adapter/volcano"` 触发注册
+- [x] 验收通过:`go build ./... && go vet ./...` 全绿;服务冒烟启动正常
+      (`/healthz`=ok、`/setup`=200、未安装时 `/v1/audio/speech`=503)
+      —— 端到端逐字节对比需真实火山 key,未在本阶段执行(无 key)
 
-> 这一阶段**不要**动库表、不要动前端。目标只有一个:主干里那行
-> `import adapter/volcano` 消失。
+> 本阶段**未**动库表、未动前端。验收目标达成:`controller` 里那行
+> `import adapter/volcano` 已消失;仅 `setting`(阶段 2 消除)与 `main.go` 空导入仍提及。
 
 ### 阶段 1 · 数据结构:provider 维度入库
 
@@ -485,9 +498,11 @@ GetVoiceForTTS(name string) (providerName, speakerID, model string, vendorParams
 | 音色模型 | `store/voices.go` | `Voice`、`GetVoiceForTTS` |
 | 指标 | `metrics/metrics.go` | `AdapterRecorder`、`codeLabel` |
 | 结果类型 | `dto/tts.go` | `SynthesisResult`、`SubtitleEntry` |
-| 未来抽象落点 | `adapter/provider/` | **尚不存在,待阶段 0 创建** |
+| 上游抽象(阶段 0 已落地) | `adapter/provider/` | `provider.go`(Provider/Capabilities/Request/Credentials/MetricsRecorder/UpstreamError)、`registry.go`(Register/Get/Names) |
+| 火山适配器实现 | `adapter/volcano/provider.go` | 实现 `provider.Provider`;`BuildRequest` 供 setting 过渡期映射;`init()` 注册 |
 
 ---
 
-*文档版本:v1 · 对应代码基线:`develop` @ `ad342ec`(2026-10-03)*
+*文档版本:v1.1 · 对应代码基线:`develop` @ `ad342ec`(2026-10-03)*
+*v1.1(2026-10-11):§3 Provider 抽象与 §4 阶段 0 已落地,更新为现状;阶段 1~5 仍为提案。*
 *本文「现状」部分与代码逐行核对过;「目标架构」为提案,实施时请同步更新本文档。*

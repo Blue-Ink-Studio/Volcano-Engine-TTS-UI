@@ -9,53 +9,27 @@ import (
 	"strings"
 	"time"
 
+	"github.com/volcano-tts/tts-api/adapter/provider"
 	"github.com/volcano-tts/tts-api/common"
 	"github.com/volcano-tts/tts-api/dto"
 	"github.com/volcano-tts/tts-api/telemetry"
 )
 
-// MetricsRecorder 是适配器向上报告埋点的接口。
-// 适配器本身不依赖 telemetry 包,controller 在 main 启动时把 Meter 适配成实现;
-// 这样测试可以注入 mock,生产可以无侵入替换成 OTel。
-type MetricsRecorder interface {
-	UpstreamStarted(speaker, model, format string)
-	UpstreamFinished(speaker, model, format, status string, duration, ttfb time.Duration, chunks, audioBytes, errCode int)
-	UpstreamUsage(model string, textWords int)
-}
-
-// nopMetrics 是 MetricsRecorder 的 no-op 默认值。
-type nopMetrics struct{}
-
-func (nopMetrics) UpstreamStarted(string, string, string) {}
-func (nopMetrics) UpstreamFinished(string, string, string, string, time.Duration, time.Duration, int, int, int) {
-}
-func (nopMetrics) UpstreamUsage(string, int) {}
-
-// Synthesis 调用火山 v3 一次,返回组装好的结果。
+// synthesize 调用火山 v3 一次,返回组装好的结果(包内私有,由 provider.Provider.Synthesize 调用)。
 //
 // 入参:
 //   - ctx:超时控制
 //   - client:复用的 HTTPClient
-//   - opts:从 setting 构造的完整参数(text 字段会被 text 覆盖)
-//   - text:本次合成的实际文本
+//   - opts:已还原好的完整参数(Text / SpeechRate 已由调用方填入)
 //   - clientFormat:客户端期望的最终格式,"wav" 内部转 pcm 后本地拼 wav 头
-//   - speed:OpenAI 风格的 speed(倍率,0.5~2.0)
-//   - mtr:可选埋点;传 nil 等价于 nopMetrics
-func Synthesis(
+//   - mtr:埋点;调用方负责保证非 nil
+func synthesize(
 	ctx context.Context,
 	client *HTTPClient,
 	opts Options,
-	text string,
 	clientFormat string,
-	speed float64,
-	mtr MetricsRecorder,
+	mtr provider.MetricsRecorder,
 ) (*dto.SynthesisResult, error) {
-	if mtr == nil {
-		mtr = nopMetrics{}
-	}
-	opts.Text = text
-	opts.SpeechRate = convertSpeedToSpeechRate(speed)
-
 	reqID := newRequestID()
 
 	upstreamFormat := resolveUpstreamFormat(clientFormat)
@@ -145,7 +119,7 @@ func Synthesis(
 	mtr.UpstreamFinished(opts.Speaker, opts.Model, opts.Format, "ok", duration, parsed.FirstChunk, parsed.Chunks, len(finalData), 0)
 
 	log.Printf("TTS 合成成功 - 音色=%s 格式=%s 文本=%d字 音频=%d字节 分片=%d 耗时=%v",
-		telemetry.MaskSpeaker(opts.Speaker), clientFormat, len(text), len(finalData), parsed.Chunks, duration)
+		telemetry.MaskSpeaker(opts.Speaker), clientFormat, len(opts.Text), len(finalData), parsed.Chunks, duration)
 
 	return &dto.SynthesisResult{
 		AudioData:  finalData,

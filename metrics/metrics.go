@@ -9,6 +9,7 @@ package metrics
 import (
 	"time"
 
+	"github.com/volcano-tts/tts-api/adapter/provider"
 	"github.com/volcano-tts/tts-api/telemetry"
 )
 
@@ -117,17 +118,21 @@ func Init() {
 	)
 }
 
-// AdapterRecorder 把 telemetry 指标适配为 volcano.MetricsRecorder。
+// AdapterRecorder 把 telemetry 指标适配为 provider.MetricsRecorder。
+// 上游适配器只需实现 provider.MetricsRecorder,metrics 包统一汇聚。
 type AdapterRecorder struct{}
 
-// UpstreamStarted 满足 volcano.MetricsRecorder 接口。
+// 编译期断言:AdapterRecorder 必须实现 provider.MetricsRecorder,防止接口漂移。
+var _ provider.MetricsRecorder = AdapterRecorder{}
+
+// UpstreamStarted 满足 provider.MetricsRecorder 接口。
 func (AdapterRecorder) UpstreamStarted(speaker, model, format string) {
 	// speaker 用 sha1[:8] 替代,保护火山复刻音色 ID
 	// (无鉴权 /metrics 端点可枚举,这是 P0 隐私问题)
 	UpstreamTotal.Inc(telemetry.Labels{"status": "started", "format": format, "model": model, "speaker": telemetry.SpeakerLabel(speaker)})
 }
 
-// UpstreamFinished 满足 volcano.MetricsRecorder 接口。
+// UpstreamFinished 满足 provider.MetricsRecorder 接口。
 func (AdapterRecorder) UpstreamFinished(speaker, model, format, status string, duration, ttfb time.Duration, chunks, audioBytes, errCode int) {
 	labels := telemetry.Labels{"status": status, "format": format, "model": model, "speaker": telemetry.SpeakerLabel(speaker)}
 	UpstreamTotal.Inc(labels)
@@ -149,7 +154,7 @@ func (AdapterRecorder) UpstreamFinished(speaker, model, format, status string, d
 	}
 }
 
-// UpstreamUsage 满足 volcano.MetricsRecorder 接口。
+// UpstreamUsage 满足 provider.MetricsRecorder 接口。
 func (AdapterRecorder) UpstreamUsage(model string, textWords int) {
 	if textWords <= 0 {
 		return

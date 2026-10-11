@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"github.com/volcano-tts/tts-api/controller"
+	// 空导入注册上游适配器:新增上游只需在此加一行,主干零改动。
+	_ "github.com/volcano-tts/tts-api/adapter/volcano"
 	"github.com/volcano-tts/tts-api/installer"
 	"github.com/volcano-tts/tts-api/metrics"
 	"github.com/volcano-tts/tts-api/middleware"
