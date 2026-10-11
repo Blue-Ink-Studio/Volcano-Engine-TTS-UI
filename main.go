@@ -102,6 +102,20 @@ func main() {
 		}
 	}
 
+	// 4.5) 阶段 3a:seed 旧 key(决策 #4)
+	//   - tokens 表为空时,才 seed(跑过一次就不重复)
+	//   - 把 OPENAI_TTS_API_KEY 的每个 key 变成默认 user "default" 下的 unlimited token
+	//   - 单事务,失败回滚;失败只 log warn,不中断启动(setup 模式这时尚未配 key,
+	//     normal 模式若 seed 失败,/v1/audio/speech 直接 401,但管理接口不受影响)
+	if st != nil {
+		seeded, err := controller.SeedDefaultTokensIfEmpty(st)
+		if err != nil {
+			log.Printf("[main][WARN] seed 默认 token 失败: %v (业务鉴权可能受影响)", err)
+		} else if seeded > 0 {
+			log.Printf("[main] seed 默认 token 成功: %d 条(归属 user=default, unlimited=1)", seeded)
+		}
+	}
+
 	// 5) 启动摘要日志(此时 Auth.APIKeys 已是 DB 值,日志反映真实状态)
 	setting.LogStartupSummary()
 

@@ -18,7 +18,7 @@ import (
 
 // schemaVersion 是当前 schema 版本号;每次结构性变更 +1。
 // migrate.go 负责在 Open 时按版本号增量应用。
-const schemaVersion = 2
+const schemaVersion = 3
 
 // Store 是 SQLite 访问层的统一入口;所有 settings/voices 操作都通过它。
 type Store struct {
@@ -176,5 +176,73 @@ func (s *Store) migrate() error {
 	if _, err := s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_channels_status_priority ON channels(status, priority DESC)`); err != nil {
 		return fmt.Errorf("create idx_channels_status_priority: %w", err)
 	}
+
+	// ===== 阶段 3a:多用户识别 + 用量计量 =====
+	// 决策:3a 建全 users/tokens/usage 表(含 quota 列),但 3a 不实现 quota 校验;
+	// 3b 在此基础上叠加"扣减 + 402",不改表结构。
+
+	// users 表(调用方归属)
+	if _, err := s.db.Exec(`
+		CREATE TABLE IF NOT EXISTS users (
+			id         INTEGER PRIMARY KEY AUTOINCREMENT,
+			name       TEXT NOT NULL UNIQUE,
+			status     INTEGER NOT NULL DEFAULT 1,    -- 1=enabled 2=disabled
+			quota      INTEGER NOT NULL DEFAULT 0,    -- (3b 用)3a 只建列不校验
+			used_quota INTEGER NOT NULL DEFAULT 0,    -- (3b 用)对账
+			created_at TEXT NOT NULL DEFAULT (datetime('now')),
+			updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+		)`); err != nil {
+		return fmt.Errorf("create users: %w", err)
+	}
+
+	// tokens 表(每个 API key 对应一个 token,归属一个 user)
+	//   - key_hash: sha256(key) hex,不落明文
+	//   - key_prefix: 明文前 8 字符,对账识别(不参与鉴权)
+	if _, err := s.db.Exec(`
+		CREATE TABLE IF NOT EXISTS tokens (
+			id           INTEGER PRIMARY KEY AUTOINCREMENT,
+			user_id      INTEGER NOT NULL REFERENCES users(id),
+			name         TEXT NOT NULL,
+			key_hash     TEXT NOT NULL UNIQUE,
+			key_prefix   TEXT NOT NULL DEFAULT '',
+			remain_quota INTEGER NOT NULL DEFAULT 0,  -- (3b 用)3a 只建列不校验
+			used_quota   INTEGER NOT NULL DEFAULT 0,
+			unlimited    INTEGER NOT NULL DEFAULT 0,  -- 1=不限(测试/seed)
+			status       INTEGER NOT NULL DEFAULT 1,  -- 1=enabled 2=disabled
+			created_at   TEXT NOT NULL DEFAULT (datetime('now')),
+			updated_at   TEXT NOT NULL DEFAULT (datetime('now'))
+		)`); err != nil {
+		return fmt.Errorf("create tokens: %w", err)
+	}
+	if _, err := s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_tokens_user ON tokens(user_id)`); err != nil {
+		return fmt.Errorf("create idx_tokens_user: %w", err)
+	}
+
+	// usage 表(计量流水,只增不改)
+	//   - channel_id 可空(走兜底时无 channel)
+	//   - request_id: Synthesize 的 ReqID,便于对账
+	//   - characters: input rune 数(不是字节,贴合火山按字符计费)
+	if _, err := s.db.Exec(`
+		CREATE TABLE IF NOT EXISTS usage (
+			id           INTEGER PRIMARY KEY AUTOINCREMENT,
+			user_id      INTEGER NOT NULL,
+			token_id     INTEGER NOT NULL,
+			channel_id   INTEGER,
+			request_id   TEXT NOT NULL,
+			model        TEXT NOT NULL DEFAULT '',
+			characters   INTEGER NOT NULL DEFAULT 0,
+			audio_ms     INTEGER NOT NULL DEFAULT 0,
+			audio_bytes  INTEGER NOT NULL DEFAULT 0,
+			created_at   TEXT NOT NULL DEFAULT (datetime('now'))
+		)`); err != nil {
+		return fmt.Errorf("create usage: %w", err)
+	}
+	if _, err := s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_usage_user_time ON usage(user_id, created_at)`); err != nil {
+		return fmt.Errorf("create idx_usage_user_time: %w", err)
+	}
+	if _, err := s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_usage_token_time ON usage(token_id, created_at)`); err != nil {
+		return fmt.Errorf("create idx_usage_token_time: %w", err)
+	}
+
 	return nil
 }

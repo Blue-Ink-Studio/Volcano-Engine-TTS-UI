@@ -11,6 +11,7 @@ import (
 	"runtime"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/volcano-tts/tts-api/adapter/provider"
 	"github.com/volcano-tts/tts-api/adapter/route"
@@ -75,12 +76,51 @@ func OpenaiTTSHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if !middleware.ValidateAPIKey(r) {
-		metrics.AuthFailed.Inc(telemetry.Labels{})
-		log.Printf("警告: API Key 鉴权失败 - 路径=%s 客户端=%s 远端=%s",
-			r.URL.Path, middleware.GetClientIP(r), r.RemoteAddr)
-		middleware.SendJSONError(w, http.StatusUnauthorized, "Invalid API key provided.", "invalid_request_error", "invalid_api_key")
-		return
+	// 阶段 3a:业务鉴权按 installer 模式分流
+	//   - setup 模式:走原 setting 全局 key 列表(决策 #6,无 key 放行)
+	//   - normal 模式:走 tokens 表 hash 查找(401/403 细分),身份塞 ctx
+	if installer.GetMode() == installer.ModeSetup {
+		if !middleware.ValidateAPIKey(r) {
+			metrics.AuthFailed.Inc(telemetry.Labels{})
+			log.Printf("警告: API Key 鉴权失败 (setup) - 路径=%s 客户端=%s 远端=%s",
+				r.URL.Path, middleware.GetClientIP(r), r.RemoteAddr)
+			middleware.SendJSONError(w, http.StatusUnauthorized, "Invalid API key provided.", "invalid_request_error", "invalid_api_key")
+			return
+		}
+	} else {
+		db := GetAdminStore()
+		if db == nil {
+			log.Printf("警告: normal 模式但 store 未初始化 - 路径=%s 客户端=%s",
+				r.URL.Path, middleware.GetClientIP(r))
+			middleware.SendJSONError(w, http.StatusServiceUnavailable,
+				"voice routing requires database; not initialized",
+				"configuration_error", "db_not_ready")
+			return
+		}
+		caller, authErr := middleware.AuthenticateWithStore(r, db)
+		if authErr != nil {
+			metrics.AuthFailed.Inc(telemetry.Labels{"reason": authErr.Code})
+			switch authErr.Code {
+			case middleware.CodeTokenDisabled:
+				log.Printf("警告: token 已被禁用 - 路径=%s 客户端=%s",
+					r.URL.Path, middleware.GetClientIP(r))
+				middleware.SendJSONError(w, http.StatusForbidden,
+					"token is disabled", "invalid_request_error", "token_disabled")
+			case middleware.CodeUserDisabled:
+				log.Printf("警告: user 已被禁用 - 路径=%s 客户端=%s",
+					r.URL.Path, middleware.GetClientIP(r))
+				middleware.SendJSONError(w, http.StatusForbidden,
+					"user is disabled", "invalid_request_error", "user_disabled")
+			default: // CodeInvalidKey
+				log.Printf("警告: API Key 鉴权失败 - 路径=%s 客户端=%s 远端=%s",
+					r.URL.Path, middleware.GetClientIP(r), r.RemoteAddr)
+				middleware.SendJSONError(w, http.StatusUnauthorized,
+					"Invalid API key provided.", "invalid_request_error", "invalid_api_key")
+			}
+			return
+		}
+		// 把身份塞进 ctx(Synthesize 成功后写 usage 时取)
+		r = r.WithContext(middleware.WithCaller(r.Context(), caller))
 	}
 
 	if err := setting.GetTTSConfigErr(); err != nil {
@@ -226,7 +266,9 @@ func OpenaiTTSHandler(w http.ResponseWriter, r *http.Request) {
 		}
 		result, err := prov.Synthesize(ctx, ttsReq, adapterRec)
 		duration := time.Since(start)
-		finalizeSynth(w, ttsReq, req.Input, clientFormat, result, err, duration, r.URL.Path)
+		// 兜底路径:无 channel 命中,channelID=nil
+		finalizeSynth(w, ttsReq, req.Input, clientFormat, result, err, duration, r.URL.Path,
+			middleware.CallerFromContext(r.Context()), nil)
 		return
 	}
 
@@ -244,7 +286,9 @@ func OpenaiTTSHandler(w http.ResponseWriter, r *http.Request) {
 			}
 			result, err := prov.Synthesize(ctx, ttsReq, adapterRec)
 			duration := time.Since(start)
-			finalizeSynth(w, ttsReq, req.Input, clientFormat, result, err, duration, r.URL.Path)
+			// 降级到兜底,channelID=nil
+			finalizeSynth(w, ttsReq, req.Input, clientFormat, result, err, duration, r.URL.Path,
+				middleware.CallerFromContext(r.Context()), nil)
 			return
 		}
 		if errors.Is(selErr, route.ErrVoiceNotFound) {
@@ -268,7 +312,14 @@ func OpenaiTTSHandler(w http.ResponseWriter, r *http.Request) {
 			ch.ID, ch.Name, ch.Provider, ch.Priority, ch.Weight, middleware.GetClientIP(r))
 	}
 	duration := time.Since(start)
-	finalizeSynth(w, ttsReq, req.Input, clientFormat, result, err, duration, r.URL.Path)
+	// 选渠道路径:成功时 channelID=&ch.ID,失败时 nil(失败路径 recordUsage 跳过)
+	var channelID *int64
+	if ch != nil {
+		id := ch.ID
+		channelID = &id
+	}
+	finalizeSynth(w, ttsReq, req.Input, clientFormat, result, err, duration, r.URL.Path,
+		middleware.CallerFromContext(r.Context()), channelID)
 }
 
 // finalizeSynth 把"合成结果 → 响应 + metrics + 日志"三件套收敛到一处。
@@ -276,6 +327,10 @@ func OpenaiTTSHandler(w http.ResponseWriter, r *http.Request) {
 //   1. 零 channel 兜底(直接调 setting 默认 provider)
 //   2. Select 报 ErrNoChannels 降级(同上)
 //   3. SelectAndSynthesize 完整路径
+//
+// 阶段 3a 新增:成功路径写 usage(决策 #5:写失败 log warn 不回滚主请求)。
+// caller 来自 ctx(setup 模式或匿名时为 nil,跳过写 usage)。
+// channelID 来自路由选择的 channel(走兜底时为 nil → usage.channel_id = NULL)。
 //
 // 不再每次重复写 metrics/响应/日志,降低后续维护成本。
 func finalizeSynth(
@@ -287,6 +342,8 @@ func finalizeSynth(
 	err error,
 	duration time.Duration,
 	urlPath string,
+	caller *middleware.Caller,
+	channelID *int64,
 ) {
 	finalLabels := telemetry.Labels{
 		"format":  clientFormat,
@@ -310,6 +367,11 @@ func finalizeSynth(
 	metrics.RequestTotal.Inc(finalLabels)
 	metrics.RequestDuration.Observe(duration.Seconds(), telemetry.Labels{"status": "ok", "format": clientFormat})
 
+	// 阶段 3a:合成成功后写 usage(决策 #5)
+	//   - caller 为 nil:setup 模式或匿名,不写(沿用阶段 0/1 行为)
+	//   - 写失败:仅 log warn,不影响主请求(决策 #7)
+	recordUsage(caller, channelID, ttsReq, result, inputText)
+
 	w.Header().Set("Content-Type", contentTypeFor(result.Format))
 	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(result.AudioData)))
 	w.Header().Set("X-Request-Id", result.ReqID)
@@ -318,6 +380,34 @@ func finalizeSynth(
 		// header 已发,无法改 status code;只记日志供排查(常见:客户端中途断开 → broken pipe / connection reset)
 		log.Printf("警告: 响应写入失败 - 路径=%s 已写=%d/%d 错误=%v",
 			urlPath, n, len(result.AudioData), err)
+	}
+}
+
+// recordUsage 在 Synthesize 成功时写一条流水。setup 模式 caller=nil → 跳过。
+// 写失败 log warn,不阻断主请求(决策 #7)。
+func recordUsage(caller *middleware.Caller, channelID *int64, ttsReq provider.Request, result *dto.SynthesisResult, inputText string) {
+	if caller == nil {
+		return
+	}
+	db := GetAdminStore()
+	if db == nil {
+		// 防御:理论上 normal 模式一定有 store,不可能 nil
+		log.Printf("[usage] 写 usage 跳过: store not initialized")
+		return
+	}
+	u := store.Usage{
+		UserID:     caller.UserID,
+		TokenID:    caller.TokenID,
+		ChannelID:  channelID, // nil → DB NULL(走兜底场景)
+		RequestID:  result.ReqID,
+		Model:      ttsReq.Model,
+		Characters: utf8.RuneCountInString(inputText), // rune 而非字节
+		AudioMS:    result.Duration.Milliseconds(),    // 决策 #11:字段是 Duration,转 MS
+		AudioBytes: len(result.AudioData),
+	}
+	if _, err := db.UsageInsert(u); err != nil {
+		log.Printf("[usage] 写 usage 失败 user_id=%d token_id=%d req_id=%s: %v",
+			caller.UserID, caller.TokenID, result.ReqID, err)
 	}
 }
 

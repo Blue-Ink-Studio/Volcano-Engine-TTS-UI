@@ -182,6 +182,12 @@ func Setup() *mux.Router {
 	r.Handle("/api/admin/channels/{id:[0-9]+}/status", middleware.RequireAdmin(http.HandlerFunc(controller.ChannelsStatusHandler))).Methods("POST")
 	r.Handle("/api/admin/channels/{id:[0-9]+}/test", middleware.RequireAdmin(http.HandlerFunc(controller.ChannelsTestHandler))).Methods("POST")
 
+	// ===== 阶段 3a:用户/用量查询接口 =====
+	// 阶段 3a 只读;user/token 写操作放 3b 跟 quota 一起做
+	r.Handle("/api/admin/users", middleware.RequireAdmin(http.HandlerFunc(controller.UsersListHandler))).Methods("GET")
+	r.Handle("/api/admin/users/{id:[0-9]+}", middleware.RequireAdmin(http.HandlerFunc(controller.UsersGetHandler))).Methods("GET")
+	r.Handle("/api/admin/users/{id:[0-9]+}/usage", middleware.RequireAdmin(http.HandlerFunc(controller.UserUsageHandler))).Methods("GET")
+
 	// 业务路由
 	r.HandleFunc("/v1/audio/speech", controller.OpenaiTTSHandler).Methods("POST", "OPTIONS")
 

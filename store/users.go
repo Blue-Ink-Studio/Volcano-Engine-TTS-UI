@@ -1,0 +1,112 @@
+package store
+
+import (
+	"database/sql"
+	"errors"
+	"fmt"
+	"strings"
+)
+
+// User 是 users 表的一行。
+type User struct {
+	ID        int64  `json:"id"`
+	Name      string `json:"name"`
+	Status    int    `json:"status"`
+	Quota     int64  `json:"quota"`      // 3b 用
+	UsedQuota int64  `json:"used_quota"` // 3b 用
+	CreatedAt string `json:"created_at"`
+	UpdatedAt string `json:"updated_at"`
+}
+
+// UserInsert 新建用户;name 冲突 → ErrDuplicate。
+func (s *Store) UserInsert(u User) (int64, error) {
+	u.Name = strings.TrimSpace(u.Name)
+	if u.Name == "" {
+		return 0, fmt.Errorf("%w: name is required", ErrInvalid)
+	}
+	if u.Status == 0 {
+		u.Status = 1
+	}
+	if u.Status != 1 && u.Status != 2 {
+		return 0, fmt.Errorf("%w: status must be 1 or 2", ErrInvalid)
+	}
+	res, err := s.db.Exec(`
+		INSERT INTO users (name, status, quota, used_quota, created_at, updated_at)
+		VALUES (?, ?, ?, ?, datetime('now'), datetime('now'))`,
+		u.Name, u.Status, u.Quota, u.UsedQuota)
+	if err != nil {
+		if isUniqueViolation(err) {
+			return 0, ErrDuplicate
+		}
+		return 0, fmt.Errorf("store: user insert: %w", err)
+	}
+	id, err := res.LastInsertId()
+	if err != nil {
+		return 0, fmt.Errorf("store: user insert lastid: %w", err)
+	}
+	return id, nil
+}
+
+// UserGet 按 id 查;未命中 → ErrNotFound。
+func (s *Store) UserGet(id int64) (*User, error) {
+	row := s.db.QueryRow(`SELECT id, name, status, quota, used_quota, created_at, updated_at
+	                     FROM users WHERE id = ?`, id)
+	var u User
+	err := row.Scan(&u.ID, &u.Name, &u.Status, &u.Quota, &u.UsedQuota, &u.CreatedAt, &u.UpdatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("store: user get id=%d: %w", id, err)
+	}
+	return &u, nil
+}
+
+// UserGetByName 按 name 查;未命中 → ErrNotFound。
+// seed 阶段用(决策 #4:先查"default" user 是否已存在,避免重复创建)。
+func (s *Store) UserGetByName(name string) (*User, error) {
+	row := s.db.QueryRow(`SELECT id, name, status, quota, used_quota, created_at, updated_at
+	                     FROM users WHERE name = ?`, strings.TrimSpace(name))
+	var u User
+	err := row.Scan(&u.ID, &u.Name, &u.Status, &u.Quota, &u.UsedQuota, &u.CreatedAt, &u.UpdatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("store: user getbyname %q: %w", name, err)
+	}
+	return &u, nil
+}
+
+// UserCount 统计用户数;admin 仪表盘用(预留)。
+func (s *Store) UserCount() (int, error) {
+	var n int
+	err := s.db.QueryRow(`SELECT COUNT(*) FROM users`).Scan(&n)
+	if err != nil {
+		return 0, fmt.Errorf("store: user count: %w", err)
+	}
+	return n, nil
+}
+
+// UserList 列全表(ORDER BY id ASC)。user 表行数很小(几十~几百),
+// 不分页,直接全量;3b 加配额后可加 limit/offset。
+func (s *Store) UserList() ([]User, error) {
+	rows, err := s.db.Query(`SELECT id, name, status, quota, used_quota, created_at, updated_at
+	                        FROM users ORDER BY id ASC`)
+	if err != nil {
+		return nil, fmt.Errorf("store: user list: %w", err)
+	}
+	defer rows.Close()
+	out := make([]User, 0, 8)
+	for rows.Next() {
+		var u User
+		if err := rows.Scan(&u.ID, &u.Name, &u.Status, &u.Quota, &u.UsedQuota, &u.CreatedAt, &u.UpdatedAt); err != nil {
+			return nil, fmt.Errorf("store: user list scan: %w", err)
+		}
+		out = append(out, u)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: user list rows: %w", err)
+	}
+	return out, nil
+}
