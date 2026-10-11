@@ -1,0 +1,387 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>火山 TTS · 渠道管理</title>
+    <script>try{var t=localStorage.getItem('ttsTheme')||'auto',d=t==='auto'?(matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light'):t;document.documentElement.setAttribute('data-theme',d)}catch(e){}</script>
+    <script src="https://cdn.bootcdn.net/ajax/libs/vue/3.4.21/vue.global.prod.js"></script>
+    <script src="https://cdn.bootcdn.net/ajax/libs/axios/1.6.7/axios.min.js"></script>
+    <link rel="stylesheet" href="/dashboard/admin.css">
+</head>
+<body>
+    <div id="app">
+        <div class="app-shell">
+            <aside id="admin-sidebar"></aside>
+
+            <main class="main">
+                <header class="page-head">
+                    <div>
+                        <h1 class="page-title">渠道管理</h1>
+                        <p class="page-sub">一个渠道 = 一个上游账号，支持多上游、按优先级/权重分发</p>
+                    </div>
+                    <div class="page-actions">
+                        <button class="btn btn-primary" @click="openCreate">+ 新增渠道</button>
+                    </div>
+                </header>
+
+                <div class="toolbar">
+                    <div class="toolbar-left">
+                        <div class="search">
+                            <span class="search-icon">⌕</span>
+                            <input v-model="search" placeholder="搜索名称、Provider、Voice...">
+                        </div>
+                        <div class="seg">
+                            <button class="seg-btn" :class="{active: filter===null}" @click="filter=null">全部</button>
+                            <button class="seg-btn" :class="{active: filter===1}" @click="filter=1">启用</button>
+                            <button class="seg-btn" :class="{active: filter===2}" @click="filter=2">停用</button>
+                        </div>
+                    </div>
+                    <div class="toolbar-right">
+                        <span v-if="search || filter !== null">{{ filtered.length }} / {{ channels.length }}</span>
+                        <span v-else>共 {{ channels.length }} 个渠道</span>
+                    </div>
+                </div>
+
+                <div v-if="actionErr" class="alert alert-danger">
+                    <span class="alert-icon">⚠</span>
+                    <div class="alert-body">
+                        <div class="alert-title">操作失败</div>
+                        <div class="alert-desc">{{ actionErr }}</div>
+                    </div>
+                </div>
+
+                <div class="data-card">
+                    <table class="data-table" v-if="filtered.length">
+                        <thead>
+                            <tr>
+                                <th>名称</th>
+                                <th>Provider</th>
+                                <th>权重</th>
+                                <th>优先级</th>
+                                <th>Voices</th>
+                                <th>状态</th>
+                                <th>测活</th>
+                                <th class="th-actions">操作</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr v-for="c in filtered" :key="c.id">
+                                <td>
+                                    <div class="cell-name">{{ c.name }}</div>
+                                    <div class="cell-sub">#{{ c.id }}<template v-if="c.auto_ban"> · auto-ban</template></div>
+                                </td>
+                                <td><span class="cell-mono">{{ c.provider }}</span></td>
+                                <td><span class="cell-mono">{{ c.weight }}</span></td>
+                                <td><span class="cell-mono">{{ c.priority ?? 0 }}</span></td>
+                                <td>
+                                    <template v-if="c.voices">
+                                        <span class="tag" v-for="v in splitVoices(c.voices)" :key="v">{{ v }}</span>
+                                    </template>
+                                    <span v-else class="text-mute">不限</span>
+                                </td>
+                                <td>
+                                    <span class="pill" :class="c.status === 1 ? 'pill-success' : 'pill-mute'">
+                                        <span class="pill-dot"></span>
+                                        {{ c.status === 1 ? '启用' : '停用' }}
+                                    </span>
+                                </td>
+                                <td>
+                                    <template v-if="c._testing">
+                                        <span class="text-mute">测试中…</span>
+                                    </template>
+                                    <template v-else-if="c._test">
+                                        <span class="test-ok" v-if="c._test.ok">
+                                            <span>✓</span><span>{{ c._test.duration_ms }}ms</span>
+                                        </span>
+                                        <span class="test-fail" v-else :title="c._test.error">
+                                            <span>✗</span><span>{{ c._test.error }}</span>
+                                        </span>
+                                    </template>
+                                    <button v-else class="btn btn-sm" @click="testChannel(c)" :disabled="c.status !== 1">测试</button>
+                                </td>
+                                <td class="th-actions">
+                                    <div class="td-actions">
+                                        <label class="switch" :title="c.status === 1 ? '点击停用' : '点击启用'">
+                                            <input type="checkbox" :checked="c.status === 1" @change="toggle(c)">
+                                            <span class="switch-track"></span>
+                                        </label>
+                                        <button class="btn btn-sm" @click="openEdit(c)">编辑</button>
+                                        <button class="btn btn-sm btn-danger-ghost" @click="remove(c)">删除</button>
+                                    </div>
+                                </td>
+                            </tr>
+                        </tbody>
+                    </table>
+
+                    <div v-else-if="channels.length === 0" class="empty">
+                        <div class="empty-icon">⇄</div>
+                        <div class="empty-title">还没有渠道</div>
+                        <div class="empty-desc">点击右上角「+ 新增渠道」添加第一个上游账号<br>无渠道时系统会回退到全局默认凭据</div>
+                        <button class="btn btn-primary" @click="openCreate">+ 新增渠道</button>
+                    </div>
+
+                    <div v-else class="empty">
+                        <div class="empty-icon">⌕</div>
+                        <div class="empty-title">没有匹配的渠道</div>
+                        <div class="empty-desc">尝试调整搜索词或筛选条件</div>
+                        <button class="btn" @click="search=''; filter=null">清除筛选</button>
+                    </div>
+                </div>
+            </main>
+        </div>
+
+        <!-- Create/Edit modal -->
+        <teleport to="body">
+            <transition name="modal">
+                <div v-if="showModal" class="modal-backdrop" @click.self="closeModal">
+                    <div class="modal" @click.stop>
+                        <div class="modal-head">
+                            <h2>{{ editing ? '编辑渠道' : '新增渠道' }}</h2>
+                            <button class="btn-icon" @click="closeModal" title="关闭" style="flex: 0; padding: 4px 10px;">×</button>
+                        </div>
+                        <div class="modal-body">
+                            <div class="field">
+                                <label>名称 <span class="req">*</span></label>
+                                <input v-model="form.name" placeholder="如 volcano-main / azure-2" :disabled="editing">
+                                <div v-if="editing" class="hint">名称仅创建时可改；如需改名请删除后重建</div>
+                            </div>
+
+                            <div class="grid-2">
+                                <div class="field">
+                                    <label>Provider <span class="req">*</span></label>
+                                    <input v-model="form.provider" list="provider-list" placeholder="volcano" :disabled="editing">
+                                    <datalist id="provider-list">
+                                        <option value="volcano"></option>
+                                    </datalist>
+                                    <div v-if="!editing" class="hint">可输入任意已注册适配器名（一渠道=一上游）</div>
+                                </div>
+                                <div class="field">
+                                    <label>状态</label>
+                                    <select v-model.number="form.status">
+                                        <option :value="1">启用</option>
+                                        <option :value="2">停用</option>
+                                    </select>
+                                </div>
+                            </div>
+
+                            <div class="divider"></div>
+                            <div class="field">
+                                <label>API Key {{ editing ? '' : ' <span class="req">*</span>' }}</label>
+                                <input v-model="form.apiKey" type="password" placeholder="上游 API Key" class="mono">
+                                <div v-if="editing" class="hint">留空 = 保持原凭据不变；填写后连同资源 ID 一起整体替换凭据</div>
+                            </div>
+                            <div class="field">
+                                <label>资源 ID / Scope <span class="req">*</span></label>
+                                <input v-model="form.scope" placeholder="如 seed-icl-2.0 或 region" class="mono">
+                                <div class="hint">火山填 resource_id；其他上游按其 Scope 语义填写</div>
+                            </div>
+
+                            <div class="divider"></div>
+                            <div class="grid-2">
+                                <div class="field">
+                                    <label>Voices（逗号分隔，留空不限）</label>
+                                    <input v-model="form.voices" placeholder="voice-a,voice-b" class="mono">
+                                </div>
+                                <div class="grid-2" style="gap: 14px;">
+                                    <div class="field">
+                                        <label>优先级</label>
+                                        <input v-model.number="form.priority" type="number" placeholder="0">
+                                    </div>
+                                    <div class="field">
+                                        <label>权重</label>
+                                        <input v-model.number="form.weight" type="number" placeholder="1">
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="hint">优先级分档（大者优先），同档按权重随机；权重为 0 时该渠道不参与分发</div>
+
+                            <div v-if="modalErr" class="alert alert-danger" style="margin-top: 14px;">
+                                <span class="alert-icon">⚠</span>
+                                <div class="alert-body">
+                                    <div class="alert-title">提交失败</div>
+                                    <div class="alert-desc">{{ modalErr }}</div>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="modal-foot">
+                            <button class="btn" @click="closeModal">取消</button>
+                            <button class="btn btn-primary" @click="submit" :disabled="submitting">{{ submitting ? '提交中...' : editing ? '保存' : '创建' }}</button>
+                        </div>
+                    </div>
+                </div>
+            </transition>
+        </teleport>
+    </div>
+
+    <script src="/dashboard/admin-shell.js"></script>
+    <script>
+    const { createApp, ref, computed, onMounted } = Vue;
+    const { http, getKey, toast, mountShell } = window.admin;
+    createApp({
+        setup() {
+            const overview = ref({});
+            const channels = ref([]);
+            const actionErr = ref('');
+
+            const search = ref('');
+            const filter = ref(null);
+            const filtered = computed(() => {
+                const q = search.value.trim().toLowerCase();
+                return channels.value.filter(c => {
+                    if (filter.value === 1 && c.status !== 1) return false;
+                    if (filter.value === 2 && c.status !== 2) return false;
+                    if (!q) return true;
+                    return (c.name || '').toLowerCase().includes(q)
+                        || (c.provider || '').toLowerCase().includes(q)
+                        || (c.voices || '').toLowerCase().includes(q);
+                });
+            });
+
+            const splitVoices = (s) => (s || '').split(',').map(v => v.trim()).filter(Boolean);
+
+            const loadOverview = async () => {
+                try { overview.value = (await http.get('/admin/overview')).data; }
+                catch (e) { /* 概览非关键 */ }
+            };
+            const loadChannels = async () => {
+                try { const r = await http.get('/admin/channels'); channels.value = r.data.channels || []; }
+                catch (e) { actionErr.value = '加载渠道失败: ' + (e.response?.data?.error?.message || e.message); }
+            };
+            const reloadAll = () => { loadOverview(); loadChannels(); };
+
+            // ---- 新增/编辑 modal ----
+            const showModal = ref(false);
+            const editing = ref(false);
+            const editingId = ref(0);
+            const submitting = ref(false);
+            const modalErr = ref('');
+            const emptyForm = () => ({ name: '', provider: 'volcano', apiKey: '', scope: '', voices: '', priority: 0, weight: 1, status: 1 });
+            const form = ref(emptyForm());
+
+            const openCreate = () => {
+                editing.value = false; editingId.value = 0;
+                form.value = emptyForm();
+                modalErr.value = '';
+                showModal.value = true;
+            };
+            const openEdit = (c) => {
+                editing.value = true; editingId.value = c.id;
+                let scope = '';
+                try {
+                    const creds = JSON.parse(c.credentials_json || '{}');
+                    scope = (creds.scope && creds.scope.resource_id) || (creds.scope && Object.values(creds.scope)[0]) || '';
+                } catch (e) {}
+                form.value = {
+                    name: c.name, provider: c.provider, apiKey: '', scope,
+                    voices: c.voices || '', priority: c.priority ?? 0,
+                    weight: c.weight || 1, status: c.status || 1,
+                };
+                modalErr.value = '';
+                showModal.value = true;
+            };
+            const closeModal = () => { showModal.value = false; };
+
+            const submit = async () => {
+                modalErr.value = '';
+                if (!form.value.name || !form.value.provider) { modalErr.value = '请填写名称和 Provider'; return; }
+                if (!editing.value && !form.value.apiKey) { modalErr.value = '新增渠道必须填写 API Key'; return; }
+                submitting.value = true;
+                try {
+                    if (editing.value) {
+                        // PATCH 指针语义: 只发有变化的字段; api_key 留空则不带 credentials(不改凭据)
+                        const patch = {};
+                        if (form.value.voices !== '') patch.voices = form.value.voices;
+                        if (form.value.priority !== '' && form.value.priority !== null) patch.priority = Number(form.value.priority) || 0;
+                        if (form.value.weight) patch.weight = Number(form.value.weight) || 1;
+                        if (form.value.status) patch.status = form.value.status;
+                        if (form.value.apiKey.trim()) {
+                            patch.credentials = { api_key: form.value.apiKey.trim(), scope: { resource_id: form.value.scope.trim() } };
+                        }
+                        await http.patch(`/admin/channels/${editingId.value}`, patch);
+                        toast('ok', '渠道已更新');
+                    } else {
+                        await http.post('/admin/channels', {
+                            name: form.value.name.trim(),
+                            provider: form.value.provider.trim(),
+                            credentials: {
+                                api_key: form.value.apiKey.trim(),
+                                scope: { resource_id: form.value.scope.trim() },
+                            },
+                            voices: form.value.voices,
+                            priority: Number(form.value.priority) || 0,
+                            weight: Number(form.value.weight) || 1,
+                            status: form.value.status,
+                        });
+                        toast('ok', '渠道已创建');
+                    }
+                    showModal.value = false;
+                    await loadChannels();
+                } catch (e) {
+                    modalErr.value = e.response?.data?.error?.message || e.message;
+                } finally { submitting.value = false; }
+            };
+
+            // ---- 启停 ----
+            const toggle = async (c) => {
+                const target = c.status === 1 ? 2 : 1;
+                try {
+                    await http.post(`/admin/channels/${c.id}/status`, { status: target });
+                    await loadChannels();
+                    toast('ok', target === 1 ? '渠道已启用' : '渠道已停用');
+                } catch (e) {
+                    const msg = e.response?.data?.error?.message || e.message;
+                    actionErr.value = '切换失败: ' + msg;
+                    toast('err', msg);
+                }
+            };
+
+            // ---- 删除 ----
+            const remove = async (c) => {
+                if (!confirm(`确定删除渠道 "${c.name}" 吗？删除后该上游将不再被调用。`)) return;
+                try {
+                    await http.delete(`/admin/channels/${c.id}`);
+                    await loadChannels();
+                    toast('ok', '渠道已删除');
+                } catch (e) {
+                    const msg = e.response?.data?.error?.message || e.message;
+                    actionErr.value = '删除失败: ' + msg;
+                    toast('err', msg);
+                }
+            };
+
+            // ---- 测活 ----
+            const testChannel = async (c) => {
+                c._testing = true;
+                c._test = null;
+                try {
+                    const r = await http.post(`/admin/channels/${c.id}/test`);
+                    c._test = r.data;
+                } catch (e) {
+                    c._test = { ok: false, error: e.response?.data?.error?.message || e.message };
+                } finally { c._testing = false; }
+            };
+
+            onMounted(() => {
+                if (!getKey()) { location.href = '/dashboard/login'; return; }
+                mountShell({
+                    activeNav: 'channels',
+                    overview: overview.value,
+                    channelCount: channels.value.length,
+                    onReload: reloadAll,
+                });
+                reloadAll();
+            });
+
+            return {
+                overview, channels, actionErr, search, filter, filtered,
+                splitVoices,
+                showModal, editing, form, submitting, modalErr,
+                openCreate, openEdit, closeModal, submit,
+                toggle, remove, testChannel, reloadAll,
+            };
+        },
+    }).mount('#app');
+    </script>
+</body>
+</html>

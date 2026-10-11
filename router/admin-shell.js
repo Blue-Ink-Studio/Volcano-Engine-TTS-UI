@@ -90,16 +90,39 @@
         } catch (e) { return '—'; }
     };
 
+    // === 主题系统(明暗自适应 + 手动锁定) ===
+    // 偏好存 localStorage 'ttsTheme': auto | light | dark
+    // auto 跟随系统 prefers-color-scheme(监听变化); light/dark 手动锁定。
+    // 每个 admin-* 页 <head> 最前有一段内联脚本在 CSS 加载前设 data-theme(防 FOUC)。
+    const THEME_KEY = 'ttsTheme';
+    const getThemePref = () => { try { return localStorage.getItem(THEME_KEY) || 'auto'; } catch (e) { return 'auto'; } };
+    const setThemePref = (v) => { try { localStorage.setItem(THEME_KEY, v); } catch (e) {} };
+    const resolveTheme = (pref) => pref === 'auto'
+        ? (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')
+        : pref;
+    const applyTheme = () => {
+        document.documentElement.setAttribute('data-theme', resolveTheme(getThemePref()));
+    };
+    // 系统主题变化时,仅 auto 模式跟随(手动锁定不跳)
+    if (window.matchMedia) {
+        const mq = window.matchMedia('(prefers-color-scheme: dark)');
+        const onSysTheme = () => { if (getThemePref() === 'auto') applyTheme(); };
+        if (mq.addEventListener) mq.addEventListener('change', onSysTheme);
+        else if (mq.addListener) mq.addListener(onSysTheme);
+    }
+
     // === Sidebar 渲染(每个 admin-* 页面共用)===
     // 占位符 <aside id="admin-sidebar"></aside> 由 shell 填入。
-    // options: { activeNav: 'dashboard' | 'voices' | 'settings', overview, voiceCount, corsConfigured, onReload, onLogout }
+    // options: { activeNav, overview, voiceCount, channelCount, corsConfigured, onReload, onLogout }
     const mountShell = (options = {}) => {
         const slot = document.getElementById('admin-sidebar');
         if (!slot) return {};
         const activeNav = options.activeNav || '';
         const ov = options.overview || {};
         const voiceCount = options.voiceCount != null ? options.voiceCount : '';
+        const channelCount = options.channelCount != null ? options.channelCount : '';
         const corsConfigured = !!options.corsConfigured;
+        const themePref = getThemePref();
         slot.outerHTML = `
 <aside class="sidebar">
     <div class="brand">
@@ -122,6 +145,10 @@
                 <span class="nav-icon">♪</span><span>音色</span>
                 <span class="nav-badge">${voiceCount}</span>
             </a>
+            <a class="nav-item${activeNav === 'channels' ? ' active' : ''}" href="/dashboard/channels">
+                <span class="nav-icon">⇄</span><span>渠道</span>
+                <span class="nav-badge">${channelCount}</span>
+            </a>
             <a class="nav-item${activeNav === 'settings' ? ' active' : ''}" href="/dashboard/settings">
                 <span class="nav-icon">⚙</span><span>设置</span>
                 ${corsConfigured ? '' : '<span class="nav-dot" title="CORS 未配置"></span>'}
@@ -135,8 +162,15 @@
         </div>
     </nav>
     <div class="sidebar-foot">
-        <button class="btn-icon" id="btn-reload" title="刷新">↻ 刷新</button>
-        <button class="btn-icon" id="btn-logout" title="登出">⏻ 登出</button>
+        <div class="theme-row" id="theme-seg" title="主题:自动 / 亮 / 暗">
+            <button class="theme-btn${themePref === 'auto' ? ' active' : ''}" data-theme-pref="auto"><span class="ic">◐</span><span>自动</span></button>
+            <button class="theme-btn${themePref === 'light' ? ' active' : ''}" data-theme-pref="light"><span class="ic">☀</span><span>亮</span></button>
+            <button class="theme-btn${themePref === 'dark' ? ' active' : ''}" data-theme-pref="dark"><span class="ic">☾</span><span>暗</span></button>
+        </div>
+        <div class="sidebar-foot-row">
+            <button class="btn-icon" id="btn-reload" title="刷新">↻ 刷新</button>
+            <button class="btn-icon" id="btn-logout" title="登出">⏻ 登出</button>
+        </div>
     </div>
 </aside>`;
         const btnReload = document.getElementById('btn-reload');
@@ -150,6 +184,22 @@
             if (typeof options.onLogout === 'function') options.onLogout();
             else location.href = '/dashboard/login';
         });
+
+        // 主题切换(自动/亮/暗) + 即时生效
+        const renderThemeUI = () => {
+            const pref = getThemePref();
+            applyTheme();
+            document.querySelectorAll('#theme-seg .theme-btn').forEach(b => {
+                b.classList.toggle('active', b.dataset.themePref === pref);
+            });
+        };
+        document.querySelectorAll('#theme-seg .theme-btn').forEach(btn => {
+            btn.addEventListener('click', () => {
+                setThemePref(btn.dataset.themePref);
+                renderThemeUI();
+            });
+        });
+        renderThemeUI();
         return {};
     };
 
@@ -170,6 +220,7 @@
         http, getKey, setKey, clearKey,
         toast, dismissToast,
         mountShell, login,
+        applyTheme, getThemePref, setThemePref, resolveTheme,
         formatUptime, shortPath, formatBytes, formatStart,
         escapeHTML,
     };

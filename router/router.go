@@ -30,6 +30,9 @@ var adminVoicesHTML []byte
 //go:embed admin-settings.html
 var adminSettingsHTML []byte
 
+//go:embed admin-channels.html
+var adminChannelsHTML []byte
+
 //go:embed admin.css
 var adminCSS []byte
 
@@ -89,6 +92,7 @@ func Setup() *mux.Router {
 	// 管理入口统一到 /dashboard,该预览页迁到 /dashboard/status 作为"详细状态"视图。
 	r.Handle("/dashboard", htmlAwareAdmin(serveAdmin(adminHTML))).Methods("GET")
 	r.Handle("/dashboard/voices", htmlAwareAdmin(serveAdmin(adminVoicesHTML))).Methods("GET")
+	r.Handle("/dashboard/channels", htmlAwareAdmin(serveAdmin(adminChannelsHTML))).Methods("GET")
 	r.Handle("/dashboard/settings", htmlAwareAdmin(serveAdmin(adminSettingsHTML))).Methods("GET")
 	r.Handle("/dashboard/status", htmlAwareAdmin(serveAdmin(dashboardHTML))).Methods("GET")
 	// 登录页无数据,保持公开(否则无法登录)
