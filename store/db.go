@@ -18,7 +18,7 @@ import (
 
 // schemaVersion 是当前 schema 版本号;每次结构性变更 +1。
 // migrate.go 负责在 Open 时按版本号增量应用。
-const schemaVersion = 1
+const schemaVersion = 2
 
 // Store 是 SQLite 访问层的统一入口;所有 settings/voices 操作都通过它。
 type Store struct {
@@ -148,6 +148,33 @@ func (s *Store) migrate() error {
 	if _, err := s.db.Exec(`
 		INSERT OR IGNORE INTO schema_version (version) VALUES (?)`, schemaVersion); err != nil {
 		return fmt.Errorf("insert schema_version: %w", err)
+	}
+
+	// channels 表(多渠道路由,阶段 1 引入)。
+	//   - name 唯一:管理侧标识,不允许重名
+	//   - credentials_json: 序列化后的 provider.Credentials(见 store/channels.go 注释)
+	//   - voices CSV: 限定该渠道支持的对外音色;空 = 不限
+	//   - priority/weight: 大者优先 + 同档加权随机(由 adapter/route 实现)
+	//   - status: 1=enabled 2=disabled(留扩展位,管理接口放阶段 2 上)
+	//   - auto_ban: new-api 风格连续失败自动禁用标记,阶段 1 仅存,未接自动逻辑
+	if _, err := s.db.Exec(`
+		CREATE TABLE IF NOT EXISTS channels (
+			id              INTEGER PRIMARY KEY AUTOINCREMENT,
+			name            TEXT NOT NULL UNIQUE,
+			provider        TEXT NOT NULL,
+			credentials_json TEXT NOT NULL,
+			voices          TEXT NOT NULL DEFAULT '',
+			priority        INTEGER NOT NULL DEFAULT 0,
+			weight          INTEGER NOT NULL DEFAULT 1,
+			status          INTEGER NOT NULL DEFAULT 1,
+			auto_ban        INTEGER NOT NULL DEFAULT 0,
+			created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+			updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
+		)`); err != nil {
+		return fmt.Errorf("create channels: %w", err)
+	}
+	if _, err := s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_channels_status_priority ON channels(status, priority DESC)`); err != nil {
+		return fmt.Errorf("create idx_channels_status_priority: %w", err)
 	}
 	return nil
 }

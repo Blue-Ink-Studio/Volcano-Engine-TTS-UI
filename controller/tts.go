@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	"github.com/volcano-tts/tts-api/adapter/provider"
+	"github.com/volcano-tts/tts-api/adapter/route"
 	"github.com/volcano-tts/tts-api/common"
 	"github.com/volcano-tts/tts-api/dto"
 	"github.com/volcano-tts/tts-api/installer"
@@ -203,16 +205,89 @@ func OpenaiTTSHandler(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), setting.GetTTSTimeout())
 	defer cancel()
 
-	prov, ok := provider.Get(setting.GetDefaultProviderName())
-	if !ok {
-		log.Printf("警告: 未注册上游适配器=%s - 客户端=%s", setting.GetDefaultProviderName(), middleware.GetClientIP(r))
-		middleware.SendJSONError(w, http.StatusServiceUnavailable,
-			"no upstream adapter registered", "configuration_error", "provider_unavailable")
+	// 阶段 1:多渠道路由分发
+	//   - router 未注入(等于未配置 channels)→ 走 setting 兜底,行为=阶段 0
+	//   - router 注入了但无任何 channel → 同样走 setting 兜底
+	//   - router 注入了且有 channel → 走 SelectAndSynthesize:按 priority/weight 选
+	//     渠道,Channel.Credentials 整份覆盖 template.Credentials(意味着
+	//     上面 voice 路由对 Scope["resource_id"] 的覆盖会被 Channel 接管——
+	//     这是阶段 1 的设计取舍,Channel 自带完整账号凭据,voice 路由仅用于
+	//     解析上游 speaker ID → ttsReq.VoiceKey,凭据部分由 Channel 决定)
+	//   - voice 不被任一 channel 接受 → router.Select 返 ErrVoiceNotFound,转 400
+	//   - 所有 channel 都失败 → router 返 *route.AggregateError,转 500(日志逐个打印)
+	rtr := GetRouter()
+	if rtr == nil || rtr.Empty() {
+		prov, ok := provider.Get(setting.GetDefaultProviderName())
+		if !ok {
+			log.Printf("警告: 未注册上游适配器=%s - 客户端=%s", setting.GetDefaultProviderName(), middleware.GetClientIP(r))
+			middleware.SendJSONError(w, http.StatusServiceUnavailable,
+				"no upstream adapter registered", "configuration_error", "provider_unavailable")
+			return
+		}
+		result, err := prov.Synthesize(ctx, ttsReq, adapterRec)
+		duration := time.Since(start)
+		finalizeSynth(w, ttsReq, req.Input, clientFormat, result, err, duration, r.URL.Path)
 		return
 	}
-	result, err := prov.Synthesize(ctx, ttsReq, adapterRec)
-	duration := time.Since(start)
 
+	// 选渠道路径:以"对外 voice 名"(req.Voice,可能为空表示用默认音色)为过滤键。
+	// 客户端未传 voice 时 req.Voice=="";Channel.Voices 接受一切(空白名单)时也会匹配。
+	// 这里需要先看 router 是否能接受这个 voice:
+	if _, selErr := rtr.Select(req.Voice); selErr != nil {
+		if selErr == route.ErrNoChannels {
+			// 中途被禁用 / 删空:降级到兜底,避免硬挂
+			prov, ok := provider.Get(setting.GetDefaultProviderName())
+			if !ok {
+				middleware.SendJSONError(w, http.StatusServiceUnavailable,
+					"no upstream adapter registered", "configuration_error", "provider_unavailable")
+				return
+			}
+			result, err := prov.Synthesize(ctx, ttsReq, adapterRec)
+			duration := time.Since(start)
+			finalizeSynth(w, ttsReq, req.Input, clientFormat, result, err, duration, r.URL.Path)
+			return
+		}
+		if errors.Is(selErr, route.ErrVoiceNotFound) {
+			log.Printf("警告: voice=%q 不被任何渠道支持 - 路径=%s 客户端=%s",
+				req.Voice, r.URL.Path, middleware.GetClientIP(r))
+			middleware.SendJSONError(w, http.StatusBadRequest,
+				fmt.Sprintf("voice '%s' is not supported by any channel", req.Voice),
+				"invalid_request_error", "voice_not_found")
+			return
+		}
+		log.Printf("警告: 渠道选择失败 - 错误=%v 路径=%s 客户端=%s",
+			selErr, r.URL.Path, middleware.GetClientIP(r))
+		middleware.SendJSONError(w, http.StatusInternalServerError,
+			"channel selection failed", "server_error", "route_error")
+		return
+	}
+
+	result, ch, err := rtr.SelectAndSynthesize(ctx, req.Voice, ttsReq, 3, adapterRec)
+	if err == nil && ch != nil {
+		log.Printf("[tts] 渠道选择命中 channel_id=%d name=%s provider=%s priority=%d weight=%d - 客户端=%s",
+			ch.ID, ch.Name, ch.Provider, ch.Priority, ch.Weight, middleware.GetClientIP(r))
+	}
+	duration := time.Since(start)
+	finalizeSynth(w, ttsReq, req.Input, clientFormat, result, err, duration, r.URL.Path)
+}
+
+// finalizeSynth 把"合成结果 → 响应 + metrics + 日志"三件套收敛到一处。
+// 阶段 1 改造后,这个函数同时被 3 个分支调用:
+//   1. 零 channel 兜底(直接调 setting 默认 provider)
+//   2. Select 报 ErrNoChannels 降级(同上)
+//   3. SelectAndSynthesize 完整路径
+//
+// 不再每次重复写 metrics/响应/日志,降低后续维护成本。
+func finalizeSynth(
+	w http.ResponseWriter,
+	ttsReq provider.Request,
+	inputText string,
+	clientFormat string,
+	result *dto.SynthesisResult,
+	err error,
+	duration time.Duration,
+	urlPath string,
+) {
 	finalLabels := telemetry.Labels{
 		"format":  clientFormat,
 		// speaker 是火山复刻音色 ID(用户付费资产),不能直接出现在 /metrics label 里
@@ -225,8 +300,8 @@ func OpenaiTTSHandler(w http.ResponseWriter, r *http.Request) {
 		finalLabels["status"] = classifyStatus(err)
 		metrics.RequestTotal.Inc(finalLabels)
 		metrics.RequestDuration.Observe(duration.Seconds(), telemetry.Labels{"status": finalLabels["status"], "format": clientFormat})
-		log.Printf("警告: TTS 合成失败 - 路径=%s 客户端=%s 文本长度=%d 耗时=%v 错误=%v",
-			r.URL.Path, middleware.GetClientIP(r), len(req.Input), duration, err)
+		log.Printf("警告: TTS 合成失败 - 路径=%s 文本长度=%d 耗时=%v 错误=%v",
+			urlPath, len(inputText), duration, err)
 		middleware.SendJSONError(w, http.StatusInternalServerError, "TTS synthesis failed.", "server_error", "synthesis_failed")
 		return
 	}
@@ -241,8 +316,8 @@ func OpenaiTTSHandler(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	if n, err := w.Write(result.AudioData); err != nil {
 		// header 已发,无法改 status code;只记日志供排查(常见:客户端中途断开 → broken pipe / connection reset)
-		log.Printf("警告: 响应写入失败 - 路径=%s 客户端=%s 已写=%d/%d 错误=%v",
-			r.URL.Path, middleware.GetClientIP(r), n, len(result.AudioData), err)
+		log.Printf("警告: 响应写入失败 - 路径=%s 已写=%d/%d 错误=%v",
+			urlPath, n, len(result.AudioData), err)
 	}
 }
 

@@ -12,6 +12,7 @@ import (
 	"github.com/volcano-tts/tts-api/controller"
 	// 空导入注册上游适配器:新增上游只需在此加一行,主干零改动。
 	_ "github.com/volcano-tts/tts-api/adapter/volcano"
+	"github.com/volcano-tts/tts-api/adapter/route"
 	"github.com/volcano-tts/tts-api/installer"
 	"github.com/volcano-tts/tts-api/metrics"
 	"github.com/volcano-tts/tts-api/middleware"
@@ -26,6 +27,17 @@ func ttsDBPath() string {
 		return p
 	}
 	return "tts.db"
+}
+
+// countEnabled 统计启用 channel 数;main 启动摘要用。
+func countEnabled(chs []route.Channel) int {
+	n := 0
+	for _, c := range chs {
+		if c.Enabled() {
+			n++
+		}
+	}
+	return n
 }
 
 func main() {
@@ -60,6 +72,31 @@ func main() {
 		metrics.Meter.Handler().ServeHTTP(w, &http.Request{})
 		return nil
 	})
+
+	// 3.1) 阶段 1:多渠道路由器注入。
+	//   - 从 store 加载全部 channels(含 disabled,便于阶段 2 管理接口看全量);
+	//     router 内部筛 enabled
+	//   - channels 加载失败(如 credentials_json 损坏)→ 启动期 fail-fast,
+	//     避免一个错凭据把每次请求搞崩
+	//   - 加载成功但列表为空 → 仍注入 router,但 router.Empty()=true,
+	//     controller 走"零渠道兜底",行为=阶段 0(向后兼容验收硬要求)
+	if st != nil {
+		chs, err := st.ChannelList(true)
+		if err != nil {
+			log.Fatalf("FATAL: load channels failed: %v", err)
+		}
+		routerChs := make([]route.Channel, 0, len(chs))
+		for _, sc := range chs {
+			rc, convErr := route.FromStoreChannel(sc)
+			if convErr != nil {
+				log.Fatalf("FATAL: convert channel id=%d name=%s failed: %v", sc.ID, sc.Name, convErr)
+			}
+			routerChs = append(routerChs, rc)
+		}
+		controller.SetRouter(route.NewRouter(routerChs))
+		log.Printf("[main] 多渠道路由已注入: 共 %d 条 (enabled=%d)",
+			len(routerChs), countEnabled(routerChs))
+	}
 
 	// 4) M3: 从 store 加载运行时 TTS 配置(替代原来的 env-based InitTTSConfig)
 	// 必须在 LogStartupSummary 之前,这样日志显示的是真实状态(API key 已从 DB 加载,不再读 env)

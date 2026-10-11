@@ -1,5 +1,7 @@
 # Go build cache
 .gocache/
+.gotmp/
+.gomodcache/
 *.exe
 *.test
 *.out
@@ -49,3 +51,6 @@ tts.db
 tts.db-*
 tts.db.*
 installed.lock
+
+# DSH sandbox ACL repair artifacts (created by diagnose-windows-sandbox-acl skill)
+.dsh-acl/
