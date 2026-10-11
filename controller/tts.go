@@ -10,11 +10,13 @@ import (
 	"net/http"
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
 	"github.com/volcano-tts/tts-api/adapter/provider"
 	"github.com/volcano-tts/tts-api/adapter/route"
+	"github.com/volcano-tts/tts-api/billing"
 	"github.com/volcano-tts/tts-api/common"
 	"github.com/volcano-tts/tts-api/dto"
 	"github.com/volcano-tts/tts-api/installer"
@@ -242,6 +244,51 @@ func OpenaiTTSHandler(w http.ResponseWriter, r *http.Request) {
 			req.Voice, telemetry.MaskSpeaker(v.Speaker), telemetry.MaskResourceID(v.ResourceID), v.Model, middleware.GetClientIP(r))
 	}
 
+	// ===== 阶段 3b:配额预扣 =====
+	//
+	// 位置:所有请求校验(方法/安装/鉴权/配置/body/voice 路由)之后,任何上游调用之前。
+	// 这样"参数不合法"的请求不会先扣额度再退,减少无谓的额度抖动。
+	//
+	// 失败语义:
+	//   - 额度不足 / 并发抢跑 → 402 quota_exhausted,且**不得**继续合成
+	//   - 其它 store 错误 → 500(额度已可能被扣,由 defer 退款兜底)
+	//
+	// defer 退款兜底:任何提前 return(provider 未注册 503 / voice 不匹配 400 /
+	// 路由失败 500)都会在函数退出时退款;成功路径先 Settle,
+	// Settle 会把 Session 置为 closed,defer 里的 Refund 随即 no-op,不会重复退。
+	chars := utf8.RuneCountInString(req.Input)
+	localReqID := newLocalRequestID()
+	caller := middleware.CallerFromContext(r.Context())
+	billSess, billErr := preConsumeQuota(caller, chars)
+	if billErr != nil {
+		if errors.Is(billErr, billing.ErrQuotaExhausted) {
+			log.Printf("警告: 额度不足 - token_id=%d 路径=%s 客户端=%s",
+				caller.TokenID, r.URL.Path, middleware.GetClientIP(r))
+			metrics.RequestTotal.Inc(telemetry.Labels{"status": "quota_exhausted", "format": clientFormat, "speaker": "", "model": ""})
+			middleware.SendJSONError(w, http.StatusPaymentRequired,
+				"quota exhausted", "insufficient_quota", "quota_exhausted")
+			return
+		}
+		log.Printf("警告: 预扣额度失败 - 错误=%v 路径=%s 客户端=%s",
+			billErr, r.URL.Path, middleware.GetClientIP(r))
+		middleware.SendJSONError(w, http.StatusInternalServerError,
+			"billing pre-consume failed", "server_error", "billing_error")
+		return
+	}
+	if billSess != nil {
+		defer func() {
+			// no-op 条件:成功路径已 Settle(closed=true);setup 模式 billSess=nil
+			if err := billSess.Refund(store.Usage{
+				RequestID:  localReqID,
+				Model:      ttsReq.Model,
+				Characters: chars,
+			}); err != nil {
+				log.Printf("[billing] 兜底退款失败 token_id=%d req_id=%s: %v",
+					caller.TokenID, localReqID, err)
+			}
+		}()
+	}
+
 	ctx, cancel := context.WithTimeout(r.Context(), setting.GetTTSTimeout())
 	defer cancel()
 
@@ -268,7 +315,7 @@ func OpenaiTTSHandler(w http.ResponseWriter, r *http.Request) {
 		duration := time.Since(start)
 		// 兜底路径:无 channel 命中,channelID=nil
 		finalizeSynth(w, ttsReq, req.Input, clientFormat, result, err, duration, r.URL.Path,
-			middleware.CallerFromContext(r.Context()), nil)
+			caller, nil, billSess, localReqID)
 		return
 	}
 
@@ -288,7 +335,7 @@ func OpenaiTTSHandler(w http.ResponseWriter, r *http.Request) {
 			duration := time.Since(start)
 			// 降级到兜底,channelID=nil
 			finalizeSynth(w, ttsReq, req.Input, clientFormat, result, err, duration, r.URL.Path,
-				middleware.CallerFromContext(r.Context()), nil)
+				caller, nil, billSess, localReqID)
 			return
 		}
 		if errors.Is(selErr, route.ErrVoiceNotFound) {
@@ -319,20 +366,20 @@ func OpenaiTTSHandler(w http.ResponseWriter, r *http.Request) {
 		channelID = &id
 	}
 	finalizeSynth(w, ttsReq, req.Input, clientFormat, result, err, duration, r.URL.Path,
-		middleware.CallerFromContext(r.Context()), channelID)
+		caller, channelID, billSess, localReqID)
 }
 
-// finalizeSynth 把"合成结果 → 响应 + metrics + 日志"三件套收敛到一处。
+// finalizeSynth 把"合成结果 → 响应 + metrics + 日志 + 计费结算"收敛到一处。
 // 阶段 1 改造后,这个函数同时被 3 个分支调用:
 //   1. 零 channel 兜底(直接调 setting 默认 provider)
 //   2. Select 报 ErrNoChannels 降级(同上)
 //   3. SelectAndSynthesize 完整路径
 //
-// 阶段 3a 新增:成功路径写 usage(决策 #5:写失败 log warn 不回滚主请求)。
-// caller 来自 ctx(setup 模式或匿名时为 nil,跳过写 usage)。
-// channelID 来自路由选择的 channel(走兜底时为 nil → usage.channel_id = NULL)。
+// 阶段 3a:成功路径写 usage。阶段 3b:改用 billing 会话结算(多退少补 + 计费列);
+// 失败路径不再在这里退款 —— 由 OpenaiTTSHandler 的 defer 兜底退款统一处理,
+// 好处是"provider 未注册 / voice 不匹配"这类提前 return 也自动退款,不会漏。
 //
-// 不再每次重复写 metrics/响应/日志,降低后续维护成本。
+// bill 为 nil 表示不计费(setup 模式或无身份),此时跳过结算(沿用阶段 0 行为)。
 func finalizeSynth(
 	w http.ResponseWriter,
 	ttsReq provider.Request,
@@ -344,6 +391,8 @@ func finalizeSynth(
 	urlPath string,
 	caller *middleware.Caller,
 	channelID *int64,
+	bill *billing.Session,
+	localReqID string,
 ) {
 	finalLabels := telemetry.Labels{
 		"format":  clientFormat,
@@ -359,6 +408,7 @@ func finalizeSynth(
 		metrics.RequestDuration.Observe(duration.Seconds(), telemetry.Labels{"status": finalLabels["status"], "format": clientFormat})
 		log.Printf("警告: TTS 合成失败 - 路径=%s 文本长度=%d 耗时=%v 错误=%v",
 			urlPath, len(inputText), duration, err)
+		// 不在此处退款:defer 兜底退款会处理(bill 未 Settle → Refund 生效)
 		middleware.SendJSONError(w, http.StatusInternalServerError, "TTS synthesis failed.", "server_error", "synthesis_failed")
 		return
 	}
@@ -367,10 +417,9 @@ func finalizeSynth(
 	metrics.RequestTotal.Inc(finalLabels)
 	metrics.RequestDuration.Observe(duration.Seconds(), telemetry.Labels{"status": "ok", "format": clientFormat})
 
-	// 阶段 3a:合成成功后写 usage(决策 #5)
-	//   - caller 为 nil:setup 模式或匿名,不写(沿用阶段 0/1 行为)
-	//   - 写失败:仅 log warn,不影响主请求(决策 #7)
-	recordUsage(caller, channelID, ttsReq, result, inputText)
+	// 阶段 3b:结算(多退少补 + 写 status=1 流水)
+	// 成功时优先用上游 ReqID(对账可追溯),为空则回退本地请求号
+	settleUsage(bill, caller, channelID, ttsReq, result, inputText, localReqID)
 
 	w.Header().Set("Content-Type", contentTypeFor(result.Format))
 	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(result.AudioData)))
@@ -383,32 +432,67 @@ func finalizeSynth(
 	}
 }
 
-// recordUsage 在 Synthesize 成功时写一条流水。setup 模式 caller=nil → 跳过。
-// 写失败 log warn,不阻断主请求(决策 #7)。
-func recordUsage(caller *middleware.Caller, channelID *int64, ttsReq provider.Request, result *dto.SynthesisResult, inputText string) {
+// localReqSeq 给本地请求号提供进程内单调序号,避免同纳秒并发撞号。
+var localReqSeq atomic.Uint64
+
+// newLocalRequestID 生成本地请求号:上游调用失败时没有 ReqID,用它落 usage.request_id,
+// 同时作为退款幂等的键。
+func newLocalRequestID() string {
+	return fmt.Sprintf("local-%d-%d", time.Now().UnixNano(), localReqSeq.Add(1))
+}
+
+// preConsumeQuota 在鉴权后、合成前预扣额度。
+//
+//   - caller == nil(setup 模式 / 匿名)→ 返 (nil, nil),不计费(阶段 0 行为)
+//   - store 未初始化 → 返 error(上层 500,不静默放行,避免白嫖)
+//   - 额度不足 → billing.ErrQuotaExhausted(上层 402)
+//
+// 倍率取 billing.DefaultRatios()(当前占位 1:1;拿到 v2 倍率后只改 billing 包)。
+func preConsumeQuota(caller *middleware.Caller, chars int) (*billing.Session, error) {
 	if caller == nil {
-		return
+		return nil, nil
 	}
 	db := GetAdminStore()
 	if db == nil {
-		// 防御:理论上 normal 模式一定有 store,不可能 nil
-		log.Printf("[usage] 写 usage 跳过: store not initialized")
+		return nil, errors.New("billing: store not initialized")
+	}
+	return billing.PreConsume(db, caller.UserID, caller.TokenID, caller.Unlimited, chars, billing.DefaultRatios())
+}
+
+// settleUsage 合成成功后结算:按实际音频时长多退少补,并写 status=1 的流水。
+// 失败仅 log warn,不影响已成功的主请求(决策 #7 的延续:计量/计费故障不阻断交付)。
+func settleUsage(
+	bill *billing.Session,
+	caller *middleware.Caller,
+	channelID *int64,
+	ttsReq provider.Request,
+	result *dto.SynthesisResult,
+	inputText string,
+	localReqID string,
+) {
+	if bill == nil || caller == nil || result == nil {
 		return
 	}
+	reqID := result.ReqID
+	if reqID == "" {
+		reqID = localReqID
+	}
 	u := store.Usage{
-		UserID:     caller.UserID,
-		TokenID:    caller.TokenID,
-		ChannelID:  channelID, // nil → DB NULL(走兜底场景)
-		RequestID:  result.ReqID,
+		ChannelID:  channelID,
+		RequestID:  reqID,
 		Model:      ttsReq.Model,
 		Characters: utf8.RuneCountInString(inputText), // rune 而非字节
 		AudioMS:    result.Duration.Milliseconds(),    // 决策 #11:字段是 Duration,转 MS
 		AudioBytes: len(result.AudioData),
 	}
-	if _, err := db.UsageInsert(u); err != nil {
-		log.Printf("[usage] 写 usage 失败 user_id=%d token_id=%d req_id=%s: %v",
-			caller.UserID, caller.TokenID, result.ReqID, err)
+	actual, err := bill.Settle(u)
+	if err != nil {
+		log.Printf("[billing] 结算失败 user_id=%d token_id=%d req_id=%s: %v",
+			caller.UserID, caller.TokenID, reqID, err)
+		return
 	}
+	log.Printf("[billing] 结算 user_id=%d token_id=%d pre=%d actual=%d req_id=%s",
+		caller.UserID, caller.TokenID, bill.Pre(), actual, reqID)
 }
 
 func classifyStatus(err error) string {

@@ -29,9 +29,13 @@ const (
 
 // Caller 是识别后的身份(塞进 request context)。
 // 决策 B:结构体携带所有身份字段,以后扩展(分组、租户等)只改这里。
+//
+// Unlimited 是阶段 3b 加的:鉴权时已经读到 token 行,顺手带出来,
+// 让计费层(billing.PreConsume)不必为一个字段再查一次库。
 type Caller struct {
-	UserID  int64
-	TokenID int64
+	UserID    int64
+	TokenID   int64
+	Unlimited bool
 }
 
 type authCtxKey struct{}
@@ -119,7 +123,7 @@ func AuthenticateWithStore(r *http.Request, s *store.Store) (*Caller, *AuthError
 	if user.Status != 1 {
 		return nil, &AuthError{Code: CodeUserDisabled}
 	}
-	return &Caller{UserID: user.ID, TokenID: row.ID}, nil
+	return &Caller{UserID: user.ID, TokenID: row.ID, Unlimited: row.Unlimited}, nil
 }
 
 func SendJSONError(w http.ResponseWriter, statusCode int, message string, errType string, code string) {

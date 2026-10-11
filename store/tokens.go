@@ -1,6 +1,7 @@
 package store
 
 import (
+	"crypto/rand"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
@@ -202,4 +203,198 @@ func scanToken(r scanner) (Token, error) {
 	}
 	t.Unlimited = unlimited != 0
 	return t, nil
+}
+
+// ---- 阶段 3b:额度原子原语 ------------------------------------------
+
+// TokenDecreaseQuota 原子预扣:仅当 remain_quota >= amount 时扣减,返回是否成功。
+//
+// SQL 条件与 SET 在同一语句内完成 → 由 SQLite 保证"检查+扣减"不可分割,
+// 无需显式事务;RowsAffected=0 即额度不足。
+//
+// **本方法只服务非 unlimited token**:billing.PreConsume 在 unlimited 时短路、
+// 根本不调用这里(见 billing 包注释)。这样 SQL 里不必再写 `unlimited=1` 分支,
+// 避免"unlimited 走了 WHERE 命中但 SET 依然扣减"的坑。
+//
+// amount < 0 → ErrInvalid;amount == 0 → 恒真(无副作用,供调用方统一路径)。
+func (s *Store) TokenDecreaseQuota(id, amount int64) (bool, error) {
+	if amount < 0 {
+		return false, fmt.Errorf("%w: amount must be >= 0", ErrInvalid)
+	}
+	if amount == 0 {
+		// 无额度可扣:确认 token 存在即可,避免"0 预扣"把不存在 id 判成成功
+		if _, err := s.TokenGet(id); err != nil {
+			return false, err
+		}
+		return true, nil
+	}
+	res, err := s.db.Exec(`UPDATE tokens SET remain_quota = remain_quota - ?, updated_at = datetime('now')
+	                       WHERE id = ? AND remain_quota >= ?`, amount, id, amount)
+	if err != nil {
+		return false, fmt.Errorf("store: token decrease quota id=%d: %w", id, err)
+	}
+	n, _ := res.RowsAffected()
+	return n > 0, nil
+}
+
+// TokenIncreaseQuota 退还/充值:remain_quota += amount(amount >= 0)。
+// 幂等性由调用方保证(billing 的退款走 UsageRefund 的 tx 内判重)。
+func (s *Store) TokenIncreaseQuota(id, amount int64) error {
+	if amount < 0 {
+		return fmt.Errorf("%w: amount must be >= 0", ErrInvalid)
+	}
+	if _, err := s.db.Exec(`UPDATE tokens SET remain_quota = remain_quota + ?, updated_at = datetime('now') WHERE id = ?`,
+		amount, id); err != nil {
+		return fmt.Errorf("store: token increase quota id=%d: %w", id, err)
+	}
+	return nil
+}
+
+// TokenGet 按 id 查;未命中 → ErrNotFound。
+func (s *Store) TokenGet(id int64) (*Token, error) {
+	row := s.db.QueryRow(`SELECT id, user_id, name, key_hash, key_prefix, remain_quota, used_quota, unlimited, status, created_at, updated_at
+	                     FROM tokens WHERE id = ?`, id)
+	t, err := scanToken(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("store: token get id=%d: %w", id, err)
+	}
+	return &t, nil
+}
+
+// TokenListByUser 列某 user 名下全部 token(含 disabled),ORDER BY id ASC。
+// 决策 #1(GET /users/{id}/tokens):不返回明文 key,只返回 key_prefix。
+func (s *Store) TokenListByUser(userID int64) ([]Token, error) {
+	rows, err := s.db.Query(`SELECT id, user_id, name, key_hash, key_prefix, remain_quota, used_quota, unlimited, status, created_at, updated_at
+	                        FROM tokens WHERE user_id = ? ORDER BY id ASC`, userID)
+	if err != nil {
+		return nil, fmt.Errorf("store: token list by user id=%d: %w", userID, err)
+	}
+	defer rows.Close()
+	out := make([]Token, 0, 8)
+	for rows.Next() {
+		t, err := scanToken(rows)
+		if err != nil {
+			return nil, fmt.Errorf("store: token list scan: %w", err)
+		}
+		out = append(out, t)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: token list rows: %w", err)
+	}
+	return out, nil
+}
+
+// TokenUpdatePatch 是 token 部分更新的入参(指针语义:nil=不改)。
+// Quota 是**绝对值**(决策 #4:PATCH 直接把 remain_quota 设为该值,不做增减)。
+type TokenUpdatePatch struct {
+	Name      *string
+	Unlimited *bool
+	Status    *int
+	Quota     *int64
+}
+
+// TokenUpdate 按字段部分更新;未命中 → ErrNotFound;status ∉ {1,2} → ErrInvalid。
+// 空 patch 合法(noop),但仍确认 id 存在。
+func (s *Store) TokenUpdate(id int64, p TokenUpdatePatch) error {
+	if p.Status != nil && *p.Status != 1 && *p.Status != 2 {
+		return fmt.Errorf("%w: status must be 1 (enabled) or 2 (disabled)", ErrInvalid)
+	}
+	if p.Quota != nil && *p.Quota < 0 {
+		return fmt.Errorf("%w: quota must be >= 0", ErrInvalid)
+	}
+
+	sets := make([]string, 0, 5)
+	args := make([]any, 0, 6)
+	if p.Name != nil {
+		name := strings.TrimSpace(*p.Name)
+		if name == "" {
+			return fmt.Errorf("%w: name is required", ErrInvalid)
+		}
+		sets = append(sets, "name=?")
+		args = append(args, name)
+	}
+	if p.Unlimited != nil {
+		sets = append(sets, "unlimited=?")
+		args = append(args, boolToInt(*p.Unlimited))
+	}
+	if p.Status != nil {
+		sets = append(sets, "status=?")
+		args = append(args, *p.Status)
+	}
+	if p.Quota != nil {
+		// 决策 #4:绝对值覆盖
+		sets = append(sets, "remain_quota=?")
+		args = append(args, *p.Quota)
+	}
+	if len(sets) == 0 {
+		if _, err := s.TokenGet(id); err != nil {
+			return err
+		}
+		return nil
+	}
+	sets = append(sets, "updated_at=datetime('now')")
+	args = append(args, id)
+	if _, err := s.db.Exec(`UPDATE tokens SET `+strings.Join(sets, ", ")+` WHERE id = ?`, args...); err != nil {
+		return fmt.Errorf("store: token update id=%d: %w", id, err)
+	}
+	// 用 TokenGet 兜底判存在:SQLite 对"命中但值未变"的 UPDATE RowsAffected=1,
+	// 但 noop patch 走的是上面的空分支,这里仍以查库为准,语义最稳。
+	if _, err := s.TokenGet(id); err != nil {
+		return err
+	}
+	return nil
+}
+
+// TokenDelete 物理删 token(决策 #5:usage 流水保留,不级联删)。
+// 未命中 → ErrNotFound。
+func (s *Store) TokenDelete(id int64) error {
+	res, err := s.db.Exec(`DELETE FROM tokens WHERE id = ?`, id)
+	if err != nil {
+		return fmt.Errorf("store: token delete id=%d: %w", id, err)
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// GenerateTokenKey 生成 32 字节随机 key 的 hex 形式(64 字符)。
+// 决策 #1(§6):发令牌的明文 key 由服务端随机生成,调用方不自传。
+// 用 crypto/rand,失败直接返 error(不降级,避免弱 key)。
+func GenerateTokenKey() (string, error) {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		return "", fmt.Errorf("store: generate token key: %w", err)
+	}
+	return hex.EncodeToString(b), nil
+}
+
+// TokenCreateWithKey 服务端生成明文 key 并入库,返回 (tokenID, 明文key)。
+// **明文 key 只在此刻返回一次**,之后任何查询只有 key_hash / key_prefix(决策 #1)。
+// quota 是初始 remain_quota;unlimited 为 true 时额度不参与校验(3b 仍会记流水)。
+func (s *Store) TokenCreateWithKey(userID int64, name string, unlimited bool, quota int64) (int64, string, error) {
+	if quota < 0 {
+		return 0, "", fmt.Errorf("%w: quota must be >= 0", ErrInvalid)
+	}
+	key, err := GenerateTokenKey()
+	if err != nil {
+		return 0, "", err
+	}
+	id, err := s.TokenInsert(Token{
+		UserID:      userID,
+		Name:        name,
+		KeyHash:     HashKey(key),
+		KeyPrefix:   KeyPrefix(key),
+		RemainQuota: quota,
+		Unlimited:   unlimited,
+		Status:      1,
+	})
+	if err != nil {
+		return 0, "", err
+	}
+	return id, key, nil
 }

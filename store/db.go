@@ -18,7 +18,15 @@ import (
 
 // schemaVersion 是当前 schema 版本号;每次结构性变更 +1。
 // migrate.go 负责在 Open 时按版本号增量应用。
-const schemaVersion = 3
+// schemaVersion 是当前 schema 版本号;每次结构性变更 +1。
+//
+// 版本历史:
+//
+//	1 → 基础表(settings/voices)
+//	2 → channels(阶段 1 多渠道)
+//	3 → users/tokens/usage(阶段 3a 识别 + 计量)
+//	4 → usage 补 3 列(阶段 3b 计费:pre_consumed/actual_quota/status)
+const schemaVersion = 4
 
 // Store 是 SQLite 访问层的统一入口;所有 settings/voices 操作都通过它。
 type Store struct {
@@ -222,6 +230,7 @@ func (s *Store) migrate() error {
 	//   - channel_id 可空(走兜底时无 channel)
 	//   - request_id: Synthesize 的 ReqID,便于对账
 	//   - characters: input rune 数(不是字节,贴合火山按字符计费)
+	//   - pre_consumed/actual_quota/status: 阶段 3b 计费列(老库由下方 ensureColumn 补)
 	if _, err := s.db.Exec(`
 		CREATE TABLE IF NOT EXISTS usage (
 			id           INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -233,6 +242,9 @@ func (s *Store) migrate() error {
 			characters   INTEGER NOT NULL DEFAULT 0,
 			audio_ms     INTEGER NOT NULL DEFAULT 0,
 			audio_bytes  INTEGER NOT NULL DEFAULT 0,
+			pre_consumed INTEGER NOT NULL DEFAULT 0,
+			actual_quota INTEGER NOT NULL DEFAULT 0,
+			status       INTEGER NOT NULL DEFAULT 1,
 			created_at   TEXT NOT NULL DEFAULT (datetime('now'))
 		)`); err != nil {
 		return fmt.Errorf("create usage: %w", err)
@@ -243,6 +255,79 @@ func (s *Store) migrate() error {
 	if _, err := s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_usage_token_time ON usage(token_id, created_at)`); err != nil {
 		return fmt.Errorf("create idx_usage_token_time: %w", err)
 	}
+	// request_id 索引:退款幂等查询(UsageRefund 按 request_id + status 判重)
+	if _, err := s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_usage_request ON usage(request_id)`); err != nil {
+		return fmt.Errorf("create idx_usage_request: %w", err)
+	}
 
+	// ===== 阶段 3b:usage 补计费三列 =====
+	//
+	// 【为什么 3b 必须改表】阶段 3a 建 usage 表时漏建了计费列,但 3b 的
+	// API 契约(策划 §4.1)要求 usage 详单返回 pre_consumed/actual_quota/status,
+	// §3 三段式计费也必须落这两列做对账。因此这里**打破 §2"3b 不改表"的表述**,
+	// 用 ADD COLUMN 补齐(只增列,不改/不删旧列,老库老数据兼容)。
+	//
+	//   - pre_consumed: PreConsume 预扣额度(退款时按此全额回退)
+	//   - actual_quota: Settle 结算后的实际额度(失败退款行为 0)
+	//   - status: 1=settled 2=refunded(default 1:3a 老行只在合成成功时写入,
+	//     语义上就是已结算,补列后按 1 读最准确)
+	//
+	// SQLite 无 "ADD COLUMN IF NOT EXISTS",故先 PRAGMA 自检再 ALTER(幂等)。
+	if err := s.ensureColumn("usage", "pre_consumed",
+		`pre_consumed INTEGER NOT NULL DEFAULT 0`); err != nil {
+		return err
+	}
+	if err := s.ensureColumn("usage", "actual_quota",
+		`actual_quota INTEGER NOT NULL DEFAULT 0`); err != nil {
+		return err
+	}
+	if err := s.ensureColumn("usage", "status",
+		`status INTEGER NOT NULL DEFAULT 1`); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// ensureColumn 幂等地给 table 补一列:PRAGMA table_info 自检,缺失才 ALTER TABLE ADD COLUMN。
+//
+// 注意:本 Store 是 SetMaxOpenConns(1),持有 rows 时再 Exec 会自锁,
+// 因此先把列名读进内存、显式 Close rows,再做 ALTER。
+//
+// table/column/columnDDL 全部是代码内常量,不接受外部输入,无注入面。
+func (s *Store) ensureColumn(table, column, columnDDL string) error {
+	rows, err := s.db.Query(`PRAGMA table_info(` + table + `)`)
+	if err != nil {
+		return fmt.Errorf("store: pragma table_info(%s): %w", table, err)
+	}
+	existing := make(map[string]struct{}, 16)
+	for rows.Next() {
+		var (
+			cid       int
+			name      string
+			ctype     string
+			notNull   int
+			dfltValue any
+			pk        int
+		)
+		if err := rows.Scan(&cid, &name, &ctype, &notNull, &dfltValue, &pk); err != nil {
+			_ = rows.Close()
+			return fmt.Errorf("store: pragma table_info(%s) scan: %w", table, err)
+		}
+		existing[name] = struct{}{}
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return fmt.Errorf("store: pragma table_info(%s) rows: %w", table, err)
+	}
+	// 必须先 Close 再 ALTER(单连接)
+	_ = rows.Close()
+
+	if _, ok := existing[column]; ok {
+		return nil // 已存在,幂等返回
+	}
+	if _, err := s.db.Exec(`ALTER TABLE ` + table + ` ADD COLUMN ` + columnDDL); err != nil {
+		return fmt.Errorf("store: alter %s add %s: %w", table, column, err)
+	}
 	return nil
 }

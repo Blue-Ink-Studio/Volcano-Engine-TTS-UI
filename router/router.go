@@ -182,11 +182,20 @@ func Setup() *mux.Router {
 	r.Handle("/api/admin/channels/{id:[0-9]+}/status", middleware.RequireAdmin(http.HandlerFunc(controller.ChannelsStatusHandler))).Methods("POST")
 	r.Handle("/api/admin/channels/{id:[0-9]+}/test", middleware.RequireAdmin(http.HandlerFunc(controller.ChannelsTestHandler))).Methods("POST")
 
-	// ===== 阶段 3a:用户/用量查询接口 =====
-	// 阶段 3a 只读;user/token 写操作放 3b 跟 quota 一起做
+	// ===== 阶段 3a/3b:用户 + 令牌 + 用量接口 =====
+	// 阶段 3a 只读;3b 补齐写操作与令牌管理(全部 RequireAdmin)。
+	// 注册顺序:更具体的子路径(/usage、/tokens)先注册,避免被 {id} 规则抢先匹配。
 	r.Handle("/api/admin/users", middleware.RequireAdmin(http.HandlerFunc(controller.UsersListHandler))).Methods("GET")
-	r.Handle("/api/admin/users/{id:[0-9]+}", middleware.RequireAdmin(http.HandlerFunc(controller.UsersGetHandler))).Methods("GET")
+	r.Handle("/api/admin/users", middleware.RequireAdmin(http.HandlerFunc(controller.UsersCreateHandler))).Methods("POST")
 	r.Handle("/api/admin/users/{id:[0-9]+}/usage", middleware.RequireAdmin(http.HandlerFunc(controller.UserUsageHandler))).Methods("GET")
+	r.Handle("/api/admin/users/{id:[0-9]+}/tokens", middleware.RequireAdmin(http.HandlerFunc(controller.TokensListHandler))).Methods("GET")
+	r.Handle("/api/admin/users/{id:[0-9]+}/tokens", middleware.RequireAdmin(http.HandlerFunc(controller.TokensCreateHandler))).Methods("POST")
+	r.Handle("/api/admin/users/{id:[0-9]+}", middleware.RequireAdmin(http.HandlerFunc(controller.UsersGetHandler))).Methods("GET")
+	r.Handle("/api/admin/users/{id:[0-9]+}", middleware.RequireAdmin(http.HandlerFunc(controller.UsersUpdateHandler))).Methods("PATCH")
+	r.Handle("/api/admin/users/{id:[0-9]+}", middleware.RequireAdmin(http.HandlerFunc(controller.UsersDeleteHandler))).Methods("DELETE")
+	// 令牌单独按 id 操作(挂在 user 下的只有 list/create)
+	r.Handle("/api/admin/tokens/{id:[0-9]+}", middleware.RequireAdmin(http.HandlerFunc(controller.TokensUpdateHandler))).Methods("PATCH")
+	r.Handle("/api/admin/tokens/{id:[0-9]+}", middleware.RequireAdmin(http.HandlerFunc(controller.TokensDeleteHandler))).Methods("DELETE")
 
 	// 业务路由
 	r.HandleFunc("/v1/audio/speech", controller.OpenaiTTSHandler).Methods("POST", "OPTIONS")
