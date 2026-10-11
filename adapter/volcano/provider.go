@@ -80,6 +80,16 @@ func optionsFromRequest(req provider.Request) Options {
 			opts.Additions = &adds
 		}
 	}
+	// emoji 默认不过滤(disable_emoji_filter=true):火山默认会"过滤"emoji,
+	// 且过滤实现可能导致 emoji 之后的文本不被合成(用户实测)。
+	// 这里默认开启;若调用方显式传了 disable_emoji_filter=false,则尊重其覆盖。
+	if opts.Additions == nil {
+		d := true
+		opts.Additions = &Additions{DisableEmojiFilter: &d}
+	} else if opts.Additions.DisableEmojiFilter == nil {
+		d := true
+		opts.Additions.DisableEmojiFilter = &d
+	}
 	return opts
 }
 
