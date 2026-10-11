@@ -61,7 +61,17 @@ func (s *Store) TokenInsert(t Token) (int64, error) {
 	if t.Status != 1 && t.Status != 2 {
 		return 0, fmt.Errorf("%w: status must be 1 or 2", ErrInvalid)
 	}
-	res, err := s.db.Exec(`
+	return insertToken(s.db, t)
+}
+
+// sqlExecer 抽象 db 与 tx 的 Exec,让 insertToken 可被普通插入与事务复用。
+type sqlExecer interface {
+	Exec(query string, args ...any) (sql.Result, error)
+}
+
+// insertToken 是 TokenInsert 与 SeedDefaultTokens 共用的核心插入(UNIQUE 冲突 → ErrDuplicate)。
+func insertToken(ex sqlExecer, t Token) (int64, error) {
+	res, err := ex.Exec(`
 		INSERT INTO tokens (user_id, name, key_hash, key_prefix, remain_quota, used_quota, unlimited, status, created_at, updated_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))`,
 		t.UserID, t.Name, t.KeyHash, t.KeyPrefix, t.RemainQuota, t.UsedQuota,
@@ -99,7 +109,7 @@ func (s *Store) TokenGetByKeyHash(hash string) (*Token, error) {
 	return &t, nil
 }
 
-// TokenCountEnabled 统计 enabled token 数(供 main 启动 seed 决策:空才 seed)。
+// TokenCountEnabled 统计 enabled token 数。
 func (s *Store) TokenCountEnabled() (int, error) {
 	var n int
 	err := s.db.QueryRow(`SELECT COUNT(*) FROM tokens WHERE status = 1`).Scan(&n)
@@ -107,6 +117,79 @@ func (s *Store) TokenCountEnabled() (int, error) {
 		return 0, fmt.Errorf("store: token count enabled: %w", err)
 	}
 	return n, nil
+}
+
+// TokenCount 统计 tokens 表总行数(不限 status)。seed 触发判断用:全表空才 seed。
+func (s *Store) TokenCount() (int, error) {
+	var n int
+	err := s.db.QueryRow(`SELECT COUNT(*) FROM tokens`).Scan(&n)
+	if err != nil {
+		return 0, fmt.Errorf("store: token count: %w", err)
+	}
+	return n, nil
+}
+
+// SeedDefaultTokens 原子 seed:把 authKeys 逐个插成 defaultUserName 下的 unlimited token。
+// 单一事务:default user + 全部 tokens 成功才 commit,任一失败整体回滚(决策 #3)。
+//
+// 行为契约(参考 SetupApply 事务风格):
+//   - 默认 user 不存在则建(name=defaultUserName,status=1),已存在则复用;
+//   - token 已存在(key_hash UNIQUE 冲突)→ 静默跳过(ErrDuplicate,事务继续),
+//     兼容"同一 key 重复 seed"场景;
+//   - 其它 token 错误 → 整体回滚;
+//   - 全部成功 → tx.Commit,返回实际插入的 token 数(不含被 ErrDuplicate 跳过的)。
+func (s *Store) SeedDefaultTokens(authKeys []string, defaultUserName string) (int, error) {
+	name := strings.TrimSpace(defaultUserName)
+	if name == "" {
+		return 0, fmt.Errorf("%w: default user name is required", ErrInvalid)
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return 0, fmt.Errorf("store: seed default tokens begin: %w", err)
+	}
+	// defer Rollback:Commit 成功时 Rollback 返 sql.ErrTxDone,无害。
+	defer func() {
+		_ = tx.Rollback()
+	}()
+
+	// 1) 建/复用 default user(INSERT OR IGNORE + SELECT id,不依赖 UserInsert 的 db.Exec)
+	var uid int64
+	if _, err := tx.Exec(`INSERT OR IGNORE INTO users (name, status, quota, used_quota, created_at, updated_at)
+	                      VALUES (?, 1, 0, 0, datetime('now'), datetime('now'))`, name); err != nil {
+		return 0, fmt.Errorf("store: seed default user insert: %w", err)
+	}
+	if err := tx.QueryRow(`SELECT id FROM users WHERE name = ?`, name).Scan(&uid); err != nil {
+		return 0, fmt.Errorf("store: seed default user select: %w", err)
+	}
+
+	// 2) 逐个插 token;ErrDuplicate 跳过,其它整体回滚
+	seeded := 0
+	for _, key := range authKeys {
+		key = strings.TrimSpace(key)
+		if key == "" {
+			continue
+		}
+		t := Token{
+			UserID:    uid,
+			Name:      "seeded",
+			KeyHash:   HashKey(key),
+			KeyPrefix: KeyPrefix(key),
+			Unlimited: true, // 3a 不扣费,seed 出来全 unlimited
+			Status:    1,
+		}
+		if _, err := insertToken(tx, t); err != nil {
+			if errors.Is(err, ErrDuplicate) {
+				continue
+			}
+			return seeded, fmt.Errorf("store: seed token (prefix=%s): %w", t.KeyPrefix, err)
+		}
+		seeded++
+	}
+
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("store: seed default tokens commit: %w", err)
+	}
+	return seeded, nil
 }
 
 func scanToken(r scanner) (Token, error) {

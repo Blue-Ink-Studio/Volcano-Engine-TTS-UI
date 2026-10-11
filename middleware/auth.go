@@ -89,8 +89,8 @@ func ValidateAPIKey(r *http.Request) bool {
 //   5) 成功 → 返 *Caller(身份)
 //
 // 设计要点:
-//   - 走常量时间 hash 比较(防止 hash 字典侧信道,虽然 hash 不直接暴露;但
-//     库统一风格)
+//   - 按 key_hash 查 tokens 表(SQL WHERE),hash 是查询键、非秘密比对;库中只存
+//     hash + prefix,不落明文,无字典侧信道
 //   - 不在 SQL 里 JOIN users,因为 status 分两步校验语义清晰(决策 #3)
 //   - caller 已经在前面对照过 token+user,调用方拿到 *Caller 即可放心用
 func AuthenticateWithStore(r *http.Request, s *store.Store) (*Caller, *AuthError) {
