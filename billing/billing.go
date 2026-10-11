@@ -1,13 +1,9 @@
 // Package billing 实现阶段 3b 的配额三段式计费:预扣 → 结算 → 退款。
 //
-// 【重要:倍率常量是占位值】
-// 策划文档 §3 要求"沿用 STAGE3-QUOTA-BILLING.md v2"的公式与倍率,但该文档
-// **未随仓库或 Downloads 提供**,因此这里把倍率集中成 Ratios 值 + 默认常量,
-// 默认全部取 1.0,语义为:
-//
-//	1 个字符 = 1 额度;1 秒音频 = 1 额度;无分组倍率、无倍率系数。
-//
-// 拿到 v2 真实倍率后,只需改 DefaultRatios()/常量一处,调用方零改动。
+// 【重要:倍率默认值与 STAGE3-QUOTA-BILLING.md v2 对齐】
+// 默认语义:1 个字符 = 1 额度;1 秒音频 = 1 额度;无分组倍率(group=1.0);
+// 预扣乘数 multiplier=1.2(预扣比实际多 20%,防跑超,结算多退少补)。
+// 若需调整倍率,只需改 DefaultRatios()/常量一处,调用方零改动。
 //
 // 计费公式(§3,ceil 向上取整):
 //
@@ -26,12 +22,13 @@ import (
 	"github.com/volcano-tts/tts-api/store"
 )
 
-// 倍率默认值(占位,见包注释)。
+// 倍率默认值。
+// char/sec/group 与 STAGE3-QUOTA-BILLING.md v2 一致;multiplier 按 v2 取 1.2(预扣防跑超)。
 const (
 	DefaultCharRatio  = 1.0
 	DefaultSecRatio   = 1.0
 	DefaultGroupRatio = 1.0
-	DefaultMultiplier = 1.0
+	DefaultMultiplier = 1.2
 )
 
 // ErrQuotaExhausted 表示额度不足(或并发预扣失败)→ controller 翻译为 402 quota_exhausted。
@@ -42,7 +39,7 @@ type Ratios struct {
 	Char       float64 // 每字符额度
 	Sec        float64 // 每秒音频额度
 	Group      float64 // 分组倍率(3b 恒 1.0;分组配置后续接入)
-	Multiplier float64 // 倍率系数(3b 恒 1.0)
+	Multiplier float64 // 预扣乘数(1.2:预扣比实际多 20%,防跑超;分组配置后续接入)
 }
 
 // DefaultRatios 返回当前默认倍率。
