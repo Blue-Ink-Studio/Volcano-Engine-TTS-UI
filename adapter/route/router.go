@@ -105,6 +105,11 @@ func (r *Router) Select(voice string) (*Channel, error) {
 //   - "换下一个" = 同档里挑别的;pool 自动收紧
 //   - "降档" = 最高档被试空 → pool 里只剩低档 → 自然降到低档
 //   - 失败重试安全(TTS 是只读调用,无扣款副作用)
+//
+// 调用方契约:
+//   - voice (第 2 参数) = 对外 voice 名(req.Voice),用于过滤 Channel.Voices 白名单
+//   - template.VoiceKey 必须是上游 speaker ID,已由 controller 解析 voices 表填好
+//   - router 不修改 template 任何字段,只换 Credentials(账号身份)
 func (r *Router) SelectAndSynthesize(
 	ctx context.Context,
 	voice string,
@@ -162,11 +167,9 @@ func (r *Router) SelectAndSynthesize(
 		}
 
 		req := ch.BuildRequest(template)
-		// voice 字段:把请求级 voice 同步到 channel 的 VoiceKey(供 provider 拿上游音色 ID 用)
-		// 这是 Router 唯一会"覆盖"请求字段的地方;其余(Text/Format/Speed)由 controller 填好。
-		// 注意:Channel 不改 voice,这里只为 Synthesize 拿正确 VoiceKey;
-		// 多次重试时同一个 voice,VoiceKey 始终一致。
-		req.VoiceKey = voice
+		// 不动 template.VoiceKey:它由 controller 填好,必须是上游 speaker ID
+		// (e.g. "BV001_streaming"),不能是 OpenAI 对外 voice 名(否则上游查不到
+		// 音色 → 55000000)。router 只换"账号身份"(Credentials),其它字段透传。
 
 		result, err := prov.Synthesize(ctx, req, mtr)
 		if err == nil {
