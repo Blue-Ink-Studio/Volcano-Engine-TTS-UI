@@ -33,6 +33,12 @@ var adminSettingsHTML []byte
 //go:embed admin-channels.html
 var adminChannelsHTML []byte
 
+//go:embed admin-users.html
+var adminUsersHTML []byte
+
+//go:embed admin-user.html
+var adminUserHTML []byte
+
 //go:embed admin.css
 var adminCSS []byte
 
@@ -93,6 +99,9 @@ func Setup() *mux.Router {
 	r.Handle("/dashboard", htmlAwareAdmin(serveAdmin(adminHTML))).Methods("GET")
 	r.Handle("/dashboard/voices", htmlAwareAdmin(serveAdmin(adminVoicesHTML))).Methods("GET")
 	r.Handle("/dashboard/channels", htmlAwareAdmin(serveAdmin(adminChannelsHTML))).Methods("GET")
+	// 阶段 3b:多用户管理(列表页 + 详情页?id=N)
+	r.Handle("/dashboard/users", htmlAwareAdmin(serveAdmin(adminUsersHTML))).Methods("GET")
+	r.Handle("/dashboard/user", htmlAwareAdmin(serveAdmin(adminUserHTML))).Methods("GET")
 	r.Handle("/dashboard/settings", htmlAwareAdmin(serveAdmin(adminSettingsHTML))).Methods("GET")
 	r.Handle("/dashboard/status", htmlAwareAdmin(serveAdmin(dashboardHTML))).Methods("GET")
 	// 登录页无数据,保持公开(否则无法登录)

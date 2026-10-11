@@ -1,0 +1,461 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>火山 TTS · 用户详情</title>
+    <script>try{var t=localStorage.getItem('ttsTheme')||'auto',d=t==='auto'?(matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light'):t;document.documentElement.setAttribute('data-theme',d)}catch(e){}</script>
+    <script src="https://cdn.bootcdn.net/ajax/libs/vue/3.4.21/vue.global.prod.js"></script>
+    <script src="https://cdn.bootcdn.net/ajax/libs/axios/1.6.7/axios.min.js"></script>
+    <link rel="stylesheet" href="/dashboard/admin.css">
+</head>
+<body>
+    <div id="app">
+        <div class="app-shell">
+            <aside id="admin-sidebar"></aside>
+
+            <main class="main" v-if="user">
+                <header class="page-head">
+                    <div>
+                        <a href="/dashboard/users" class="back-link">← 返回用户列表</a>
+                        <h1 class="page-title">{{ user.name }}
+                            <span class="pill" :class="statusClass(user.status)" style="margin-left:8px; vertical-align: middle;">
+                                <span class="pill-dot"></span>{{ statusText(user.status) }}
+                            </span>
+                        </h1>
+                        <p class="page-sub">#{{ user.id }} · 已用额度 {{ user.used_quota }} · 创建于 {{ fmt(user.created_at) }}</p>
+                    </div>
+                    <div class="page-actions">
+                        <button class="btn" @click="editUser">编辑</button>
+                        <button class="btn btn-danger-ghost" @click="removeUser" v-if="user.status !== 3">删除</button>
+                    </div>
+                </header>
+
+                <div v-if="actionErr" class="alert alert-danger">
+                    <span class="alert-icon">⚠</span>
+                    <div class="alert-body">
+                        <div class="alert-title">操作失败</div>
+                        <div class="alert-desc">{{ actionErr }}</div>
+                    </div>
+                </div>
+
+                <!-- 用量统计 -->
+                <div class="stat-grid">
+                    <div class="stat-card">
+                        <div class="stat-top"><span class="stat-label">合成字符数</span></div>
+                        <div class="stat-value">{{ totals.characters || 0 }}<span class="stat-unit">字符</span></div>
+                        <div class="stat-foot">仅成功合成的字符数（rune）</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-top"><span class="stat-label">音频时长</span></div>
+                        <div class="stat-value">{{ (totals.audio_ms || 0) / 1000 }}<span class="stat-unit">秒</span></div>
+                        <div class="stat-foot">成功合成输出总时长</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-top"><span class="stat-label">输出流量</span></div>
+                        <div class="stat-value">{{ fmtBytes(totals.audio_bytes || 0) }}</div>
+                        <div class="stat-foot">成功合成输出总字节</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-top"><span class="stat-label">消耗额度</span></div>
+                        <div class="stat-value">{{ totals.actual_quota || 0 }}<span class="stat-unit">额度</span></div>
+                        <div class="stat-foot">实际扣减（预扣/结算后的净值）</div>
+                    </div>
+                </div>
+
+                <!-- 用量趋势(按天聚合字符数) -->
+                <div class="data-card" v-if="chartBars.length">
+                    <div class="card-head">
+                        <div class="card-title">用量趋势（按天，字符数）</div>
+                    </div>
+                    <div class="chart">
+                        <div v-for="b in chartBars" :key="b.label" class="chart-col">
+                            <div class="chart-bar-wrap">
+                                <div class="chart-bar" :style="{height: b.h + '%'}" :title="b.label + ': ' + b.v + ' 字符'"></div>
+                            </div>
+                            <div class="chart-label">{{ b.label }}</div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- 令牌管理 -->
+                <div class="data-card">
+                    <div class="card-head">
+                        <div class="card-title">令牌（{{ tokens.length }}）</div>
+                        <button class="btn btn-primary btn-sm" @click="openTokenCreate">+ 发令牌</button>
+                    </div>
+                    <table class="data-table" v-if="tokens.length">
+                        <thead>
+                            <tr>
+                                <th>名称</th>
+                                <th>Key</th>
+                                <th>剩余额度</th>
+                                <th>已用</th>
+                                <th>类型</th>
+                                <th>状态</th>
+                                <th class="th-actions">操作</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr v-for="t in tokens" :key="t.id">
+                                <td><div class="cell-name">{{ t.name }}</div><div class="cell-sub">#{{ t.id }}</div></td>
+                                <td><span class="cell-mono">{{ t.key_prefix }}…</span></td>
+                                <td><span class="cell-mono">{{ t.unlimited ? '∞' : t.remain_quota }}</span></td>
+                                <td><span class="cell-mono">{{ t.used_quota }}</span></td>
+                                <td><span class="tag" :class="t.unlimited ? 'tag-accent' : ''">{{ t.unlimited ? '不限' : '限额' }}</span></td>
+                                <td>
+                                    <span class="pill" :class="t.status === 1 ? 'pill-success' : 'pill-warning'">
+                                        <span class="pill-dot"></span>{{ t.status === 1 ? '启用' : '停用' }}
+                                    </span>
+                                </td>
+                                <td class="th-actions">
+                                    <div class="td-actions">
+                                        <label class="switch" :title="t.status === 1 ? '点击停用' : '点击启用'">
+                                            <input type="checkbox" :checked="t.status === 1" @change="toggleToken(t)">
+                                            <span class="switch-track"></span>
+                                        </label>
+                                        <button class="btn btn-sm" @click="openTokenEdit(t)">编辑</button>
+                                        <button class="btn btn-sm btn-danger-ghost" @click="removeToken(t)">删除</button>
+                                    </div>
+                                </td>
+                            </tr>
+                        </tbody>
+                    </table>
+                    <div v-else class="empty">
+                        <div class="empty-icon">🔑</div>
+                        <div class="empty-title">还没有令牌</div>
+                        <div class="empty-desc">点击右上角「+ 发令牌」生成一个 API Key<br>令牌额度独立计，用户按令牌聚合用量</div>
+                        <button class="btn btn-primary" @click="openTokenCreate">+ 发令牌</button>
+                    </div>
+                </div>
+
+                <!-- 用量流水 -->
+                <div class="data-card">
+                    <div class="card-head">
+                        <div class="card-title">调用流水（最近 {{ usageRows.length }} 条）</div>
+                    </div>
+                    <table class="data-table" v-if="usageRows.length">
+                        <thead>
+                            <tr>
+                                <th>时间</th>
+                                <th>字符</th>
+                                <th>音频</th>
+                                <th>流量</th>
+                                <th>预扣/实际</th>
+                                <th>渠道</th>
+                                <th>状态</th>
+                                <th>ReqID</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr v-for="u in usageRows" :key="u.id">
+                                <td><span class="text-mute">{{ fmt(u.created_at) }}</span></td>
+                                <td><span class="cell-mono">{{ u.characters }}</span></td>
+                                <td><span class="cell-mono">{{ u.audio_ms ? (u.audio_ms/1000).toFixed(2) + 's' : '—' }}</span></td>
+                                <td><span class="cell-mono">{{ fmtBytes(u.audio_bytes) }}</span></td>
+                                <td><span class="cell-mono">{{ u.pre_consumed }}/{{ u.actual_quota }}</span></td>
+                                <td><span class="cell-mono">{{ u.channel_id ?? '—' }}</span></td>
+                                <td>
+                                    <span class="pill" :class="u.status === 1 ? 'pill-success' : 'pill-danger'">
+                                        <span class="pill-dot"></span>{{ u.status === 1 ? '结算' : '退款' }}
+                                    </span>
+                                </td>
+                                <td><span class="cell-mono cell-truncate" :title="u.request_id">{{ u.request_id }}</span></td>
+                            </tr>
+                        </tbody>
+                    </table>
+                    <div v-else class="empty">
+                        <div class="empty-icon">▤</div>
+                        <div class="empty-title">暂无调用记录</div>
+                        <div class="empty-desc">该用户还没有成功的合成调用</div>
+                    </div>
+                </div>
+            </main>
+
+            <main class="main" v-else>
+                <div class="empty" style="margin-top: 80px;">
+                    <div class="empty-icon">☷</div>
+                    <div class="empty-title">{{ loadState }}</div>
+                </div>
+            </main>
+        </div>
+
+        <!-- 编辑用户 modal -->
+        <teleport to="body">
+            <transition name="modal">
+                <div v-if="showUserModal" class="modal-backdrop" @click.self="closeUserModal">
+                    <div class="modal" @click.stop>
+                        <div class="modal-head">
+                            <h2>编辑用户</h2>
+                            <button class="btn-icon" @click="closeUserModal" title="关闭" style="flex: 0; padding: 4px 10px;">×</button>
+                        </div>
+                        <div class="modal-body">
+                            <div class="field">
+                                <label>用户名</label>
+                                <input v-model="userForm.name">
+                            </div>
+                            <div class="field">
+                                <label>状态</label>
+                                <select v-model.number="userForm.status">
+                                    <option :value="1">启用</option>
+                                    <option :value="2">停用</option>
+                                </select>
+                            </div>
+                            <div v-if="modalErr" class="alert alert-danger" style="margin-top: 14px;">
+                                <span class="alert-icon">⚠</span>
+                                <div class="alert-body"><div class="alert-desc">{{ modalErr }}</div></div>
+                            </div>
+                        </div>
+                        <div class="modal-foot">
+                            <button class="btn" @click="closeUserModal">取消</button>
+                            <button class="btn btn-primary" @click="submitUser" :disabled="submitting">{{ submitting ? '保存中...' : '保存' }}</button>
+                        </div>
+                    </div>
+                </div>
+            </transition>
+        </teleport>
+
+        <!-- 发令牌 modal(创建后展示明文 key 一次) -->
+        <teleport to="body">
+            <transition name="modal">
+                <div v-if="showTokenModal" class="modal-backdrop" @click.self="closeTokenModal">
+                    <div class="modal" @click.stop>
+                        <div class="modal-head">
+                            <h2>{{ tokenCreated ? '令牌已创建' : (tokenEditing ? '编辑令牌' : '发令牌') }}</h2>
+                            <button class="btn-icon" @click="closeTokenModal" title="关闭" style="flex: 0; padding: 4px 10px;">×</button>
+                        </div>
+                        <div class="modal-body">
+                            <!-- 创建成功:仅一次展示明文 key -->
+                            <template v-if="tokenCreated">
+                                <div class="alert alert-success">
+                                    <div class="alert-title">⚠ 请立即保存下面的 Key —— 只会显示这一次</div>
+                                    <div class="alert-desc">刷新页面后无法再次查看，只能重新发一个令牌</div>
+                                </div>
+                                <div class="key-reveal mono">
+                                    <span>{{ createdKey }}</span>
+                                    <button class="btn btn-sm" @click="copyKey" style="margin-left: auto;">复制</button>
+                                </div>
+                            </template>
+                            <!-- 创建/编辑表单 -->
+                            <template v-else>
+                                <div class="field">
+                                    <label>令牌名称 <span class="req">*</span></label>
+                                    <input v-model="tokenForm.name" placeholder="如 prod / test / 某业务线">
+                                </div>
+                                <div class="field">
+                                    <label class="checkbox">
+                                        <input type="checkbox" v-model="tokenForm.unlimited">
+                                        <span>不限额度</span>
+                                    </label>
+                                    <div class="hint">不限额令牌不校验额度、不计入额度消耗（适合内部/测试）</div>
+                                </div>
+                                <div class="field" v-if="!tokenForm.unlimited">
+                                    <label>初始额度 <span class="req">*</span></label>
+                                    <input v-model.number="tokenForm.quota" type="number" min="0" placeholder="如 10000">
+                                    <div class="hint">{{ tokenEditing ? '将令牌剩余额度设为该值（绝对值覆盖）' : '令牌的初始剩余额度，1 字符 ≈ 1 额度' }}</div>
+                                </div>
+                                <div class="field" v-if="tokenEditing">
+                                    <label>状态</label>
+                                    <select v-model.number="tokenForm.status">
+                                        <option :value="1">启用</option>
+                                        <option :value="2">停用</option>
+                                    </select>
+                                </div>
+                                <div v-if="modalErr" class="alert alert-danger" style="margin-top: 14px;">
+                                    <span class="alert-icon">⚠</span>
+                                    <div class="alert-body"><div class="alert-desc">{{ modalErr }}</div></div>
+                                </div>
+                            </template>
+                        </div>
+                        <div class="modal-foot">
+                            <template v-if="tokenCreated">
+                                <button class="btn btn-primary" @click="closeTokenModal">完成</button>
+                            </template>
+                            <template v-else>
+                                <button class="btn" @click="closeTokenModal">取消</button>
+                                <button class="btn btn-primary" @click="submitToken" :disabled="submitting">{{ submitting ? '提交中...' : tokenEditing ? '保存' : '创建' }}</button>
+                            </template>
+                        </div>
+                    </div>
+                </div>
+            </transition>
+        </teleport>
+    </div>
+
+    <script src="/dashboard/admin-shell.js"></script>
+    <script>
+    const { createApp, ref, onMounted } = Vue;
+    const { http, getKey, toast, mountShell, formatStart, formatBytes } = window.admin;
+
+    createApp({
+        setup() {
+            const uid = Number(new URLSearchParams(location.search).get('id')) || 0;
+            const overview = ref({});
+            const user = ref(null);
+            const tokens = ref([]);
+            const usageRows = ref([]);
+            const totals = ref({});
+            const chartBars = ref([]);
+            const actionErr = ref('');
+            const loadState = ref('加载中...');
+
+            const statusText = (s) => s === 1 ? '启用' : s === 2 ? '停用' : s === 3 ? '已删除' : '未知';
+            const statusClass = (s) => s === 1 ? 'pill-success' : s === 2 ? 'pill-warning' : 'pill-mute';
+            const fmt = (v) => formatStart(v);
+            const fmtBytes = (n) => formatBytes(n);
+
+            // 按天聚合字符数 → CSS 柱状图
+            const buildChart = (rows) => {
+                const map = {};
+                rows.forEach(u => {
+                    if (u.status !== 1) return; // 只算成功结算
+                    const d = (u.created_at || '').slice(0, 10);
+                    if (!d) return;
+                    map[d] = (map[d] || 0) + (u.characters || 0);
+                });
+                const days = Object.keys(map).sort();
+                const max = Math.max(1, ...days.map(d => map[d]));
+                const bars = days.slice(-30).map(d => ({
+                    label: d.slice(5), // MM-DD
+                    v: map[d],
+                    h: Math.max(4, Math.round((map[d] / max) * 100)),
+                }));
+                chartBars.value = bars;
+            };
+
+            const loadAll = async () => {
+                if (!uid) { loadState.value = '无效的用户 ID'; return; }
+                try {
+                    // 并行: 用户详情 + 用量(含图表用 100 条) + 令牌
+                    const [ur, usageR, tokR] = await Promise.all([
+                        http.get(`/admin/users/${uid}`),
+                        http.get(`/admin/users/${uid}/usage`, { params: { limit: 100, offset: 0 } }),
+                        http.get(`/admin/users/${uid}/tokens`),
+                    ]);
+                    user.value = ur.data;
+                    totals.value = usageR.data.totals || {};
+                    usageRows.value = usageR.data.usage || [];
+                    buildChart(usageR.data.usage || []);
+                    tokens.value = tokR.data.items || [];
+                } catch (e) {
+                    if (e.response?.status === 404) loadState.value = '用户不存在或已删除';
+                    else { loadState.value = '加载失败'; actionErr.value = e.response?.data?.error?.message || e.message; }
+                }
+            };
+
+            // ---- 编辑用户 ----
+            const showUserModal = ref(false);
+            const userForm = ref({ name: '', status: 1 });
+            const modalErr = ref('');
+            const submitting = ref(false);
+            const editUser = () => { userForm.value = { name: user.value.name, status: user.value.status === 3 ? 1 : user.value.status }; modalErr.value = ''; showUserModal.value = true; };
+            const closeUserModal = () => { showUserModal.value = false; };
+            const submitUser = async () => {
+                modalErr.value = ''; submitting.value = true;
+                try {
+                    const patch = {};
+                    if (userForm.value.name.trim()) patch.name = userForm.value.name.trim();
+                    if (userForm.value.status) patch.status = userForm.value.status;
+                    await http.patch(`/admin/users/${uid}`, patch);
+                    toast('ok', '用户已更新');
+                    showUserModal.value = false;
+                    user.value = (await http.get(`/admin/users/${uid}`)).data;
+                } catch (e) { modalErr.value = e.response?.data?.error?.message || e.message; }
+                finally { submitting.value = false; }
+            };
+            const removeUser = async () => {
+                if (!confirm(`确定删除用户 "${user.value.name}" 吗？\n其调用日志与用量流水仍保留，仅标记删除。`)) return;
+                try {
+                    await http.delete(`/admin/users/${uid}`);
+                    toast('ok', '用户已删除');
+                    location.href = '/dashboard/users';
+                } catch (e) { actionErr.value = e.response?.data?.error?.message || e.message; }
+            };
+
+            // ---- 令牌 ----
+            const showTokenModal = ref(false);
+            const tokenEditing = ref(false);
+            const tokenEditingId = ref(0);
+            const tokenCreated = ref(false);
+            const createdKey = ref('');
+            const tokenForm = ref({ name: '', unlimited: false, quota: 0, status: 1 });
+
+            const openTokenCreate = () => {
+                tokenEditing.value = false; tokenEditingId.value = 0; tokenCreated.value = false;
+                tokenForm.value = { name: '', unlimited: false, quota: 0, status: 1 };
+                modalErr.value = ''; showTokenModal.value = true;
+            };
+            const openTokenEdit = (t) => {
+                tokenEditing.value = true; tokenEditingId.value = t.id; tokenCreated.value = false;
+                tokenForm.value = { name: t.name, unlimited: t.unlimited, quota: t.remain_quota, status: t.status };
+                modalErr.value = ''; showTokenModal.value = true;
+            };
+            const closeTokenModal = () => { showTokenModal.value = false; tokenCreated.value = false; };
+
+            const submitToken = async () => {
+                modalErr.value = '';
+                if (!tokenForm.value.name.trim()) { modalErr.value = '请填写令牌名称'; return; }
+                if (!tokenEditing.value && !tokenForm.value.unlimited && (tokenForm.value.quota === '' || tokenForm.value.quota < 0)) { modalErr.value = '请填写非负初始额度'; return; }
+                submitting.value = true;
+                try {
+                    if (tokenEditing.value) {
+                        const patch = {};
+                        if (tokenForm.value.name.trim()) patch.name = tokenForm.value.name.trim();
+                        patch.unlimited = !!tokenForm.value.unlimited;
+                        if (tokenForm.value.status) patch.status = tokenForm.value.status;
+                        if (!tokenForm.value.unlimited) patch.quota = Number(tokenForm.value.quota) || 0;
+                        await http.patch(`/admin/tokens/${tokenEditingId.value}`, patch);
+                        toast('ok', '令牌已更新');
+                        showTokenModal.value = false;
+                    } else {
+                        const body = { name: tokenForm.value.name.trim(), unlimited: !!tokenForm.value.unlimited };
+                        if (!tokenForm.value.unlimited) body.quota = Number(tokenForm.value.quota) || 0;
+                        const r = await http.post(`/admin/users/${uid}/tokens`, body);
+                        // 明文 key 仅此一次
+                        createdKey.value = r.data.key;
+                        tokenCreated.value = true;
+                    }
+                    await loadTokens();
+                } catch (e) { modalErr.value = e.response?.data?.error?.message || e.message; }
+                finally { submitting.value = false; }
+            };
+
+            const copyKey = async () => {
+                try { await navigator.clipboard.writeText(createdKey.value); toast('ok', 'Key 已复制'); }
+                catch (e) { toast('err', '复制失败，请手动选中复制'); }
+            };
+
+            const loadTokens = async () => {
+                try { tokens.value = (await http.get(`/admin/users/${uid}/tokens`)).data.items || []; }
+                catch (e) { actionErr.value = e.response?.data?.error?.message || e.message; }
+            };
+            const toggleToken = async (t) => {
+                const target = t.status === 1 ? 2 : 1;
+                try { await http.patch(`/admin/tokens/${t.id}`, { status: target }); await loadTokens(); toast('ok', target === 1 ? '令牌已启用' : '令牌已停用'); }
+                catch (e) { actionErr.value = e.response?.data?.error?.message || e.message; }
+            };
+            const removeToken = async (t) => {
+                if (!confirm(`确定删除令牌 "${t.name}"（${t.key_prefix}…）吗？\n其调用日志保留，但该 Key 将立即失效。`)) return;
+                try { await http.delete(`/admin/tokens/${t.id}`); await loadTokens(); toast('ok', '令牌已删除'); }
+                catch (e) { actionErr.value = e.response?.data?.error?.message || e.message; }
+            };
+
+            onMounted(() => {
+                if (!getKey()) { location.href = '/dashboard/login'; return; }
+                mountShell({ activeNav: 'users', overview: overview.value, onReload: loadAll });
+                loadAll();
+            });
+
+            return {
+                user, tokens, usageRows, totals, chartBars, actionErr, loadState,
+                statusText, statusClass, fmt, fmtBytes,
+                showUserModal, userForm, modalErr, submitting, editUser, closeUserModal, submitUser, removeUser,
+                showTokenModal, tokenEditing, tokenCreated, createdKey, tokenForm,
+                openTokenCreate, openTokenEdit, closeTokenModal, submitToken, copyKey,
+                toggleToken, removeToken,
+            };
+        },
+    }).mount('#app');
+    </script>
+</body>
+</html>

@@ -1,0 +1,274 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>火山 TTS · 用户管理</title>
+    <script>try{var t=localStorage.getItem('ttsTheme')||'auto',d=t==='auto'?(matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light'):t;document.documentElement.setAttribute('data-theme',d)}catch(e){}</script>
+    <script src="https://cdn.bootcdn.net/ajax/libs/vue/3.4.21/vue.global.prod.js"></script>
+    <script src="https://cdn.bootcdn.net/ajax/libs/axios/1.6.7/axios.min.js"></script>
+    <link rel="stylesheet" href="/dashboard/admin.css">
+</head>
+<body>
+    <div id="app">
+        <div class="app-shell">
+            <aside id="admin-sidebar"></aside>
+
+            <main class="main">
+                <header class="page-head">
+                    <div>
+                        <h1 class="page-title">用户管理</h1>
+                        <p class="page-sub">每个用户下可发多个令牌；额度按令牌计，用量按用户聚合</p>
+                    </div>
+                    <div class="page-actions">
+                        <button class="btn btn-primary" @click="openCreate">+ 新增用户</button>
+                    </div>
+                </header>
+
+                <div class="toolbar">
+                    <div class="toolbar-left">
+                        <div class="search">
+                            <span class="search-icon">⌕</span>
+                            <input v-model="search" placeholder="搜索用户名..." @input="onSearch">
+                        </div>
+                    </div>
+                    <div class="toolbar-right">
+                        <span v-if="total">共 {{ total }} 个用户</span>
+                        <span v-else-if="loaded">共 0 个用户</span>
+                    </div>
+                </div>
+
+                <div v-if="actionErr" class="alert alert-danger">
+                    <span class="alert-icon">⚠</span>
+                    <div class="alert-body">
+                        <div class="alert-title">操作失败</div>
+                        <div class="alert-desc">{{ actionErr }}</div>
+                    </div>
+                </div>
+
+                <div class="data-card">
+                    <table class="data-table" v-if="items.length">
+                        <thead>
+                            <tr>
+                                <th>用户</th>
+                                <th>状态</th>
+                                <th>已用额度</th>
+                                <th>令牌数</th>
+                                <th>创建时间</th>
+                                <th class="th-actions">操作</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr v-for="u in items" :key="u.id">
+                                <td>
+                                    <div class="cell-name">{{ u.name }}</div>
+                                    <div class="cell-sub">#{{ u.id }}</div>
+                                </td>
+                                <td>
+                                    <span class="pill" :class="statusClass(u.status)">
+                                        <span class="pill-dot"></span>{{ statusText(u.status) }}
+                                    </span>
+                                </td>
+                                <td><span class="cell-mono">{{ u.used_quota }}</span></td>
+                                <td><span class="cell-mono">{{ u.token_count }}</span></td>
+                                <td><span class="text-mute">{{ fmt(u.created_at) }}</span></td>
+                                <td class="th-actions">
+                                    <div class="td-actions">
+                                        <button class="btn btn-sm" @click="view(u)">详情</button>
+                                        <button class="btn btn-sm" @click="openEdit(u)">编辑</button>
+                                        <button class="btn btn-sm btn-danger-ghost" @click="remove(u)" v-if="u.status !== 3">删除</button>
+                                    </div>
+                                </td>
+                            </tr>
+                        </tbody>
+                    </table>
+
+                    <div v-else-if="loaded && total === 0" class="empty">
+                        <div class="empty-icon">☷</div>
+                        <div class="empty-title">还没有用户</div>
+                        <div class="empty-desc">点击右上角「+ 新增用户」创建第一个用户，再为其发放令牌<br>（未手动建用户时，旧 OPENAI_TTS_API_KEY 会自动归入 default 用户）</div>
+                        <button class="btn btn-primary" @click="openCreate">+ 新增用户</button>
+                    </div>
+
+                    <div v-else-if="loaded" class="empty">
+                        <div class="empty-icon">⌕</div>
+                        <div class="empty-title">没有匹配的用户</div>
+                        <div class="empty-desc">尝试调整搜索词</div>
+                        <button class="btn" @click="search=''; applySearch()">清除搜索</button>
+                    </div>
+                </div>
+
+                <!-- 分页 -->
+                <div class="pager" v-if="total > limit">
+                    <button class="btn btn-sm" :disabled="offset <= 0" @click="goPage(offset - limit)">← 上一页</button>
+                    <span class="pager-info">第 {{ offset + 1 }}-{{ Math.min(offset + limit, total) }} / 共 {{ total }} 条</span>
+                    <button class="btn btn-sm" :disabled="offset + limit >= total" @click="goPage(offset + limit)">下一页 →</button>
+                </div>
+            </main>
+        </div>
+
+        <!-- Create/Edit modal -->
+        <teleport to="body">
+            <transition name="modal">
+                <div v-if="showModal" class="modal-backdrop" @click.self="closeModal">
+                    <div class="modal" @click.stop>
+                        <div class="modal-head">
+                            <h2>{{ editing ? '编辑用户' : '新增用户' }}</h2>
+                            <button class="btn-icon" @click="closeModal" title="关闭" style="flex: 0; padding: 4px 10px;">×</button>
+                        </div>
+                        <div class="modal-body">
+                            <div class="field">
+                                <label>用户名 <span class="req">*</span></label>
+                                <input v-model="form.name" placeholder="如 alice / team-billing" :disabled="editing">
+                                <div v-if="editing" class="hint">改名后需保持唯一；与其它用户重名会失败</div>
+                            </div>
+                            <div class="field">
+                                <label>状态</label>
+                                <select v-model.number="form.status">
+                                    <option :value="1">启用</option>
+                                    <option :value="2">停用</option>
+                                </select>
+                                <div class="hint">停用后该用户所有令牌将拒绝调用（403 user_disabled）</div>
+                            </div>
+                            <div v-if="modalErr" class="alert alert-danger" style="margin-top: 14px;">
+                                <span class="alert-icon">⚠</span>
+                                <div class="alert-body">
+                                    <div class="alert-title">提交失败</div>
+                                    <div class="alert-desc">{{ modalErr }}</div>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="modal-foot">
+                            <button class="btn" @click="closeModal">取消</button>
+                            <button class="btn btn-primary" @click="submit" :disabled="submitting">{{ submitting ? '提交中...' : editing ? '保存' : '创建' }}</button>
+                        </div>
+                    </div>
+                </div>
+            </transition>
+        </teleport>
+    </div>
+
+    <script src="/dashboard/admin-shell.js"></script>
+    <script>
+    const { createApp, ref, computed, onMounted } = Vue;
+    const { http, getKey, toast, mountShell, formatStart } = window.admin;
+    const LIMIT = 20;
+
+    createApp({
+        setup() {
+            const overview = ref({});
+            const items = ref([]);
+            const total = ref(0);
+            const offset = ref(0);
+            const limit = LIMIT;
+            const loaded = ref(false);
+            const actionErr = ref('');
+            const search = ref('');
+
+            const statusText = (s) => s === 1 ? '启用' : s === 2 ? '停用' : s === 3 ? '已删除' : '未知';
+            const statusClass = (s) => s === 1 ? 'pill-success' : s === 2 ? 'pill-warning' : 'pill-mute';
+            const fmt = (v) => formatStart(v);
+
+            let searchTimer = null;
+            const onSearch = () => {
+                clearTimeout(searchTimer);
+                searchTimer = setTimeout(() => { offset.value = 0; loadUsers(); }, 350);
+            };
+
+            const loadUsers = async () => {
+                try {
+                    const r = await http.get('/admin/users', { params: { limit, offset: offset.value, search: search.value.trim() } });
+                    items.value = r.data.items || [];
+                    total.value = r.data.total || 0;
+                } catch (e) {
+                    actionErr.value = '加载用户失败: ' + (e.response?.data?.error?.message || e.message);
+                } finally { loaded.value = true; }
+            };
+            const goPage = (o) => { offset.value = Math.max(0, o); loadUsers(); };
+            const reloadAll = () => { loadOverview(); loadUsers(); };
+
+            const loadOverview = async () => {
+                try { overview.value = (await http.get('/admin/overview')).data; }
+                catch (e) { /* 概览非关键 */ }
+            };
+
+            // ---- Create/Edit modal ----
+            const showModal = ref(false);
+            const editing = ref(false);
+            const editingId = ref(0);
+            const submitting = ref(false);
+            const modalErr = ref('');
+            const form = ref({ name: '', status: 1 });
+            const openCreate = () => {
+                editing.value = false; editingId.value = 0;
+                form.value = { name: '', status: 1 };
+                modalErr.value = ''; showModal.value = true;
+            };
+            const openEdit = (u) => {
+                editing.value = true; editingId.value = u.id;
+                form.value = { name: u.name, status: u.status === 3 ? 1 : u.status };
+                modalErr.value = ''; showModal.value = true;
+            };
+            const closeModal = () => { showModal.value = false; };
+
+            const submit = async () => {
+                modalErr.value = '';
+                if (!form.value.name.trim()) { modalErr.value = '请填写用户名'; return; }
+                submitting.value = true;
+                try {
+                    if (editing.value) {
+                        const patch = {};
+                        if (form.value.name.trim() !== '') patch.name = form.value.name.trim();
+                        if (form.value.status) patch.status = form.value.status;
+                        await http.patch(`/admin/users/${editingId.value}`, patch);
+                        toast('ok', '用户已更新');
+                    } else {
+                        await http.post('/admin/users', { name: form.value.name.trim(), status: form.value.status });
+                        toast('ok', '用户已创建');
+                    }
+                    showModal.value = false;
+                    await loadUsers();
+                } catch (e) {
+                    modalErr.value = e.response?.data?.error?.message || e.message;
+                } finally { submitting.value = false; }
+            };
+
+            // ---- 跳详情 ----
+            const view = (u) => { location.href = `/dashboard/user?id=${u.id}`; };
+
+            // ---- 删除(软删) ----
+            const remove = async (u) => {
+                if (!confirm(`确定删除用户 "${u.name}" 吗？\n删除后其调用日志与用量流水仍保留（仅标记删除，不可再登录/调用）。`)) return;
+                try {
+                    await http.delete(`/admin/users/${u.id}`);
+                    toast('ok', '用户已删除');
+                    await loadUsers();
+                } catch (e) {
+                    const msg = e.response?.data?.error?.message || e.message;
+                    actionErr.value = '删除失败: ' + msg;
+                    toast('err', msg);
+                }
+            };
+
+            onMounted(() => {
+                if (!getKey()) { location.href = '/dashboard/login'; return; }
+                mountShell({
+                    activeNav: 'users',
+                    overview: overview.value,
+                    userCount: total.value,
+                    onReload: reloadAll,
+                });
+                reloadAll();
+            });
+
+            return {
+                overview, items, total, offset, limit, loaded, actionErr, search,
+                statusText, statusClass, fmt, onSearch, goPage,
+                showModal, editing, form, submitting, modalErr,
+                openCreate, openEdit, closeModal, submit, view, remove, reloadAll,
+            };
+        },
+    }).mount('#app');
+    </script>
+</body>
+</html>

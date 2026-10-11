@@ -113,7 +113,7 @@
 
     // === Sidebar 渲染(每个 admin-* 页面共用)===
     // 占位符 <aside id="admin-sidebar"></aside> 由 shell 填入。
-    // options: { activeNav, overview, voiceCount, channelCount, corsConfigured, onReload, onLogout }
+    // options: { activeNav, overview, voiceCount, channelCount, userCount, corsConfigured, onReload, onLogout }
     const mountShell = (options = {}) => {
         const slot = document.getElementById('admin-sidebar');
         if (!slot) return {};
@@ -121,6 +121,7 @@
         const ov = options.overview || {};
         const voiceCount = options.voiceCount != null ? options.voiceCount : '';
         const channelCount = options.channelCount != null ? options.channelCount : '';
+        const userCount = options.userCount != null ? options.userCount : '';
         const corsConfigured = !!options.corsConfigured;
         const themePref = getThemePref();
         slot.outerHTML = `
@@ -148,6 +149,10 @@
             <a class="nav-item${activeNav === 'channels' ? ' active' : ''}" href="/dashboard/channels">
                 <span class="nav-icon">⇄</span><span>渠道</span>
                 <span class="nav-badge">${channelCount}</span>
+            </a>
+            <a class="nav-item${activeNav === 'users' ? ' active' : ''}" href="/dashboard/users">
+                <span class="nav-icon">☷</span><span>用户</span>
+                <span class="nav-badge">${userCount}</span>
             </a>
             <a class="nav-item${activeNav === 'settings' ? ' active' : ''}" href="/dashboard/settings">
                 <span class="nav-icon">⚙</span><span>设置</span>

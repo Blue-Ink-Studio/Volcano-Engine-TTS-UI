@@ -514,3 +514,28 @@ code { font-family: ui-monospace, SFMono-Regular, monospace; font-size: 0.9em; b
 .flex { display: flex; align-items: center; gap: 8px; }
 .mt-8 { margin-top: 8px; }
 .mb-0 { margin-bottom: 0; }
+
+/* === 阶段 3b:多用户 UI 补充类 === */
+.back-link { display: inline-block; font-size: 12px; color: var(--text-mute); text-decoration: none; margin-bottom: 6px; }
+.back-link:hover { color: var(--accent); }
+.pager { display: flex; align-items: center; justify-content: center; gap: 12px; margin-top: 16px; padding-bottom: 8px; }
+.pager-info { font-size: 12px; color: var(--text-dim); }
+.cell-truncate { max-width: 120px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: inline-block; }
+.tag-accent { background: var(--accent-soft); color: var(--accent); border-color: rgba(10, 127, 176, 0.25); }
+.checkbox { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; color: var(--text); cursor: pointer; }
+.checkbox input { accent-color: var(--accent); }
+.key-reveal { display: flex; align-items: center; gap: 10px; background: var(--bg-elev); border: 1px solid var(--border); border-radius: var(--radius); padding: 12px 14px; margin-top: 12px; font-size: 13px; word-break: break-all; }
+.key-reveal span { flex: 1; }
+
+/* 用量趋势柱状图(纯 CSS,双主题自动适配) */
+.chart { display: flex; align-items: flex-end; gap: 6px; height: 170px; padding: 8px 4px 0; border-bottom: 1px solid var(--border); overflow-x: auto; }
+.chart-col { display: flex; flex-direction: column; align-items: center; flex: 1 1 0; min-width: 24px; height: 100%; }
+.chart-bar-wrap { flex: 1; width: 100%; display: flex; align-items: flex-end; justify-content: center; }
+.chart-bar { width: 70%; min-height: 2px; background: var(--accent); border-radius: 3px 3px 0 0; opacity: 0.9; }
+.chart-bar:hover { opacity: 1; background: var(--accent-hover); }
+.chart-label { font-size: 10px; color: var(--text-dim); margin-top: 6px; white-space: nowrap; }
+
+/* 成功提示(发令牌后的 Key 提醒) */
+.alert-success { background: var(--success-soft); border-color: rgba(23, 138, 79, 0.25); }
+.alert-success .alert-title { color: var(--success); }
+.alert-success .alert-desc { color: var(--text); }
