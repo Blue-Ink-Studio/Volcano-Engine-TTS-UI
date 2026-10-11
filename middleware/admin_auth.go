@@ -21,7 +21,7 @@ import (
 //     导致管理接口在"没配 key"的部署上完全裸奔,并让后续给 /metrics、/health
 //     套本中间件的加固形同虚设。启动期已由 main.go 做 fail-fast 校验。
 //   - Authorization 头 Bearer token 命中凭证列表 → 放行
-//   - 其它 → 401 + JSON {error: {code: 'admin_auth_failed'}}
+//   - 其它 → 401 + JSON {error: {code: 'admin_required'}}
 func RequireAdmin(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// 预检: 跨域/OPTIONS 直接放行(让浏览器能发 preflight)
@@ -71,10 +71,13 @@ func inAPIKeyList(token string, keys []string) bool {
 }
 
 // denyAdmin 写 401 + JSON 错误体,记录客户端 IP。
+//
+// code 字段用 "admin_required"(决策 #9),与业务 key 401 的 "invalid_api_key"
+// 区分,便于管理界面定位"用了错 key"。
 func denyAdmin(w http.ResponseWriter, r *http.Request) {
 	log.Printf("[admin_auth] 鉴权失败 - 路径=%s 客户端=%s", r.URL.Path, GetClientIP(r))
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.Header().Set("WWW-Authenticate", `Bearer realm="tts-admin"`)
 	w.WriteHeader(http.StatusUnauthorized)
-	_, _ = w.Write([]byte(`{"error":{"code":"admin_auth_failed","message":"unauthorized","type":"authentication_error"}}`))
+	_, _ = w.Write([]byte(`{"error":{"code":"admin_required","message":"admin key required","type":"authentication_error"}}`))
 }

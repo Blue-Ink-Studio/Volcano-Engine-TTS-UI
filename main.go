@@ -29,17 +29,6 @@ func ttsDBPath() string {
 	return "tts.db"
 }
 
-// countEnabled 统计启用 channel 数;main 启动摘要用。
-func countEnabled(chs []route.Channel) int {
-	n := 0
-	for _, c := range chs {
-		if c.Enabled() {
-			n++
-		}
-	}
-	return n
-}
-
 func main() {
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
 	log.SetPrefix("[TTS-Server] ")
@@ -73,29 +62,18 @@ func main() {
 		return nil
 	})
 
-	// 3.1) 阶段 1:多渠道路由器注入。
-	//   - 从 store 加载全部 channels(含 disabled,便于阶段 2 管理接口看全量);
-	//     router 内部筛 enabled
-	//   - channels 加载失败(如 credentials_json 损坏)→ 启动期 fail-fast,
-	//     避免一个错凭据把每次请求搞崩
+	// 3.1) 阶段 1/2:多渠道路由器注入。
+	//   - 严格版(决策 B):任一条 FromStoreChannel 错即 log.Fatalf,启动期 fail-fast
 	//   - 加载成功但列表为空 → 仍注入 router,但 router.Empty()=true,
 	//     controller 走"零渠道兜底",行为=阶段 0(向后兼容验收硬要求)
 	if st != nil {
-		chs, err := st.ChannelList(true)
+		routerChs, err := controller.LoadChannelsFromStoreStrict()
 		if err != nil {
 			log.Fatalf("FATAL: load channels failed: %v", err)
 		}
-		routerChs := make([]route.Channel, 0, len(chs))
-		for _, sc := range chs {
-			rc, convErr := route.FromStoreChannel(sc)
-			if convErr != nil {
-				log.Fatalf("FATAL: convert channel id=%d name=%s failed: %v", sc.ID, sc.Name, convErr)
-			}
-			routerChs = append(routerChs, rc)
-		}
 		controller.SetRouter(route.NewRouter(routerChs))
 		log.Printf("[main] 多渠道路由已注入: 共 %d 条 (enabled=%d)",
-			len(routerChs), countEnabled(routerChs))
+			len(routerChs), controller.CountEnabledChannels(routerChs))
 	}
 
 	// 4) M3: 从 store 加载运行时 TTS 配置(替代原来的 env-based InitTTSConfig)

@@ -65,9 +65,13 @@ type Request struct {
 // Credentials 承载上游鉴权与路由维度。
 // Scope 是厂商额外凭证/路由维度:火山 = resource_id;Azure = region;自建 = base_url。
 // 本包不解释 Scope 的内容,原样交给对应 provider。
+//
+// 阶段 2:加 json tag(api_key / scope)便于 controller 序列化/反序列化。
+// 注:JSON tag 只影响 json.Marshal/Unmarshal,Go 代码中字段名仍为大写
+// (APIKey / Scope),不会破坏 adapter/volcano/provider.go:96 之类的构造代码。
 type Credentials struct {
-	APIKey string
-	Scope  map[string]string
+	APIKey string            `json:"api_key"`
+	Scope  map[string]string `json:"scope,omitempty"`
 }
 
 // MetricsRecorder 是适配器向上报告埋点的接口。

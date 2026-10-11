@@ -168,6 +168,16 @@ func Setup() *mux.Router {
 	r.Handle("/api/settings/admin-key", middleware.RequireAdmin(http.HandlerFunc(controller.SettingsAdminKeyHandler))).Methods("PUT")
 	r.Handle("/api/settings/cors", middleware.RequireAdmin(http.HandlerFunc(controller.SettingsCORSHandler))).Methods("PUT")
 
+	// ===== 阶段 2:渠道管理接口(/api/admin/channels) =====
+	// 全部套 RequireAdmin(401 code=admin_required,决策 #9);handler 内只关心业务逻辑
+	r.Handle("/api/admin/channels", middleware.RequireAdmin(http.HandlerFunc(controller.ChannelsListHandler))).Methods("GET")
+	r.Handle("/api/admin/channels", middleware.RequireAdmin(http.HandlerFunc(controller.ChannelsCreateHandler))).Methods("POST")
+	r.Handle("/api/admin/channels/{id:[0-9]+}", middleware.RequireAdmin(http.HandlerFunc(controller.ChannelsGetHandler))).Methods("GET")
+	r.Handle("/api/admin/channels/{id:[0-9]+}", middleware.RequireAdmin(http.HandlerFunc(controller.ChannelsUpdateHandler))).Methods("PATCH")
+	r.Handle("/api/admin/channels/{id:[0-9]+}", middleware.RequireAdmin(http.HandlerFunc(controller.ChannelsDeleteHandler))).Methods("DELETE")
+	r.Handle("/api/admin/channels/{id:[0-9]+}/status", middleware.RequireAdmin(http.HandlerFunc(controller.ChannelsStatusHandler))).Methods("POST")
+	r.Handle("/api/admin/channels/{id:[0-9]+}/test", middleware.RequireAdmin(http.HandlerFunc(controller.ChannelsTestHandler))).Methods("POST")
+
 	// 业务路由
 	r.HandleFunc("/v1/audio/speech", controller.OpenaiTTSHandler).Methods("POST", "OPTIONS")
 

@@ -142,6 +142,110 @@ func (s *Store) ChannelSetStatus(id int64, status int) error {
 	return nil
 }
 
+// ChannelUpdate 部分更新渠道;所有字段都是 *T 指针,nil=不改,非 nil=改。
+//   - 校验:credentials_json(若改)必须是合法 JSON;weight(若改)必须 > 0;
+//     status(若改)必须 1 或 2
+//   - name(若改)由 UNIQUE 约束兜底 → ErrChannelDuplicate → 409
+//   - "自己改自己" (UPDATE 同一行 name 为原值) SQLite UNIQUE 行间比较不触发 → 200
+//   - SQLite 对"命中行但值未变" 的 UPDATE RowsAffected=1(不是 0),所以 affected_rows=0
+//     才是真 404,no-op UPDATE 不会误判
+//
+// 阶段 2 决策:#3 改 name 重名 409, #5 写操作前校验, #10 name 允许改
+type ChannelUpdate struct {
+	Name            *string
+	CredentialsJSON *string
+	Voices          *string
+	Priority        *int
+	Weight          *int
+	Status          *int
+	AutoBan         *bool
+}
+
+// ChannelUpdate 按字段部分更新;未命中 → ErrNotFound;name 重名 → ErrChannelDuplicate;
+// credentials_json 不合法 / weight ≤ 0 / status ∉ {1,2} → wrap ErrInvalid。
+// 空 patch(全部 nil)是合法的 noop → 返回 nil,rows_affected=0 但 id 存在也返 nil
+// (不报错,等效于"读+写回,值不变")。
+func (s *Store) ChannelUpdate(id int64, p ChannelUpdate) error {
+	// 1) 校验入参
+	if p.CredentialsJSON != nil {
+		*p.CredentialsJSON = strings.TrimSpace(*p.CredentialsJSON)
+		if !json.Valid([]byte(*p.CredentialsJSON)) {
+			return fmt.Errorf("%w: credentials_json is not valid JSON", ErrInvalid)
+		}
+	}
+	if p.Weight != nil && *p.Weight <= 0 {
+		return fmt.Errorf("%w: weight must be > 0", ErrInvalid)
+	}
+	if p.Status != nil && *p.Status != 1 && *p.Status != 2 {
+		return fmt.Errorf("%w: status must be 1 (enabled) or 2 (disabled)", ErrInvalid)
+	}
+	if p.Voices != nil {
+		v := normalizeVoicesCSV(*p.Voices)
+		p.Voices = &v
+	}
+
+	// 2) 动态构造 UPDATE —— 避免拼 SQL 字符串,改用 slice 占位符
+	//    (空 patch 时这里跳过 SQL,直接 200 noop)
+	sets := make([]string, 0, 7)
+	args := make([]any, 0, 8)
+	if p.Name != nil {
+		sets = append(sets, "name=?")
+		args = append(args, strings.TrimSpace(*p.Name))
+	}
+	if p.CredentialsJSON != nil {
+		sets = append(sets, "credentials_json=?")
+		args = append(args, *p.CredentialsJSON)
+	}
+	if p.Voices != nil {
+		sets = append(sets, "voices=?")
+		args = append(args, *p.Voices)
+	}
+	if p.Priority != nil {
+		sets = append(sets, "priority=?")
+		args = append(args, *p.Priority)
+	}
+	if p.Weight != nil {
+		sets = append(sets, "weight=?")
+		args = append(args, *p.Weight)
+	}
+	if p.Status != nil {
+		sets = append(sets, "status=?")
+		args = append(args, *p.Status)
+	}
+	if p.AutoBan != nil {
+		sets = append(sets, "auto_ban=?")
+		args = append(args, boolToInt(*p.AutoBan))
+	}
+	if len(sets) == 0 {
+		// 空 patch:合法 noop;但仍要确认 id 存在(否则 404)
+		// 用一次 SELECT 替代 UPDATE,免去 0 行 vs 1 行的歧义
+		var n int
+		if err := s.db.QueryRow(`SELECT 1 FROM channels WHERE id = ?`, id).Scan(&n); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return ErrNotFound
+			}
+			return fmt.Errorf("store: channel update noop check id=%d: %w", id, err)
+		}
+		return nil
+	}
+	sets = append(sets, "updated_at=datetime('now')")
+	args = append(args, id)
+
+	q := "UPDATE channels SET " + strings.Join(sets, ", ") + " WHERE id = ?"
+	res, err := s.db.Exec(q, args...)
+	if err != nil {
+		if isUniqueViolation(err) {
+			return ErrChannelDuplicate
+		}
+		return fmt.Errorf("store: channel update id=%d: %w", id, err)
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 // ChannelDelete 按 id 删;未命中返回 ErrNotFound。
 func (s *Store) ChannelDelete(id int64) error {
 	res, err := s.db.Exec(`DELETE FROM channels WHERE id = ?`, id)
