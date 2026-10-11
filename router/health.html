@@ -4,24 +4,11 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>TTS 服务监控</title>
+    <script>try{var t=localStorage.getItem('ttsTheme')||'auto',d=t==='auto'?(matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light'):t;document.documentElement.setAttribute('data-theme',d)}catch(e){}</script>
     <script src="https://cdn.bootcdn.net/ajax/libs/vue/3.4.21/vue.global.prod.js"></script>
     <script src="https://cdn.bootcdn.net/ajax/libs/axios/1.6.7/axios.min.js"></script>
     <link rel="stylesheet" href="/dashboard/admin.css">
     <style>
-        :root {
-            --bg: #0b0f1a;
-            --bg-card: #131826;
-            --bg-elev: #1a2138;
-            --border: #232b42;
-            --text: #e4e7ee;
-            --text-dim: #8a92a6;
-            --text-mute: #5a6275;
-            --accent: #00d4ff;
-            --accent-2: #7b2ff7;
-            --success: #22c55e;
-            --warning: #f59e0b;
-            --danger: #ef4444;
-        }
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body {
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
@@ -62,8 +49,9 @@
             transition: all 0.2s; display: inline-flex; align-items: center; gap: 6px;
         }
         .btn:hover { border-color: var(--accent); }
-        .btn-primary { background: var(--accent); color: #00121a; border-color: var(--accent); font-weight: 500; }
-        .btn-primary:hover { background: #33ddff; }
+        .btn-primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); font-weight: 500; }
+        .btn-primary:hover { background: var(--accent-hover); }
+        .theme-row.status { width: 208px; margin-left: auto; }
 
         .stats {
             display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
@@ -149,6 +137,11 @@
                 </div>
             </div>
             <div class="row-flex">
+                <div class="theme-row status" id="status-theme" title="主题:自动 / 亮 / 暗">
+                    <button class="theme-btn" data-theme-pref="auto"><span class="ic">◐</span><span>自动</span></button>
+                    <button class="theme-btn" data-theme-pref="light"><span class="ic">☀</span><span>亮</span></button>
+                    <button class="theme-btn" data-theme-pref="dark"><span class="ic">☾</span><span>暗</span></button>
+                </div>
                 <a class="btn" href="/dashboard" style="text-decoration:none;">← 返回控制台</a>
                 <span class="status-badge" :class="health.status === 'ok' ? 'ok' : 'error'">
                     <span class="status-dot" :class="{ live: health.status === 'ok' }"></span>
@@ -383,7 +376,22 @@
     <script>
     const { createApp, ref, computed, onMounted } = Vue;
     // v0.3.0:/health 与 /metrics 已收口到鉴权接口,统一走带凭证头的 /api/admin/*
-    const { http, getKey } = window.admin;
+    const { http, getKey, setThemePref, getThemePref, applyTheme } = window.admin;
+
+    // 主题切换(复用 admin.css 的 .theme-row;auto 跟随系统 + 手动锁定)
+    function bindStatusTheme() {
+        const render = () => {
+            const pref = getThemePref();
+            applyTheme();
+            document.querySelectorAll('#status-theme .theme-btn').forEach(b => {
+                b.classList.toggle('active', b.dataset.themePref === pref);
+            });
+        };
+        document.querySelectorAll('#status-theme .theme-btn').forEach(btn => {
+            btn.addEventListener('click', () => { setThemePref(btn.dataset.themePref); render(); });
+        });
+        render();
+    }
 
     function parseProm(text) {
         const out = {};
@@ -657,6 +665,7 @@
             onMounted(() => {
                 // v0.3.0:本页已收口到管理鉴权,未登录先回登录页
                 if (!getKey()) { location.href = '/dashboard/login'; return; }
+                bindStatusTheme();
                 refresh();
                 setInterval(refresh, 10000);
             });
