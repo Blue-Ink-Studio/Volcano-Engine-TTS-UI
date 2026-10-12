@@ -59,19 +59,23 @@
                     </div>
                     <div class="stat-card">
                         <div class="stat-top">
-                            <span class="stat-label">管理员角色</span>
-                            <span class="pill" :class="user.is_admin ? 'pill-accent' : 'pill-mute'">
-                                <span class="pill-dot"></span>{{ user.is_admin ? '管理员' : '普通用户' }}
+                            <span class="stat-label">用户角色</span>
+                            <span class="pill" :class="rolePillClass(user.role)">
+                                <span class="pill-dot"></span>{{ roleLabel(user.role) }}
                             </span>
                         </div>
-                        <div class="stat-value" style="font-size:18px;">{{ user.is_admin ? 'is_admin = 1' : 'is_admin = 0' }}</div>
+                        <div class="stat-value" style="font-size:18px;">{{ roleLabel(user.role) }}</div>
                         <div class="stat-foot">
-                            管理员可访问 /dashboard；降级/禁用/删除最后一个启用的管理员会被拒绝（409 <code>last_admin</code>）。
+                            超管(owner)唯一且可转让；管理员可访问管理后台。降级唯一超管会被拒绝（409 <code>last_owner</code>）；将他人设为超管需 owner 权限。
                         </div>
                         <div class="balance-actions">
-                            <button class="btn btn-sm" :class="user.is_admin ? 'btn-danger' : 'btn-primary'" @click="toggleAdmin">
-                                {{ user.is_admin ? '降级为普通用户' : '提升为管理员' }}
-                            </button>
+                            <div style="display:flex; gap:8px; flex-wrap:wrap;">
+                                <button v-for="r in roleOptions" :key="r" class="btn btn-sm"
+                                    :class="user.role === r ? 'btn-primary' : ''"
+                                    :disabled="user.role === r" @click="setRole(r)">
+                                    {{ roleLabel(r) }}
+                                </button>
+                            </div>
                         </div>
                     </div>
                 </div>
@@ -600,22 +604,33 @@
                 }
             };
 
-            // ---- is_admin 调整(PATCH /api/admin/users/{id})----
-            const toggleAdmin = async () => {
-                const target = !user.value.is_admin;
-                if (!confirm(target
+            // ---- 角色调整(STAGE5:PATCH {role},owner 转让走 TransferOwner;降级唯一 owner 409)----
+            const roleOptions = ['user', 'admin', 'owner'];
+            const roleLabel = (r) => ({ owner: '超管', admin: '管理员', user: '普通用户' }[r] || r);
+            const rolePillClass = (r) => r === 'owner' ? 'pill-accent' : r === 'admin' ? 'pill-warning' : 'pill-mute';
+
+            const setRole = async (target) => {
+                if (user.value.role === target) return;
+                const confirmText = target === 'owner'
+                    ? `确定将 "${user.value.name}" 设为超管(owner)吗？\n此操作会把 owner 转让给它（原 owner 自动降为管理员），需要 owner 权限。`
+                    : target === 'admin'
                     ? `确定把 "${user.value.name}" 提升为管理员吗？\n管理员可访问全部管理接口。`
-                    : `确定把 "${user.value.name}" 降级为普通用户吗？\n若它是最后一个启用的管理员，后端会拒绝（409 last_admin）。`)) return;
+                    : `确定把 "${user.value.name}" 降级为普通用户吗？\n若它是唯一的 owner/管理员，后端会拒绝。`;
+                if (!confirm(confirmText)) return;
                 actionErr.value = '';
                 try {
-                    await http.patch(`/admin/users/${uid}`, { is_admin: target });
-                    toast('ok', target ? '已提升为管理员' : '已降级为普通用户');
+                    await http.patch(`/admin/users/${uid}`, { role: target });
+                    toast('ok', `已将 ${user.value.name} 设为${roleLabel(target)}`);
                     user.value = (await http.get(`/admin/users/${uid}`)).data;
                 } catch (e) {
                     const code = e.response?.data?.error?.code;
                     const msg = e.response?.data?.error?.message || e.message;
-                    actionErr.value = code === 'last_admin'
-                        ? '至少保留一个启用的管理员：该用户是当前唯一的管理员，无法降级。'
+                    actionErr.value = code === 'last_owner'
+                        ? '系统必须保留至少一个可用的超管：该用户是当前唯一的 owner，无法降级。'
+                        : code === 'owner_required'
+                        ? '需要 owner 权限才能转让/操作超管账号。'
+                        : code === 'invalid_role'
+                        ? '非法的角色值。'
                         : msg;
                     toast('err', actionErr.value);
                 }
@@ -699,7 +714,8 @@
                 user, tokens, usageRows, totals, chartBars, actionErr, loadState,
                 statusText, statusClass, fmt, fmtBytes, fmtQty, usageStatusText, usageStatusClass,
                 balanceState, balanceCardClass, balancePillClass,
-                showChargeModal, chargeForm, chargeErr, chargeSubmitting, openCharge, closeChargeModal, submitCharge, toggleAdmin,
+                showChargeModal, chargeForm, chargeErr, chargeSubmitting, openCharge, closeChargeModal, submitCharge,
+                roleOptions, roleLabel, rolePillClass, setRole,
                 showResetModal, resetForm, resetErr, resetSubmitting, resetDone, resetResult,
                 openResetPwd, closeResetModal, submitReset, copyResetResult,
                 showUserModal, userForm, modalErr, submitting, editUser, closeUserModal, submitUser, removeUser,
