@@ -34,6 +34,42 @@
                     <div class="card">
                         <div class="card-head">
                             <div>
+                                <div class="card-title">注册与赠送</div>
+                                <div class="card-sub">控制 <code>/register</code> 是否开放，以及自助注册赠送的初始余额</div>
+                            </div>
+                            <span class="pill" :class="regForm.allow_register ? 'pill-success' : 'pill-mute'">
+                                <span class="pill-dot"></span>{{ regForm.allow_register ? '已开放' : '已关闭' }}
+                            </span>
+                        </div>
+                        <div class="field">
+                            <label class="check">
+                                <input type="checkbox" v-model="regForm.allow_register">
+                                <span>允许自由注册（<code>allow_register</code>）</span>
+                            </label>
+                            <div class="hint">
+                                关闭时 <code>POST /api/auth/register</code> 返 403 <code>register_disabled</code>，
+                                登录/注册页的「注册」链接也会隐藏。默认关闭：公共实例上「空密码管理员 + 开放注册」是危险组合，请先给管理员设密。
+                            </div>
+                        </div>
+                        <div class="field">
+                            <label>注册赠送额度（<code>init_balance</code>）</label>
+                            <input type="number" step="1" min="0" v-model.number="regForm.init_balance" placeholder="0">
+                            <div class="hint">
+                                仅对**自助注册**生效（管理员建号默认 0，可单独填）；赠送会写入余额流水
+                                <code>type=grant, source=register_bonus</code>。
+                            </div>
+                        </div>
+                        <div class="actions">
+                            <button class="btn" @click="loadSettings">重置</button>
+                            <button class="btn btn-primary" @click="saveRegister" :disabled="savingRegister">
+                                {{ savingRegister ? '保存中...' : '保存注册设置' }}
+                            </button>
+                        </div>
+                    </div>
+
+                    <div class="card">
+                        <div class="card-head">
+                            <div>
                                 <div class="card-title">鉴权 Key</div>
                                 <div class="card-sub">客户端调用 <code>/v1/audio/speech</code>。管理后台登录改用 <code>admin_key</code>(未配置时回退用本 Key)</div>
                             </div>
@@ -157,6 +193,10 @@
             const apiKeyInput = ref('');
             const authKeyInput = ref('');
 
+            // STAGE4:注册开关 + 注册赠送额度(字段名 allow_register / init_balance;接口是 PUT 不是 POST)
+            const regForm = ref({ allow_register: false, init_balance: 0 });
+            const savingRegister = ref(false);
+
             const corsForm = ref({ allow_all: false, origins: '' });
             const savingCors = ref(false);
             const corsCurrentLabel = computed(() => {
@@ -181,6 +221,10 @@
                 corsForm.value = {
                     allow_all: !!r.data.cors_allow_all,
                     origins: r.data.cors_origins || '',
+                };
+                regForm.value = {
+                    allow_register: !!r.data.allow_register,
+                    init_balance: (r.data.init_balance === undefined || r.data.init_balance === null) ? 0 : Number(r.data.init_balance),
                 };
             };
             const loadVoices = async () => {
@@ -246,6 +290,28 @@
             };
             const resetSettingsForm = () => { loadSettings(); };
 
+            // 注册设置:PUT /api/settings(GET/PUT;别名 /api/admin/settings 同一 handler)
+            const saveRegister = async () => {
+                savingRegister.value = true;
+                try {
+                    const bal = regForm.value.init_balance;
+                    if (bal !== null && bal !== '' && (!Number.isInteger(Number(bal)) || Number(bal) < 0)) {
+                        toast('err', '注册赠送额度必须是非负整数');
+                        return;
+                    }
+                    await http.put('/settings', {
+                        allow_register: !!regForm.value.allow_register,
+                        init_balance: Number(bal) || 0,
+                    });
+                    await loadSettings();
+                    toast('ok', '注册设置已保存');
+                } catch (e) {
+                    const code = e.response?.data?.error?.code;
+                    const msg = e.response?.data?.error?.message || e.message;
+                    toast('err', code === 'invalid_value' ? '参数非法：init_balance 必须是非负整数' : ('保存失败: ' + msg));
+                } finally { savingRegister.value = false; }
+            };
+
             onMounted(() => {
                 if (!getKey()) { location.href = '/dashboard/login'; return; }
                 mountShell({
@@ -261,6 +327,7 @@
                 overview, voices, settings, settingsForm, apiKeyInput, authKeyInput,
                 savingSettings, savingCors,
                 corsForm, corsCurrentLabel, saveCors,
+                regForm, savingRegister, saveRegister,
                 saveSettings, saveApiKey, saveAuthKey, resetSettingsForm,
                 reloadAll,
             };

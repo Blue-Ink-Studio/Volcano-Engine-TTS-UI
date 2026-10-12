@@ -45,6 +45,17 @@ var adminCSS []byte
 //go:embed admin-shell.js
 var adminShellJS []byte
 
+// STAGE4 新增页面资源。
+//
+//go:embed register.html
+var registerHTML []byte
+
+//go:embed portal.html
+var portalHTML []byte
+
+//go:embed portal-shell.js
+var portalShellJS []byte
+
 // Setup 返回主路由。
 // 中间件顺序(由外向内):
 //   SecurityHeaders → InstallGuard → RateLimit → ConcurrencyLimit → Logger → handler
@@ -82,7 +93,7 @@ func Setup() *mux.Router {
 		_, _ = w.Write(setupHTML)
 	}).Methods("GET")
 	// v0.3.0:安装状态不再匿名暴露(原本 normal 模式下仍返回 {installed, mode})
-	r.Handle("/api/setup/status", middleware.RequireAdmin(http.HandlerFunc(controller.SetupStatusHandler))).Methods("GET")
+	r.Handle("/api/setup/status", middleware.RequireAdminOrJWT(http.HandlerFunc(controller.SetupStatusHandler))).Methods("GET")
 	r.HandleFunc("/api/setup/prefill", controller.SetupPrefillHandler).Methods("GET")
 	r.HandleFunc("/api/setup", controller.SetupSubmitHandler).Methods("POST")
 
@@ -107,6 +118,17 @@ func Setup() *mux.Router {
 	// 登录页无数据,保持公开(否则无法登录)
 	r.HandleFunc("/dashboard/login", serveAdmin(adminLoginHTML)).Methods("GET")
 
+	// ===== STAGE4:统一登录页别名 + 注册页 + 普通用户门户 =====
+	//
+	// /login = /dashboard/login 的别名(决策 D15/D7):同一个升级后的双 tab 页面。
+	r.HandleFunc("/login", serveAdmin(adminLoginHTML)).Methods("GET")
+	// 注册页公开:能否注册由 GET /api/auth/register-status 决定(决策 D22)。
+	r.HandleFunc("/register", serveAdmin(registerHTML)).Methods("GET")
+	// 门户页面壳公开(决策 X10):壳里不含任何数据,数据全部来自 JWT 网关后的
+	// /api/me/*。理由与 /dashboard 相同 —— 登录态存 sessionStorage、不随请求发送,
+	// 服务端无从判断是否已登录,强行 401 会把"打开页面看到登录视图"变成"打开就报错"。
+	r.HandleFunc("/portal", serveAdmin(portalHTML)).Methods("GET")
+
 	// 静态资源:迁到 /dashboard/ 下,同时**保留 /admin/ 旧路径为别名**,
 	// 这样过渡期内新旧页面都能正确加载样式与脚本,不会出现"页面能开但丢样式"。
 	serveCSS := func(w http.ResponseWriter, _ *http.Request) {
@@ -121,6 +143,16 @@ func Setup() *mux.Router {
 	r.HandleFunc("/dashboard/admin-shell.js", serveShellJS).Methods("GET")
 	r.HandleFunc("/admin/admin.css", serveCSS).Methods("GET")
 	r.HandleFunc("/admin/admin-shell.js", serveShellJS).Methods("GET")
+
+	// STAGE4:门户侧静态资源。
+	// portal.html / register.html 引用 /portal/admin.css,并与 admin 页共用
+	// admin-shell.js(凭证槽、axios 实例、toast 只有一份实现,避免两套漂移)。
+	r.HandleFunc("/portal/admin.css", serveCSS).Methods("GET")
+	r.HandleFunc("/portal/admin-shell.js", serveShellJS).Methods("GET")
+	r.HandleFunc("/portal/portal-shell.js", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
+		_, _ = w.Write(portalShellJS)
+	}).Methods("GET")
 
 	// 旧入口永久重定向(页面用 301 是正确的;API 路径**不用**重定向,见下方别名说明)
 	r.HandleFunc("/admin", func(w http.ResponseWriter, req *http.Request) {
@@ -137,12 +169,12 @@ func Setup() *mux.Router {
 	}).Methods("GET")
 
 	// /api/admin/overview (鉴权)
-	r.Handle("/api/admin/overview", middleware.RequireAdmin(http.HandlerFunc(controller.AdminOverviewHandler))).Methods("GET")
+	r.Handle("/api/admin/overview", middleware.RequireAdminOrJWT(http.HandlerFunc(controller.AdminOverviewHandler))).Methods("GET")
 	// /api/admin/metrics (鉴权);返 Prometheus 文本
-	r.Handle("/api/admin/metrics", middleware.RequireAdmin(http.HandlerFunc(controller.AdminMetricsHandler))).Methods("GET")
+	r.Handle("/api/admin/metrics", middleware.RequireAdminOrJWT(http.HandlerFunc(controller.AdminMetricsHandler))).Methods("GET")
 	// v0.3.0:详细健康数据的鉴权版(面板与运维用)。
 	// 与根路径 /health 的区别:这里始终注册且强制鉴权;根路径 /health 默认 404。
-	r.Handle("/api/admin/health", middleware.RequireAdmin(http.HandlerFunc(controller.HealthHandler))).Methods("GET")
+	r.Handle("/api/admin/health", middleware.RequireAdminOrJWT(http.HandlerFunc(controller.HealthHandler))).Methods("GET")
 
 	// /api/voices 音色 CRUD (鉴权)
 	//
@@ -155,56 +187,91 @@ func Setup() *mux.Router {
 	//   - 308 能保留方法,但对非浏览器脚本仍是行为变化,且多一次往返
 	//   - 别名让新旧路径都能直接用,零往返、零破坏,老脚本完全无感
 	// 旧别名计划在后续版本移除。
-	r.Handle("/api/admin/voices", middleware.RequireAdmin(http.HandlerFunc(controller.AdminVoicesListHandler))).Methods("GET")
-	r.Handle("/api/admin/voices", middleware.RequireAdmin(http.HandlerFunc(controller.AdminVoiceCreateHandler))).Methods("POST")
-	r.Handle("/api/admin/voices/{name}", middleware.RequireAdmin(http.HandlerFunc(controller.AdminVoiceDeleteHandler))).Methods("DELETE")
-	r.Handle("/api/admin/voices/{name}/toggle", middleware.RequireAdmin(http.HandlerFunc(controller.AdminVoiceToggleHandler))).Methods("PATCH")
+	r.Handle("/api/admin/voices", middleware.RequireAdminOrJWT(http.HandlerFunc(controller.AdminVoicesListHandler))).Methods("GET")
+	r.Handle("/api/admin/voices", middleware.RequireAdminOrJWT(http.HandlerFunc(controller.AdminVoiceCreateHandler))).Methods("POST")
+	r.Handle("/api/admin/voices/{name}", middleware.RequireAdminOrJWT(http.HandlerFunc(controller.AdminVoiceDeleteHandler))).Methods("DELETE")
+	r.Handle("/api/admin/voices/{name}/toggle", middleware.RequireAdminOrJWT(http.HandlerFunc(controller.AdminVoiceToggleHandler))).Methods("PATCH")
 
-	r.Handle("/api/voices", middleware.RequireAdmin(http.HandlerFunc(controller.AdminVoicesListHandler))).Methods("GET")
-	r.Handle("/api/voices", middleware.RequireAdmin(http.HandlerFunc(controller.AdminVoiceCreateHandler))).Methods("POST")
-	r.Handle("/api/voices/{name}", middleware.RequireAdmin(http.HandlerFunc(controller.AdminVoiceDeleteHandler))).Methods("DELETE")
-	r.Handle("/api/voices/{name}/toggle", middleware.RequireAdmin(http.HandlerFunc(controller.AdminVoiceToggleHandler))).Methods("PATCH")
+	r.Handle("/api/voices", middleware.RequireAdminOrJWT(http.HandlerFunc(controller.AdminVoicesListHandler))).Methods("GET")
+	r.Handle("/api/voices", middleware.RequireAdminOrJWT(http.HandlerFunc(controller.AdminVoiceCreateHandler))).Methods("POST")
+	r.Handle("/api/voices/{name}", middleware.RequireAdminOrJWT(http.HandlerFunc(controller.AdminVoiceDeleteHandler))).Methods("DELETE")
+	r.Handle("/api/voices/{name}/toggle", middleware.RequireAdminOrJWT(http.HandlerFunc(controller.AdminVoiceToggleHandler))).Methods("PATCH")
 
 	// /api/settings 全局设置 (鉴权) — M3
 	// 同样:/api/admin/settings 为正式路径,/api/settings 为过渡期别名。
 	// 注意更长的 /api/admin/settings/admin-key 必须**先注册**(mux 按注册顺序取首个匹配)。
-	r.Handle("/api/admin/settings/admin-key", middleware.RequireAdmin(http.HandlerFunc(controller.SettingsAdminKeyHandler))).Methods("PUT")
-	r.Handle("/api/admin/settings", middleware.RequireAdmin(http.HandlerFunc(controller.SettingsGetHandler))).Methods("GET")
-	r.Handle("/api/admin/settings", middleware.RequireAdmin(http.HandlerFunc(controller.SettingsUpdateHandler))).Methods("PUT")
-	r.Handle("/api/admin/settings/api-key", middleware.RequireAdmin(http.HandlerFunc(controller.SettingsAPIKeyHandler))).Methods("PUT")
-	r.Handle("/api/admin/settings/auth-key", middleware.RequireAdmin(http.HandlerFunc(controller.SettingsAuthKeyHandler))).Methods("PUT")
+	r.Handle("/api/admin/settings/admin-key", middleware.RequireAdminOrJWT(http.HandlerFunc(controller.SettingsAdminKeyHandler))).Methods("PUT")
+	r.Handle("/api/admin/settings", middleware.RequireAdminOrJWT(http.HandlerFunc(controller.SettingsGetHandler))).Methods("GET")
+	r.Handle("/api/admin/settings", middleware.RequireAdminOrJWT(http.HandlerFunc(controller.SettingsUpdateHandler))).Methods("PUT")
+	r.Handle("/api/admin/settings/api-key", middleware.RequireAdminOrJWT(http.HandlerFunc(controller.SettingsAPIKeyHandler))).Methods("PUT")
+	r.Handle("/api/admin/settings/auth-key", middleware.RequireAdminOrJWT(http.HandlerFunc(controller.SettingsAuthKeyHandler))).Methods("PUT")
 
-	r.Handle("/api/settings", middleware.RequireAdmin(http.HandlerFunc(controller.SettingsGetHandler))).Methods("GET")
-	r.Handle("/api/settings", middleware.RequireAdmin(http.HandlerFunc(controller.SettingsUpdateHandler))).Methods("PUT")
-	r.Handle("/api/settings/api-key", middleware.RequireAdmin(http.HandlerFunc(controller.SettingsAPIKeyHandler))).Methods("PUT")
-	r.Handle("/api/settings/auth-key", middleware.RequireAdmin(http.HandlerFunc(controller.SettingsAuthKeyHandler))).Methods("PUT")
-	r.Handle("/api/settings/admin-key", middleware.RequireAdmin(http.HandlerFunc(controller.SettingsAdminKeyHandler))).Methods("PUT")
-	r.Handle("/api/settings/cors", middleware.RequireAdmin(http.HandlerFunc(controller.SettingsCORSHandler))).Methods("PUT")
+	r.Handle("/api/settings", middleware.RequireAdminOrJWT(http.HandlerFunc(controller.SettingsGetHandler))).Methods("GET")
+	r.Handle("/api/settings", middleware.RequireAdminOrJWT(http.HandlerFunc(controller.SettingsUpdateHandler))).Methods("PUT")
+	r.Handle("/api/settings/api-key", middleware.RequireAdminOrJWT(http.HandlerFunc(controller.SettingsAPIKeyHandler))).Methods("PUT")
+	r.Handle("/api/settings/auth-key", middleware.RequireAdminOrJWT(http.HandlerFunc(controller.SettingsAuthKeyHandler))).Methods("PUT")
+	r.Handle("/api/settings/admin-key", middleware.RequireAdminOrJWT(http.HandlerFunc(controller.SettingsAdminKeyHandler))).Methods("PUT")
+	r.Handle("/api/settings/cors", middleware.RequireAdminOrJWT(http.HandlerFunc(controller.SettingsCORSHandler))).Methods("PUT")
 
 	// ===== 阶段 2:渠道管理接口(/api/admin/channels) =====
 	// 全部套 RequireAdmin(401 code=admin_required,决策 #9);handler 内只关心业务逻辑
-	r.Handle("/api/admin/channels", middleware.RequireAdmin(http.HandlerFunc(controller.ChannelsListHandler))).Methods("GET")
-	r.Handle("/api/admin/channels", middleware.RequireAdmin(http.HandlerFunc(controller.ChannelsCreateHandler))).Methods("POST")
-	r.Handle("/api/admin/channels/{id:[0-9]+}", middleware.RequireAdmin(http.HandlerFunc(controller.ChannelsGetHandler))).Methods("GET")
-	r.Handle("/api/admin/channels/{id:[0-9]+}", middleware.RequireAdmin(http.HandlerFunc(controller.ChannelsUpdateHandler))).Methods("PATCH")
-	r.Handle("/api/admin/channels/{id:[0-9]+}", middleware.RequireAdmin(http.HandlerFunc(controller.ChannelsDeleteHandler))).Methods("DELETE")
-	r.Handle("/api/admin/channels/{id:[0-9]+}/status", middleware.RequireAdmin(http.HandlerFunc(controller.ChannelsStatusHandler))).Methods("POST")
-	r.Handle("/api/admin/channels/{id:[0-9]+}/test", middleware.RequireAdmin(http.HandlerFunc(controller.ChannelsTestHandler))).Methods("POST")
+	r.Handle("/api/admin/channels", middleware.RequireAdminOrJWT(http.HandlerFunc(controller.ChannelsListHandler))).Methods("GET")
+	r.Handle("/api/admin/channels", middleware.RequireAdminOrJWT(http.HandlerFunc(controller.ChannelsCreateHandler))).Methods("POST")
+	r.Handle("/api/admin/channels/{id:[0-9]+}", middleware.RequireAdminOrJWT(http.HandlerFunc(controller.ChannelsGetHandler))).Methods("GET")
+	r.Handle("/api/admin/channels/{id:[0-9]+}", middleware.RequireAdminOrJWT(http.HandlerFunc(controller.ChannelsUpdateHandler))).Methods("PATCH")
+	r.Handle("/api/admin/channels/{id:[0-9]+}", middleware.RequireAdminOrJWT(http.HandlerFunc(controller.ChannelsDeleteHandler))).Methods("DELETE")
+	r.Handle("/api/admin/channels/{id:[0-9]+}/status", middleware.RequireAdminOrJWT(http.HandlerFunc(controller.ChannelsStatusHandler))).Methods("POST")
+	r.Handle("/api/admin/channels/{id:[0-9]+}/test", middleware.RequireAdminOrJWT(http.HandlerFunc(controller.ChannelsTestHandler))).Methods("POST")
 
 	// ===== 阶段 3a/3b:用户 + 令牌 + 用量接口 =====
 	// 阶段 3a 只读;3b 补齐写操作与令牌管理(全部 RequireAdmin)。
 	// 注册顺序:更具体的子路径(/usage、/tokens)先注册,避免被 {id} 规则抢先匹配。
-	r.Handle("/api/admin/users", middleware.RequireAdmin(http.HandlerFunc(controller.UsersListHandler))).Methods("GET")
-	r.Handle("/api/admin/users", middleware.RequireAdmin(http.HandlerFunc(controller.UsersCreateHandler))).Methods("POST")
-	r.Handle("/api/admin/users/{id:[0-9]+}/usage", middleware.RequireAdmin(http.HandlerFunc(controller.UserUsageHandler))).Methods("GET")
-	r.Handle("/api/admin/users/{id:[0-9]+}/tokens", middleware.RequireAdmin(http.HandlerFunc(controller.TokensListHandler))).Methods("GET")
-	r.Handle("/api/admin/users/{id:[0-9]+}/tokens", middleware.RequireAdmin(http.HandlerFunc(controller.TokensCreateHandler))).Methods("POST")
-	r.Handle("/api/admin/users/{id:[0-9]+}", middleware.RequireAdmin(http.HandlerFunc(controller.UsersGetHandler))).Methods("GET")
-	r.Handle("/api/admin/users/{id:[0-9]+}", middleware.RequireAdmin(http.HandlerFunc(controller.UsersUpdateHandler))).Methods("PATCH")
-	r.Handle("/api/admin/users/{id:[0-9]+}", middleware.RequireAdmin(http.HandlerFunc(controller.UsersDeleteHandler))).Methods("DELETE")
+	r.Handle("/api/admin/users", middleware.RequireAdminOrJWT(http.HandlerFunc(controller.UsersListHandler))).Methods("GET")
+	r.Handle("/api/admin/users", middleware.RequireAdminOrJWT(http.HandlerFunc(controller.UsersCreateHandler))).Methods("POST")
+	r.Handle("/api/admin/users/{id:[0-9]+}/usage", middleware.RequireAdminOrJWT(http.HandlerFunc(controller.UserUsageHandler))).Methods("GET")
+	r.Handle("/api/admin/users/{id:[0-9]+}/tokens", middleware.RequireAdminOrJWT(http.HandlerFunc(controller.TokensListHandler))).Methods("GET")
+	r.Handle("/api/admin/users/{id:[0-9]+}/tokens", middleware.RequireAdminOrJWT(http.HandlerFunc(controller.TokensCreateHandler))).Methods("POST")
+	r.Handle("/api/admin/users/{id:[0-9]+}", middleware.RequireAdminOrJWT(http.HandlerFunc(controller.UsersGetHandler))).Methods("GET")
+	r.Handle("/api/admin/users/{id:[0-9]+}", middleware.RequireAdminOrJWT(http.HandlerFunc(controller.UsersUpdateHandler))).Methods("PATCH")
+	r.Handle("/api/admin/users/{id:[0-9]+}", middleware.RequireAdminOrJWT(http.HandlerFunc(controller.UsersDeleteHandler))).Methods("DELETE")
 	// 令牌单独按 id 操作(挂在 user 下的只有 list/create)
-	r.Handle("/api/admin/tokens/{id:[0-9]+}", middleware.RequireAdmin(http.HandlerFunc(controller.TokensUpdateHandler))).Methods("PATCH")
-	r.Handle("/api/admin/tokens/{id:[0-9]+}", middleware.RequireAdmin(http.HandlerFunc(controller.TokensDeleteHandler))).Methods("DELETE")
+	r.Handle("/api/admin/tokens/{id:[0-9]+}", middleware.RequireAdminOrJWT(http.HandlerFunc(controller.TokensUpdateHandler))).Methods("PATCH")
+	r.Handle("/api/admin/tokens/{id:[0-9]+}", middleware.RequireAdminOrJWT(http.HandlerFunc(controller.TokensDeleteHandler))).Methods("DELETE")
+
+	// ===== STAGE4:认证接口(公开挂载,handler 内自行校验) =====
+	//
+	// register-status 是**公开只读**接口(决策 D22):登录/注册页要在未登录状态
+	// 知道是否显示"注册"链接,但不能让它读到 settings 全表。
+	r.HandleFunc("/api/auth/register-status", controller.RegisterStatusHandler).Methods("GET")
+	r.HandleFunc("/api/auth/register", controller.RegisterHandler).Methods("POST")
+	r.HandleFunc("/api/auth/login", controller.LoginHandler).Methods("POST")
+	// setup-password 的通道校验(本机 socket peer 或 admin_key)在 handler 内完成,
+	// 因此这里**不套** ValidateSession —— 目标用户此刻还没有可用凭证(决策 D23/D32)。
+	r.HandleFunc("/api/auth/setup-password", controller.SetupPasswordHandler).Methods("POST")
+
+	// ===== STAGE4:普通用户自助接口(仅 JWT,决策 #14) =====
+	//
+	// admin_key 在此不可用;admin 的 JWT 可用(决策 D28)。
+	r.Handle("/api/me", requireSession(controller.MeHandler)).Methods("GET")
+	r.Handle("/api/me/password", requireSession(controller.MePasswordHandler)).Methods("POST")
+	r.Handle("/api/me/tokens", requireSession(controller.MeTokensListHandler)).Methods("GET")
+	r.Handle("/api/me/tokens", requireSession(controller.MeTokensCreateHandler)).Methods("POST")
+	r.Handle("/api/me/tokens/{id:[0-9]+}", requireSession(controller.MeTokensPatchHandler)).Methods("PATCH")
+	r.Handle("/api/me/tokens/{id:[0-9]+}", requireSession(controller.MeTokensDeleteHandler)).Methods("DELETE")
+	r.Handle("/api/me/usage", requireSession(controller.MeUsageHandler)).Methods("GET")
+	r.Handle("/api/me/stats", requireSession(controller.MeStatsHandler)).Methods("GET")
+	r.Handle("/api/me/balance/logs", requireSession(controller.MeBalanceLogsHandler)).Methods("GET")
+	r.Handle("/api/me/redeem", requireSession(controller.MeRedeemHandler)).Methods("POST")
+
+	// ===== STAGE4:管理端新增(统一走 RequireAdminOrJWT) =====
+	r.Handle("/api/admin/users/{id:[0-9]+}/charge",
+		middleware.RequireAdminOrJWT(http.HandlerFunc(controller.UsersChargeHandler))).Methods("POST")
+	r.Handle("/api/admin/users/{id:[0-9]+}/password-reset",
+		middleware.RequireAdminOrJWT(http.HandlerFunc(controller.UsersPasswordResetHandler))).Methods("POST")
+	r.Handle("/api/admin/redemptions",
+		middleware.RequireAdminOrJWT(http.HandlerFunc(controller.RedemptionsCreateHandler))).Methods("POST")
+	r.Handle("/api/admin/redemptions",
+		middleware.RequireAdminOrJWT(http.HandlerFunc(controller.RedemptionsListHandler))).Methods("GET")
 
 	// 业务路由
 	r.HandleFunc("/v1/audio/speech", controller.OpenaiTTSHandler).Methods("POST", "OPTIONS")
@@ -215,7 +282,7 @@ func Setup() *mux.Router {
 	//   /dashboard      管理看板(**鉴权**,见上方阶段 3 的注册处)
 	//   /api/admin/health 鉴权版详细健康数据(面板拉取用,风格与 /api/admin/* 一致)
 	r.HandleFunc("/healthz", controller.HealthzHandler).Methods("GET")
-	r.Handle("/health", middleware.RequireAdmin(http.HandlerFunc(controller.HealthHandler))).Methods("GET")
+	r.Handle("/health", middleware.RequireAdminOrJWT(http.HandlerFunc(controller.HealthHandler))).Methods("GET")
 	r.HandleFunc("/", func(w http.ResponseWriter, req *http.Request) {
 		// 安装模式下,根路径跳 /setup
 		if installer.GetMode() == installer.ModeSetup {
@@ -248,7 +315,7 @@ func Setup() *mux.Router {
 //
 // 这样既堵住了"匿名抓取健康数据",又不破坏 SPA 的登录流程。
 func htmlAwareAdmin(html http.Handler) http.Handler {
-	guarded := middleware.RequireAdmin(html)
+	guarded := middleware.RequireAdminOrJWT(html)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if acceptsHTML(r.Header.Get("Accept")) {
 			html.ServeHTTP(w, r)
@@ -278,6 +345,14 @@ func acceptsHTML(accept string) bool {
 		}
 	}
 	return false
+}
+
+// requireSession 是 /api/me/* 的挂载糖:统一套 ValidateSession(仅 JWT,决策 #14)。
+//
+// 单列一个函数是为了让 10 条自助路由的注册保持单行,避免重复 4 段,也避免
+// 将来有人误把某一条改成 RequireAdminOrJWT(那会让 admin_key 拿到用户数据)。
+func requireSession(h http.HandlerFunc) http.Handler {
+	return middleware.ValidateSession(h)
 }
 
 // serveAdmin 返回一个把 embed 的 HTML bytes 以 text/html 写出的 handler。

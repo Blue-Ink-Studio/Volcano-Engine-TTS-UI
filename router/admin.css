@@ -539,3 +539,154 @@ code { font-family: ui-monospace, SFMono-Regular, monospace; font-size: 0.9em; b
 .alert-success { background: var(--success-soft); border-color: rgba(23, 138, 79, 0.25); }
 .alert-success .alert-title { color: var(--success); }
 .alert-success .alert-desc { color: var(--text); }
+
+/* =========================================================================
+   阶段 4(STAGE4 用户门户 + 计费)— 新增组件类
+   命名对齐既有风格;全部走 CSS 变量,深浅色自动适配。
+   ========================================================================= */
+
+/* === 统一登录页:双 tab(D15) === */
+.login-tabs {
+    display: flex; gap: 4px; margin-bottom: 18px;
+    background: var(--bg-elev); border: 1px solid var(--border);
+    border-radius: var(--radius); padding: 3px;
+}
+.login-tab {
+    flex: 1; padding: 7px 0; background: transparent; border: none;
+    color: var(--text-dim); font-size: 13px; font-family: inherit;
+    cursor: pointer; border-radius: 6px; transition: all 0.12s;
+}
+.login-tab:hover { color: var(--text); }
+.login-tab.active { background: var(--bg-card); color: var(--accent); font-weight: 500; box-shadow: var(--shadow-sm); }
+.login-ok {
+    margin-top: 12px; padding: 10px 12px;
+    background: var(--success-soft); border: 1px solid rgba(23, 138, 79, 0.25);
+    color: var(--success); border-radius: var(--radius); font-size: 12px;
+}
+.login-foot {
+    margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--border);
+    text-align: center; font-size: 12px; color: var(--text-dim);
+}
+.login-foot a { color: var(--accent); text-decoration: none; }
+.login-foot a:hover { text-decoration: underline; }
+
+/* === 门户布局 === */
+[hidden], [v-cloak] { display: none !important; }
+.portal-user {
+    display: flex; align-items: center; gap: 10px;
+    padding: 14px 18px; border-bottom: 1px solid var(--border);
+}
+.portal-user-avatar {
+    width: 34px; height: 34px; border-radius: 50%; flex-shrink: 0;
+    background: linear-gradient(135deg, var(--accent), var(--accent-2));
+    color: #fff; font-weight: 700; font-size: 14px;
+    display: flex; align-items: center; justify-content: center;
+}
+.portal-user-meta { min-width: 0; }
+.portal-user-name {
+    font-size: 13px; font-weight: 600;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.portal-user-bal { font-size: 11px; color: var(--text-mute); margin-top: 2px; }
+.link-inline { color: inherit; text-decoration: underline; }
+.card-gap { margin-top: 16px; }
+.card-tools { display: flex; gap: 8px; align-items: center; flex-shrink: 0; }
+.card-foot-hint {
+    padding: 12px 16px; border-top: 1px solid var(--border);
+    font-size: 11px; color: var(--text-mute); background: var(--bg-elev);
+    overflow-x: auto; white-space: nowrap;
+}
+.select-sm {
+    padding: 5px 26px 5px 10px; font-size: 12px; font-family: inherit;
+    background: var(--bg-elev); border: 1px solid var(--border); color: var(--text);
+    border-radius: var(--radius);
+    appearance: none;
+    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'><path fill='%238b95a9' d='M6 8L1 3h10z'/></svg>");
+    background-repeat: no-repeat; background-position: right 8px center;
+}
+.table-scroll { width: 100%; overflow-x: auto; }
+.tag-warn { background: var(--warning-soft); color: var(--warning); border-color: rgba(192, 124, 11, 0.25); }
+
+/* === 余额卡(X24:负=红,0=黄) === */
+.balance-card {
+    position: relative; overflow: hidden;
+    background: var(--bg-card); border: 1px solid var(--border);
+    border-radius: var(--radius-lg); padding: 18px 20px;
+    transition: border-color 0.15s, background 0.2s;
+}
+.balance-card::before {
+    content: ''; position: absolute; top: 0; left: 0; right: 0; height: 1px;
+    background: linear-gradient(90deg, transparent, var(--border-strong), transparent);
+}
+.balance-value { font-variant-numeric: tabular-nums; }
+.balance-actions { display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
+.balance-warn { border-color: rgba(192, 124, 11, 0.45); }
+.balance-warn .balance-value { color: var(--warning); }
+.balance-danger { border-color: rgba(208, 48, 80, 0.5); background: var(--danger-soft); }
+.balance-danger .balance-value { color: var(--danger); }
+:root[data-theme="dark"] .balance-warn { border-color: rgba(245, 158, 11, 0.4); }
+:root[data-theme="dark"] .balance-danger { border-color: rgba(239, 68, 68, 0.45); }
+
+/* === 横幅(门户顶部欠费/余额不足) === */
+.banner-hard { align-items: flex-start; border-left-width: 4px; }
+.banner-soft { align-items: flex-start; }
+
+/* === 筛选条 === */
+.filter-bar {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    gap: 10px; align-items: end;
+    padding: 14px 16px; border-bottom: 1px solid var(--border); background: var(--bg-elev);
+}
+.filter-bar .field { margin-bottom: 0; }
+.filter-actions { display: flex; align-items: flex-end; }
+.filter-actions .btn { width: 100%; }
+
+/* === 三态限额(X6:不改 / null=不限 / 具体值)=== */
+.tri-state { display: flex; flex-direction: column; gap: 6px; }
+.radio { display: inline-flex; align-items: center; gap: 8px; font-size: 13px; color: var(--text); cursor: pointer; }
+.radio input[type=radio] { width: 15px; height: 15px; accent-color: var(--accent); cursor: pointer; }
+.radio input[type=radio]:disabled + span { color: var(--text-mute); }
+
+/* === 趋势图补充(沿用 .chart / .chart-col / .chart-bar) === */
+.chart { min-height: 170px; }
+.chart-bar { min-width: 6px; }
+
+/* === 响应式(手机可看余额与用量) === */
+@media (max-width: 900px) {
+    .settings-grid { grid-template-columns: 1fr; }
+    .stat-grid { grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 10px; }
+    .chart { height: 140px; gap: 4px; }
+    .chart-label { font-size: 9px; }
+}
+@media (max-width: 760px) {
+    .app-shell { flex-direction: column; }
+    .sidebar {
+        width: 100%; height: auto; position: static;
+        border-right: none; border-bottom: 1px solid var(--border);
+    }
+    .portal-side .nav { display: flex; gap: 6px; overflow-x: auto; padding: 10px 12px; }
+    .portal-side .nav-item { flex: 0 0 auto; margin-bottom: 0; white-space: nowrap; }
+    .portal-side .nav-item.active::before { display: none; }
+    .portal-side .portal-user { padding: 10px 14px; }
+    .portal-side .sidebar-foot { flex-direction: row; align-items: center; gap: 10px; flex-wrap: wrap; }
+    .portal-side .theme-row { flex: 0 0 160px; }
+    .portal-side .sidebar-foot-row { flex: 0 0 auto; }
+    .portal-side .sidebar-foot-row .btn-icon { padding: 8px 12px; }
+    .brand { padding: 12px 14px; }
+    .main { padding: 16px; max-width: 100%; }
+    .page-head { align-items: flex-start; }
+    .page-title { font-size: 19px; }
+    .stat-value { font-size: 22px; }
+    .filter-bar { grid-template-columns: 1fr 1fr; padding: 12px; }
+    .grid-2, .grid-3 { grid-template-columns: 1fr; }
+    .modal { max-width: 100%; }
+    .data-table th, .data-table td { padding: 10px 12px; }
+    .login-card { padding: 26px 20px; }
+}
+@media (max-width: 520px) {
+    .filter-bar { grid-template-columns: 1fr; }
+    .stat-grid { grid-template-columns: 1fr; }
+    .td-actions { gap: 4px; }
+    .btn-sm { padding: 5px 8px; font-size: 11px; }
+    .toast { min-width: 0; max-width: calc(100vw - 32px); }
+}

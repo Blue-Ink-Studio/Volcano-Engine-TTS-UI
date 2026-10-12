@@ -11,7 +11,9 @@ package store
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
+	"log"
 
 	_ "modernc.org/sqlite" // 注册 sqlite driver
 )
@@ -26,7 +28,10 @@ import (
 //	2 → channels(阶段 1 多渠道)
 //	3 → users/tokens/usage(阶段 3a 识别 + 计量)
 //	4 → usage 补 3 列(阶段 3b 计费:pre_consumed/actual_quota/status)
-const schemaVersion = 4
+//	5 → STAGE4 自助门户 + 完整计费(决策 C:扣费主源 token → user.balance):
+//	    users 补 4 列(password_hash/is_admin/balance/token_version)、
+//	    tokens 补 limit_quota、usage.status 增 0=预扣中态、新增 charge_logs/redemptions 表
+const schemaVersion = 5
 
 // Store 是 SQLite 访问层的统一入口;所有 settings/voices 操作都通过它。
 type Store struct {
@@ -286,6 +291,156 @@ func (s *Store) migrate() error {
 		return err
 	}
 
+	// usage.upstream_req_id:上游(火山)返回的 ReqID,仅用于对账追溯。
+	//
+	// 【为什么不让 request_id 直接改成上游 id】request_id 是预扣/结算/退款
+	// 三段式的**定位键**(idx_usage_request_pending 与退款幂等都依赖它),
+	// 必须在整条生命周期内保持稳定;否则结算后再按原键找行会找不到,
+	// 状态机的"单向前进"判定就退化成 ErrNotFound,无法区分"已结算"与"不存在"。
+	if err := s.ensureColumn("usage", "upstream_req_id",
+		`upstream_req_id TEXT NOT NULL DEFAULT ''`); err != nil {
+		return err
+	}
+
+	// ===== 阶段 4(STAGE4):普通用户自助门户 + 完整计费 =====
+	//
+	// 决策 C(new-api 式双扣):扣费主源从 tokens.remain_quota 迁到 users.balance;
+	// tokens 退化为「认证凭证 + 可选准入限额」。
+	// 契约见 docs/STAGE4_PORTAL_BILLING_PLAN.md(§5 Schema 变更)。
+
+	// users:钱包 + WebUI 登录态
+	if err := s.ensureColumn("users", "password_hash",
+		`password_hash TEXT NOT NULL DEFAULT ''`); err != nil {
+		return err
+	}
+	if err := s.ensureColumn("users", "is_admin",
+		`is_admin INTEGER NOT NULL DEFAULT 0`); err != nil {
+		return err
+	}
+	if err := s.ensureColumn("users", "balance",
+		`balance INTEGER NOT NULL DEFAULT 0`); err != nil {
+		return err
+	}
+	if err := s.ensureColumn("users", "token_version",
+		`token_version INTEGER NOT NULL DEFAULT 0`); err != nil {
+		return err
+	}
+
+	// tokens:可选准入限额(NULL = 不限额度,只准入不扣费)。
+	// 该列可空,故 DDL 不带 NOT NULL DEFAULT。
+	if err := s.ensureColumn("tokens", "limit_quota",
+		`limit_quota INTEGER`); err != nil {
+		return err
+	}
+
+	// charge_logs:资金流水/审计。
+	// 只记余额来源(充值/兑换/手动调整/赠送);调用消费由 usage.actual_quota 覆盖,
+	// **不双写**(决策 D25/D33)。
+	if _, err := s.db.Exec(`
+		CREATE TABLE IF NOT EXISTS charge_logs (
+			id            INTEGER PRIMARY KEY AUTOINCREMENT,
+			user_id       INTEGER NOT NULL REFERENCES users(id),
+			type          TEXT    NOT NULL,
+			delta         INTEGER NOT NULL,
+			balance_after INTEGER NOT NULL,
+			source        TEXT    NOT NULL DEFAULT '',
+			remark        TEXT    NOT NULL DEFAULT '',
+			created_at    TEXT    NOT NULL DEFAULT (datetime('now'))
+		)`); err != nil {
+		return fmt.Errorf("create charge_logs: %w", err)
+	}
+	if _, err := s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_charge_logs_user_time ON charge_logs(user_id, created_at)`); err != nil {
+		return fmt.Errorf("create idx_charge_logs_user_time: %w", err)
+	}
+
+	// redemptions:充值码(一次性;used_by/used_at 标记,原子兑换靠 UNIQUE + 条件 UPDATE)
+	if _, err := s.db.Exec(`
+		CREATE TABLE IF NOT EXISTS redemptions (
+			id         INTEGER PRIMARY KEY AUTOINCREMENT,
+			code       TEXT    NOT NULL UNIQUE,
+			quota      INTEGER NOT NULL,
+			used_by    INTEGER,
+			used_at    TEXT,
+			remark     TEXT    NOT NULL DEFAULT '',
+			created_at TEXT    NOT NULL DEFAULT (datetime('now'))
+		)`); err != nil {
+		return fmt.Errorf("create redemptions: %w", err)
+	}
+
+	// usage 预扣中态的唯一性保护:同一 request_id 至多一条 status=0。
+	// SQLite 支持部分索引;这是防「预扣重放 → 双重扣款」的落脚点(决策 X16)。
+	if _, err := s.db.Exec(`
+		CREATE UNIQUE INDEX IF NOT EXISTS idx_usage_request_pending
+		    ON usage(request_id) WHERE status = 0`); err != nil {
+		return fmt.Errorf("create idx_usage_request_pending: %w", err)
+	}
+
+	// seed 的 default 用户升为管理员(幂等;存量库 is_admin=0 直接升级)。
+	if _, err := s.db.Exec(`UPDATE users SET is_admin = 1 WHERE name = 'default' AND is_admin = 0`); err != nil {
+		return fmt.Errorf("promote default user to admin: %w", err)
+	}
+
+	return nil
+}
+
+// EnforceInitialSecurityPolicy 应用一次性的初始安全策略(决策 D24 + D31(c))。
+//
+// 【为什么必须由启动流程在 seed 之后单独调用】
+// 全新安装时 migrate() 跑在 seed 之前(main.go: Open → 之后才 SeedDefaultTokensIfEmpty),
+// 那一刻 default 用户还不存在,策略无处可依。因此本方法独立于 migrate,由 main 在 seed 后调用。
+//
+// 规则:
+//   - 仅当 settings.allow_register **从未被设置过**时才动作 —— 绝不覆盖管理员的显式设置(D31(c));
+//   - default 用户存在且 password_hash 为空 → 写入 allow_register=0 并打 WARN,
+//     提示尽快经由「本机来源」或「admin_key」通道设密。
+//
+// 幂等:可重复调用。注意 allow_register 未设置时 SettingsGetBool 会回退到 false,
+// 即"默认不允许自由注册";这里写 '0' 是为了把状态显式化并留下 WARN。
+func (s *Store) EnforceInitialSecurityPolicy() error {
+	// ⚠️【必须在 seed 之后跑,否则全新安装时形同虚设】
+	//
+	// migrate() 里的同一条 UPDATE 只对**升级**场景有效:全新安装时 migrate() 跑在
+	// seed 之前,那一刻 default 还不存在(影响 0 行),而 seed 的
+	// `INSERT OR IGNORE INTO users (name, status, quota, used_quota, ...)` 不带 is_admin,
+	// 于是新装的 default 永远是 is_admin=0 —— 管理角色缺失,连"最后一个 admin 保护"
+	// 都会因为"可用管理员数=0"而失效。
+	//
+	// 这条 UPDATE 幂等,且对升级场景是重复执行(无副作用)。
+	if _, err := s.db.Exec(`UPDATE users SET is_admin = 1 WHERE name = 'default' AND is_admin = 0`); err != nil {
+		return fmt.Errorf("store: enforce policy promote default: %w", err)
+	}
+
+	var existing string
+	err := s.db.QueryRow(`SELECT value FROM settings WHERE key = 'allow_register'`).Scan(&existing)
+	switch {
+	case err == nil:
+		return nil // 管理员已显式设置过,不覆盖
+	case errors.Is(err, sql.ErrNoRows):
+		// 未设置 → 继续评估
+	default:
+		return fmt.Errorf("store: enforce policy read allow_register: %w", err)
+	}
+
+	var hash string
+	err = s.db.QueryRow(`SELECT password_hash FROM users WHERE name = 'default'`).Scan(&hash)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return nil // 尚无 default 用户(全新库未 seed)→ 无需动作
+	case err != nil:
+		return fmt.Errorf("store: enforce policy read default user: %w", err)
+	}
+	if hash != "" {
+		return nil // 已设密 → 无需强制关闭注册
+	}
+
+	if _, err := s.db.Exec(`
+		INSERT INTO settings (key, value, updated_at) VALUES ('allow_register', '0', datetime('now'))
+		ON CONFLICT(key) DO NOTHING`); err != nil {
+		return fmt.Errorf("store: enforce policy set allow_register: %w", err)
+	}
+	log.Printf("[store] WARN: default 账号尚未设置密码,已强制关闭自由注册(allow_register=0)。" +
+		"请从服务器本机或携带有效 admin_key 调用 POST /api/auth/setup-password 设置密码," +
+		"之后可在管理后台按需重新开启注册。")
 	return nil
 }
 

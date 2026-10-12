@@ -5,25 +5,40 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
 )
 
 // Token 是 tokens 表的一行。
+//
+// STAGE4 语义变更(决策 C):
+//   - 扣费主源已迁到 users.balance;本表退化为「认证凭证 + 可选准入限额」
+//   - LimitQuota 是**可选准入阈值**:nil = 不限额度;非 nil = used_quota 超过即拒绝(402)
+//   - RemainQuota **冻结**为历史值(迁移不改、不再更新),仅供只读展示
+//   - UsedQuota 语义从"累计消费镜像"变为**限额预占计数器**:
+//     预扣 +Pre、结算 +(Actual-Pre)、退款 -Pre ⇒ 净效果等于累计 actual
 type Token struct {
 	ID          int64  `json:"id"`
 	UserID      int64  `json:"user_id"`
 	Name        string `json:"name"`
-	KeyHash     string `json:"-"`              // 不暴露 hash 给前端
-	KeyPrefix   string `json:"key_prefix"`     // 明文前 8 字符,对账识别
-	RemainQuota int64  `json:"remain_quota"`   // 3b 用
-	UsedQuota   int64  `json:"used_quota"`     // 3b 用
-	Unlimited   bool   `json:"unlimited"`      // 1=不限
-	Status      int    `json:"status"`         // 1=enabled 2=disabled
+	KeyHash     string `json:"-"`            // 不暴露 hash 给前端
+	KeyPrefix   string `json:"key_prefix"`   // 明文前 8 字符,对账识别
+	RemainQuota int64  `json:"remain_quota"` // 阶段 3b 遗留:已冻结,只读展示
+	UsedQuota   int64  `json:"used_quota"`   // 限额预占计数器(含历史用量)
+	// LimitQuota 是可选的**准入限额**:nil = 不限额度。
+	// ⚠️ Unlimited=true 时本字段被**忽略**(不计费也就无所谓限额);
+	// 不会因为置 unlimited 而自动清空它,以免"切换开关丢配置"。
+	LimitQuota *int64 `json:"limit_quota"`
+	Unlimited   bool   `json:"unlimited"`    // 1=不限(不计费,但仍受欠费停服约束)
+	Status      int    `json:"status"`       // 1=enabled 2=disabled
 	CreatedAt   string `json:"created_at"`
 	UpdatedAt   string `json:"updated_at"`
 }
+
+// tokenColumns 是 tokens 表的统一 SELECT 列顺序(四处查询共用,防 scan 顺序漂移)。
+const tokenColumns = `id, user_id, name, key_hash, key_prefix, remain_quota, used_quota, limit_quota, unlimited, status, created_at, updated_at`
 
 // HashKey 返回 sha256(key) 的 hex 编码(64 字符小写)。key_hash 列存这个值。
 // 决策 #1:用 sha256 + hex 字符串,索引友好。
@@ -73,10 +88,10 @@ type sqlExecer interface {
 // insertToken 是 TokenInsert 与 SeedDefaultTokens 共用的核心插入(UNIQUE 冲突 → ErrDuplicate)。
 func insertToken(ex sqlExecer, t Token) (int64, error) {
 	res, err := ex.Exec(`
-		INSERT INTO tokens (user_id, name, key_hash, key_prefix, remain_quota, used_quota, unlimited, status, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))`,
+		INSERT INTO tokens (user_id, name, key_hash, key_prefix, remain_quota, used_quota, limit_quota, unlimited, status, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))`,
 		t.UserID, t.Name, t.KeyHash, t.KeyPrefix, t.RemainQuota, t.UsedQuota,
-		boolToInt(t.Unlimited), t.Status)
+		t.LimitQuota, boolToInt(t.Unlimited), t.Status)
 	if err != nil {
 		if isUniqueViolation(err) {
 			return 0, ErrDuplicate
@@ -98,7 +113,7 @@ func insertToken(ex sqlExecer, t Token) (int64, error) {
 //   2) user.status=1   → 否则 403 user_disabled
 // 中间件顺序读两步,语义清晰。
 func (s *Store) TokenGetByKeyHash(hash string) (*Token, error) {
-	row := s.db.QueryRow(`SELECT id, user_id, name, key_hash, key_prefix, remain_quota, used_quota, unlimited, status, created_at, updated_at
+	row := s.db.QueryRow(`SELECT `+tokenColumns+`
 	                     FROM tokens WHERE key_hash = ?`, strings.TrimSpace(hash))
 	t, err := scanToken(row)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -196,8 +211,10 @@ func (s *Store) SeedDefaultTokens(authKeys []string, defaultUserName string) (in
 func scanToken(r scanner) (Token, error) {
 	var t Token
 	var unlimited int
+	// LimitQuota 是 *int64:扫描 **int64 时 database/sql 会把 NULL 置为 nil
+	// (与 usage.channel_id 同一套 nullable 处理)。
 	err := r.Scan(&t.ID, &t.UserID, &t.Name, &t.KeyHash, &t.KeyPrefix,
-		&t.RemainQuota, &t.UsedQuota, &unlimited, &t.Status, &t.CreatedAt, &t.UpdatedAt)
+		&t.RemainQuota, &t.UsedQuota, &t.LimitQuota, &unlimited, &t.Status, &t.CreatedAt, &t.UpdatedAt)
 	if err != nil {
 		return t, err
 	}
@@ -252,7 +269,7 @@ func (s *Store) TokenIncreaseQuota(id, amount int64) error {
 
 // TokenGet 按 id 查;未命中 → ErrNotFound。
 func (s *Store) TokenGet(id int64) (*Token, error) {
-	row := s.db.QueryRow(`SELECT id, user_id, name, key_hash, key_prefix, remain_quota, used_quota, unlimited, status, created_at, updated_at
+	row := s.db.QueryRow(`SELECT `+tokenColumns+`
 	                     FROM tokens WHERE id = ?`, id)
 	t, err := scanToken(row)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -267,7 +284,7 @@ func (s *Store) TokenGet(id int64) (*Token, error) {
 // TokenListByUser 列某 user 名下全部 token(含 disabled),ORDER BY id ASC。
 // 决策 #1(GET /users/{id}/tokens):不返回明文 key,只返回 key_prefix。
 func (s *Store) TokenListByUser(userID int64) ([]Token, error) {
-	rows, err := s.db.Query(`SELECT id, user_id, name, key_hash, key_prefix, remain_quota, used_quota, unlimited, status, created_at, updated_at
+	rows, err := s.db.Query(`SELECT `+tokenColumns+`
 	                        FROM tokens WHERE user_id = ? ORDER BY id ASC`, userID)
 	if err != nil {
 		return nil, fmt.Errorf("store: token list by user id=%d: %w", userID, err)
@@ -287,13 +304,42 @@ func (s *Store) TokenListByUser(userID int64) ([]Token, error) {
 	return out, nil
 }
 
+// OptInt64 是三态整数,用于 PATCH 的「字段未出现 / 显式 null / 具体值」语义(决策 X6)。
+//
+//   - 字段未出现        → Set=false                 → 不改
+//   - 字段出现且为 null → Set=true, Value=nil       → 清为"不限"
+//   - 字段出现且有整数  → Set=true, Value=&n        → 设为 n
+//
+// 不能直接用 *int64:Go 的 encoding/json 无法把"字段缺失"与"显式 null"区分开。
+type OptInt64 struct {
+	Set   bool
+	Value *int64
+}
+
+// UnmarshalJSON 记录字段是否出现,并区分 null 与具体值。
+func (o *OptInt64) UnmarshalJSON(b []byte) error {
+	o.Set = true
+	if strings.TrimSpace(string(b)) == "null" {
+		o.Value = nil
+		return nil
+	}
+	var n int64
+	if err := json.Unmarshal(b, &n); err != nil {
+		return fmt.Errorf("value must be an integer or null: %w", err)
+	}
+	o.Value = &n
+	return nil
+}
+
 // TokenUpdatePatch 是 token 部分更新的入参(指针语义:nil=不改)。
-// Quota 是**绝对值**(决策 #4:PATCH 直接把 remain_quota 设为该值,不做增减)。
+//
+// STAGE4 变更:原 `Quota *int64`(直接写 remain_quota)已**移除** ——
+// remain_quota 冻结为只读历史值(决策 C);改用 LimitQuota 表达可选准入限额。
 type TokenUpdatePatch struct {
-	Name      *string
-	Unlimited *bool
-	Status    *int
-	Quota     *int64
+	Name       *string
+	Unlimited  *bool
+	Status     *int
+	LimitQuota OptInt64
 }
 
 // TokenUpdate 按字段部分更新;未命中 → ErrNotFound;status ∉ {1,2} → ErrInvalid。
@@ -302,8 +348,8 @@ func (s *Store) TokenUpdate(id int64, p TokenUpdatePatch) error {
 	if p.Status != nil && *p.Status != 1 && *p.Status != 2 {
 		return fmt.Errorf("%w: status must be 1 (enabled) or 2 (disabled)", ErrInvalid)
 	}
-	if p.Quota != nil && *p.Quota < 0 {
-		return fmt.Errorf("%w: quota must be >= 0", ErrInvalid)
+	if p.LimitQuota.Set && p.LimitQuota.Value != nil && *p.LimitQuota.Value < 0 {
+		return fmt.Errorf("%w: limit_quota must be >= 0", ErrInvalid)
 	}
 
 	sets := make([]string, 0, 5)
@@ -324,10 +370,14 @@ func (s *Store) TokenUpdate(id int64, p TokenUpdatePatch) error {
 		sets = append(sets, "status=?")
 		args = append(args, *p.Status)
 	}
-	if p.Quota != nil {
-		// 决策 #4:绝对值覆盖
-		sets = append(sets, "remain_quota=?")
-		args = append(args, *p.Quota)
+	if p.LimitQuota.Set {
+		if p.LimitQuota.Value == nil {
+			// 显式 null:清为"不限"
+			sets = append(sets, "limit_quota=NULL")
+		} else {
+			sets = append(sets, "limit_quota=?")
+			args = append(args, *p.LimitQuota.Value)
+		}
 	}
 	if len(sets) == 0 {
 		if _, err := s.TokenGet(id); err != nil {
@@ -375,26 +425,115 @@ func GenerateTokenKey() (string, error) {
 
 // TokenCreateWithKey 服务端生成明文 key 并入库,返回 (tokenID, 明文key)。
 // **明文 key 只在此刻返回一次**,之后任何查询只有 key_hash / key_prefix(决策 #1)。
-// quota 是初始 remain_quota;unlimited 为 true 时额度不参与校验(3b 仍会记流水)。
-func (s *Store) TokenCreateWithKey(userID int64, name string, unlimited bool, quota int64) (int64, string, error) {
-	if quota < 0 {
-		return 0, "", fmt.Errorf("%w: quota must be >= 0", ErrInvalid)
+//
+// STAGE4:limitQuota 是可选**准入限额**(nil = 不限额度,只受 users.balance 约束)。
+// 不再接受初始 remain_quota —— 该列已冻结(决策 C / D11 / D18)。
+func (s *Store) TokenCreateWithKey(userID int64, name string, unlimited bool, limitQuota *int64) (int64, string, error) {
+	if limitQuota != nil && *limitQuota < 0 {
+		return 0, "", fmt.Errorf("%w: limit_quota must be >= 0", ErrInvalid)
 	}
 	key, err := GenerateTokenKey()
 	if err != nil {
 		return 0, "", err
 	}
 	id, err := s.TokenInsert(Token{
-		UserID:      userID,
-		Name:        name,
-		KeyHash:     HashKey(key),
-		KeyPrefix:   KeyPrefix(key),
-		RemainQuota: quota,
-		Unlimited:   unlimited,
-		Status:      1,
+		UserID:     userID,
+		Name:       name,
+		KeyHash:    HashKey(key),
+		KeyPrefix:  KeyPrefix(key),
+		LimitQuota: limitQuota,
+		Unlimited:  unlimited,
+		Status:     1,
 	})
 	if err != nil {
 		return 0, "", err
 	}
 	return id, key, nil
+}
+
+// ---- STAGE4:自助接口的归属校验原语 ----------------------------------
+
+// TokenGetOwned 按 id + user_id 取 token;不属于该 user 或不存在 → ErrNotFound。
+//
+// 刻意返回 ErrNotFound 而不是 403:不泄露"该 id 存在但不属于你"(避免枚举他人 id)。
+func (s *Store) TokenGetOwned(id, userID int64) (*Token, error) {
+	row := s.db.QueryRow(`SELECT `+tokenColumns+`
+	                     FROM tokens WHERE id = ? AND user_id = ?`, id, userID)
+	t, err := scanToken(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("store: token get owned id=%d user=%d: %w", id, userID, err)
+	}
+	return &t, nil
+}
+
+// TokenUpdateOwned 是带归属约束的部分更新(自助接口用)。
+// WHERE 同时限定 id 与 user_id,越权更新不会命中 → ErrNotFound。
+func (s *Store) TokenUpdateOwned(id, userID int64, p TokenUpdatePatch) error {
+	if p.Status != nil && *p.Status != 1 && *p.Status != 2 {
+		return fmt.Errorf("%w: status must be 1 (enabled) or 2 (disabled)", ErrInvalid)
+	}
+	if p.LimitQuota.Set && p.LimitQuota.Value != nil && *p.LimitQuota.Value < 0 {
+		return fmt.Errorf("%w: limit_quota must be >= 0", ErrInvalid)
+	}
+
+	sets := make([]string, 0, 5)
+	args := make([]any, 0, 7)
+	if p.Name != nil {
+		name := strings.TrimSpace(*p.Name)
+		if name == "" {
+			return fmt.Errorf("%w: name is required", ErrInvalid)
+		}
+		sets = append(sets, "name=?")
+		args = append(args, name)
+	}
+	if p.Unlimited != nil {
+		sets = append(sets, "unlimited=?")
+		args = append(args, boolToInt(*p.Unlimited))
+	}
+	if p.Status != nil {
+		sets = append(sets, "status=?")
+		args = append(args, *p.Status)
+	}
+	if p.LimitQuota.Set {
+		if p.LimitQuota.Value == nil {
+			sets = append(sets, "limit_quota=NULL")
+		} else {
+			sets = append(sets, "limit_quota=?")
+			args = append(args, *p.LimitQuota.Value)
+		}
+	}
+	if len(sets) == 0 {
+		if _, err := s.TokenGetOwned(id, userID); err != nil {
+			return err
+		}
+		return nil
+	}
+	sets = append(sets, "updated_at=datetime('now')")
+	args = append(args, id, userID)
+	res, err := s.db.Exec(`UPDATE tokens SET `+strings.Join(sets, ", ")+` WHERE id = ? AND user_id = ?`, args...)
+	if err != nil {
+		return fmt.Errorf("store: token update owned id=%d user=%d: %w", id, userID, err)
+	}
+	// 归属校验兜底:越权(命中 0 行且非"值未变")时判 ErrNotFound。
+	if _, err := s.TokenGetOwned(id, userID); err != nil {
+		return err
+	}
+	_ = res
+	return nil
+}
+
+// TokenDeleteOwned 删除属于该 user 的 token;不属于或不存在 → ErrNotFound。
+func (s *Store) TokenDeleteOwned(id, userID int64) error {
+	res, err := s.db.Exec(`DELETE FROM tokens WHERE id = ? AND user_id = ?`, id, userID)
+	if err != nil {
+		return fmt.Errorf("store: token delete owned id=%d user=%d: %w", id, userID, err)
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
 }

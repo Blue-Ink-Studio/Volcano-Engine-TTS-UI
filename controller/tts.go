@@ -259,14 +259,37 @@ func OpenaiTTSHandler(w http.ResponseWriter, r *http.Request) {
 	chars := utf8.RuneCountInString(req.Input)
 	localReqID := newLocalRequestID()
 	caller := middleware.CallerFromContext(r.Context())
-	billSess, billErr := preConsumeQuota(caller, chars)
+	billSess, billErr := preConsumeQuota(caller, chars, localReqID)
 	if billErr != nil {
-		if errors.Is(billErr, billing.ErrQuotaExhausted) {
+		// 402 的四种语义分别对应不同 code(文档 §17 错误码总表)
+		switch {
+		case errors.Is(billErr, billing.ErrBalanceNegative):
+			log.Printf("警告: 账户欠费停服 - user_id=%d token_id=%d 路径=%s 客户端=%s",
+				caller.UserID, caller.TokenID, r.URL.Path, middleware.GetClientIP(r))
+			metrics.RequestTotal.Inc(telemetry.Labels{"status": "balance_negative", "format": clientFormat, "speaker": "", "model": ""})
+			middleware.SendJSONError(w, http.StatusPaymentRequired,
+				"account balance is negative; service is suspended until recharged",
+				"insufficient_quota", "balance_negative")
+			return
+		case errors.Is(billErr, billing.ErrTokenLimitExceeded):
+			log.Printf("警告: token 限额用尽 - token_id=%d 路径=%s 客户端=%s",
+				caller.TokenID, r.URL.Path, middleware.GetClientIP(r))
+			metrics.RequestTotal.Inc(telemetry.Labels{"status": "token_limit_exceeded", "format": clientFormat, "speaker": "", "model": ""})
+			middleware.SendJSONError(w, http.StatusPaymentRequired,
+				"token quota limit exceeded", "insufficient_quota", "token_limit_exceeded")
+			return
+		case errors.Is(billErr, billing.ErrDuplicateRequest):
+			log.Printf("警告: 重复的在途请求 - token_id=%d req_id=%s", caller.TokenID, localReqID)
+			metrics.RequestTotal.Inc(telemetry.Labels{"status": "duplicate_request", "format": clientFormat, "speaker": "", "model": ""})
+			middleware.SendJSONError(w, http.StatusPaymentRequired,
+				"duplicate in-flight request", "insufficient_quota", "duplicate_request")
+			return
+		case errors.Is(billErr, billing.ErrQuotaExhausted):
 			log.Printf("警告: 额度不足 - token_id=%d 路径=%s 客户端=%s",
 				caller.TokenID, r.URL.Path, middleware.GetClientIP(r))
 			metrics.RequestTotal.Inc(telemetry.Labels{"status": "quota_exhausted", "format": clientFormat, "speaker": "", "model": ""})
 			middleware.SendJSONError(w, http.StatusPaymentRequired,
-				"quota exhausted", "insufficient_quota", "quota_exhausted")
+				"insufficient balance", "insufficient_quota", "insufficient_balance")
 			return
 		}
 		log.Printf("警告: 预扣额度失败 - 错误=%v 路径=%s 客户端=%s",
@@ -445,10 +468,13 @@ func newLocalRequestID() string {
 //
 //   - caller == nil(setup 模式 / 匿名)→ 返 (nil, nil),不计费(阶段 0 行为)
 //   - store 未初始化 → 返 error(上层 500,不静默放行,避免白嫖)
-//   - 额度不足 → billing.ErrQuotaExhausted(上层 402)
+//   - 额度不足 / 欠费 / 超限 / 重放 → billing 的对应语义错误(上层 402)
+//
+// reqID 是本地请求号:**预扣时**就要落 pending 流水(决策 X26),它同时是
+// 三段式的定位键 —— 结算/退款都靠它找到那一行,所以必须在此传入。
 //
 // 倍率取 billing.DefaultRatios()(当前占位 1:1;拿到 v2 倍率后只改 billing 包)。
-func preConsumeQuota(caller *middleware.Caller, chars int) (*billing.Session, error) {
+func preConsumeQuota(caller *middleware.Caller, chars int, reqID string) (*billing.Session, error) {
 	if caller == nil {
 		return nil, nil
 	}
@@ -456,7 +482,7 @@ func preConsumeQuota(caller *middleware.Caller, chars int) (*billing.Session, er
 	if db == nil {
 		return nil, errors.New("billing: store not initialized")
 	}
-	return billing.PreConsume(db, caller.UserID, caller.TokenID, caller.Unlimited, chars, billing.DefaultRatios())
+	return billing.PreConsume(db, caller.UserID, caller.TokenID, caller.Unlimited, chars, reqID, billing.DefaultRatios())
 }
 
 // settleUsage 合成成功后结算:按实际音频时长多退少补,并写 status=1 的流水。

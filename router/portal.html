@@ -1,0 +1,827 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>火山 TTS · 用户门户</title>
+    <script>try{var t=localStorage.getItem('ttsTheme')||'auto',d=t==='auto'?(matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light'):t;document.documentElement.setAttribute('data-theme',d)}catch(e){}</script>
+    <script src="https://cdn.bootcdn.net/ajax/libs/vue/3.4.21/vue.global.prod.js"></script>
+    <script src="https://cdn.bootcdn.net/ajax/libs/axios/1.6.7/axios.min.js"></script>
+    <link rel="stylesheet" href="/portal/admin.css">
+</head>
+<body>
+    <div id="app">
+        <div class="app-shell">
+            <aside id="portal-sidebar"></aside>
+
+            <main class="main" v-cloak>
+                <!-- 顶部:欠费/余额不足横幅 + 当前用户 + 退出(§9.2 第 8 项) -->
+                <div v-if="me && me.balance < 0" class="alert alert-danger banner-hard">
+                    <span class="alert-icon">⛔</span>
+                    <div class="alert-body">
+                        <div class="alert-title">账户已欠费，API 已暂停，请充值后恢复</div>
+                        <div class="alert-desc">余额 {{ formatInt(me.balance) }}。<a href="#balance" class="link-inline">前往兑换充值码</a>；充值时请先填平欠费，再留出本次调用的预扣额度。</div>
+                    </div>
+                </div>
+                <div v-else-if="me && me.balance === 0" class="alert alert-warning banner-soft">
+                    <span class="alert-icon">⚠</span>
+                    <div class="alert-body">
+                        <div class="alert-title">余额不足，请充值</div>
+                        <div class="alert-desc">余额为 0，后续调用会返回 402。<a href="#balance" class="link-inline">兑换充值码</a></div>
+                    </div>
+                </div>
+
+                <header class="page-head">
+                    <div>
+                        <h1 class="page-title">我的控制台</h1>
+                        <p class="page-sub">
+                            {{ me ? me.name : '—' }}
+                            <span v-if="me && me.is_admin" class="tag tag-accent" style="margin-left:6px;">管理员</span>
+                            · 注册于 {{ fmtDate(me && me.created_at) }}
+                            <span v-if="USE_MOCK" class="pill pill-warning" style="margin-left:6px;" title="portal-shell.js 里 USE_MOCK = true">桩数据</span>
+                        </p>
+                    </div>
+                    <div class="page-actions">
+                        <button class="btn" @click="reloadAll">↻ 刷新</button>
+                        <a v-if="me && me.is_admin" class="btn" href="/dashboard">管理后台</a>
+                        <button class="btn btn-danger-ghost" @click="logout">退出</button>
+                    </div>
+                </header>
+
+                <div v-if="actionErr" class="alert alert-danger">
+                    <span class="alert-icon">⚠</span>
+                    <div class="alert-body">
+                        <div class="alert-title">操作失败</div>
+                        <div class="alert-desc">{{ actionErr }}</div>
+                    </div>
+                </div>
+
+                <!-- ① 余额卡 + ⑧ 兑换入口 -->
+                <div class="stat-grid">
+                    <div class="balance-card" :class="balanceClass">
+                        <div class="stat-top">
+                            <span class="stat-label">账户余额</span>
+                            <span class="pill" :class="balancePillClass">{{ balanceState }}</span>
+                        </div>
+                        <div class="stat-value balance-value">{{ me ? formatInt(me.balance) : '—' }}<span class="stat-unit">额度</span></div>
+                        <div class="stat-foot">余额按实际用量结算扣减；欠费（&lt; 0）时 API 会暂停</div>
+                        <div class="balance-actions">
+                            <button class="btn btn-primary btn-sm" @click="scrollTo('balance')">充值码兑换</button>
+                            <button class="btn btn-sm" @click="scrollTo('chargelogs')">查看余额流水</button>
+                        </div>
+                    </div>
+
+                    <!-- ② 用量统计卡 -->
+                    <div class="stat-card">
+                        <div class="stat-top"><span class="stat-label">消耗额度（近 {{ statsDays }} 天）</span></div>
+                        <div class="stat-value">{{ formatInt(totals.actual_quota || 0) }}<span class="stat-unit">额度</span></div>
+                        <div class="stat-foot">仅统计已结算调用（status=1）</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-top"><span class="stat-label">合成字符数</span></div>
+                        <div class="stat-value">{{ formatInt(totals.characters || 0) }}<span class="stat-unit">字符</span></div>
+                        <div class="stat-foot">成功结算的字符数（rune）</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-top"><span class="stat-label">调用次数</span></div>
+                        <div class="stat-value">{{ formatInt(totals.requests || 0) }}<span class="stat-unit">次</span></div>
+                        <div class="stat-foot">音频 {{ ((totals.audio_ms || 0) / 1000).toFixed(1) }} 秒 · {{ fmtBytes(totals.audio_bytes || 0) }}</div>
+                    </div>
+                </div>
+
+                <!-- ③ 用量趋势图(纯 CSS 柱状图,不引入图表库) -->
+                <div class="data-card card-gap">
+                    <div class="card-head">
+                        <div>
+                            <div class="card-title">用量趋势（按天，额度）</div>
+                            <div class="card-sub">日期轴为北京时间日界；只统计已结算调用</div>
+                        </div>
+                        <div class="card-tools">
+                            <select v-model.number="statsDays" @change="loadStats" class="select-sm">
+                                <option :value="7">近 7 天</option>
+                                <option :value="14">近 14 天</option>
+                                <option :value="30">近 30 天</option>
+                                <option :value="90">近 90 天</option>
+                            </select>
+                        </div>
+                    </div>
+                    <div class="chart" v-if="chartBars.length">
+                        <div v-for="b in chartBars" :key="b.date" class="chart-col">
+                            <div class="chart-bar-wrap">
+                                <div class="chart-bar" :style="{height: b.h + '%'}" :title="b.date + '：' + b.q + ' 额度 / ' + b.req + ' 次调用'"></div>
+                            </div>
+                            <div class="chart-label">{{ b.label }}</div>
+                        </div>
+                    </div>
+                    <div v-else class="empty">
+                        <div class="empty-icon">▤</div>
+                        <div class="empty-title">暂无用量数据</div>
+                        <div class="empty-desc">这段时间还没有已结算的调用</div>
+                    </div>
+                </div>
+
+                <!-- ④ 我的令牌管理 -->
+                <div class="data-card card-gap" id="tokens">
+                    <div class="card-head">
+                        <div>
+                            <div class="card-title">我的令牌（{{ tokens.length }}）</div>
+                            <div class="card-sub">令牌只做「认证凭证 + 准入限额」；实际计费从账户余额扣减</div>
+                        </div>
+                        <button class="btn btn-primary btn-sm" @click="openTokenCreate">+ 新建令牌</button>
+                    </div>
+
+                    <div v-if="tokens.length" class="table-scroll">
+                        <table class="data-table">
+                            <thead>
+                                <tr>
+                                    <th>名称</th>
+                                    <th>Key 前缀</th>
+                                    <th>限额</th>
+                                    <th>限额已用</th>
+                                    <th>历史额度</th>
+                                    <th>状态</th>
+                                    <th>创建时间</th>
+                                    <th class="th-actions">操作</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <tr v-for="t in tokens" :key="t.id">
+                                    <td>
+                                        <div class="cell-name">{{ t.name }}</div>
+                                        <div class="cell-sub">#{{ t.id }}</div>
+                                    </td>
+                                    <td><span class="cell-mono">{{ t.key_prefix }}…</span></td>
+                                    <td>
+                                        <span v-if="t.limit_quota === null || t.limit_quota === undefined" class="tag tag-accent">不限</span>
+                                        <span v-else class="cell-mono">{{ formatQty(t.limit_quota) }}</span>
+                                    </td>
+                                    <td>
+                                        <span class="cell-mono">{{ formatQty(t.used_quota) }}</span>
+                                        <span class="cell-sub">含历史用量</span>
+                                    </td>
+                                    <td>
+                                        <span class="cell-mono text-mute">{{ formatQty(t.remain_quota) }}</span>
+                                        <span class="cell-sub">冻结，不再变动</span>
+                                    </td>
+                                    <td>
+                                        <span class="pill" :class="t.status === 1 ? 'pill-success' : 'pill-warning'">
+                                            <span class="pill-dot"></span>{{ t.status === 1 ? '启用' : '停用' }}
+                                        </span>
+                                    </td>
+                                    <td><span class="text-mute">{{ fmtDate(t.created_at) }}</span></td>
+                                    <td class="th-actions">
+                                        <div class="td-actions">
+                                            <label class="switch" :title="t.status === 1 ? '点击停用' : '点击启用'">
+                                                <input type="checkbox" :checked="t.status === 1" @change="toggleToken(t)">
+                                                <span class="switch-track"></span>
+                                            </label>
+                                            <button class="btn btn-sm" @click="openTokenEdit(t)">编辑</button>
+                                            <button class="btn btn-sm btn-danger-ghost" @click="removeToken(t)">删除</button>
+                                        </div>
+                                    </td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                    <div v-else class="empty">
+                        <div class="empty-icon">🔑</div>
+                        <div class="empty-title">还没有令牌</div>
+                        <div class="empty-desc">新建一个令牌用于调用 <code>/v1/audio/speech</code><br>明文 Key 只在创建时显示一次，请立即保存</div>
+                        <button class="btn btn-primary" @click="openTokenCreate">+ 新建令牌</button>
+                    </div>
+                    <div class="card-foot-hint">
+                        调用示例：<code>curl -H "Authorization: Bearer &lt;你的令牌&gt;" ... /v1/audio/speech</code>
+                    </div>
+                </div>
+
+                <!-- ⑤ 调用流水(usage) -->
+                <div class="data-card card-gap" id="usage">
+                    <div class="card-head">
+                        <div>
+                            <div class="card-title">调用流水</div>
+                            <div class="card-sub">共 {{ usageTotal }} 条 · 按时间倒序；「进行中」表示预扣中，尚未结算</div>
+                        </div>
+                        <button class="btn btn-sm" @click="clearUsageFilter">重置筛选</button>
+                    </div>
+                    <div class="filter-bar">
+                        <div class="field">
+                            <label>令牌</label>
+                            <select v-model="usageFilter.token_id">
+                                <option value="">全部令牌</option>
+                                <option v-for="t in tokens" :key="t.id" :value="t.id">{{ t.name }}</option>
+                            </select>
+                        </div>
+                        <div class="field">
+                            <label>状态</label>
+                            <select v-model="usageFilter.status">
+                                <option value="">全部状态</option>
+                                <option value="0">进行中</option>
+                                <option value="1">已结算</option>
+                                <option value="2">已退款</option>
+                            </select>
+                        </div>
+                        <div class="field">
+                            <label>起始日期</label>
+                            <input type="date" v-model="usageFilter.from">
+                        </div>
+                        <div class="field">
+                            <label>结束日期</label>
+                            <input type="date" v-model="usageFilter.to">
+                        </div>
+                        <div class="field filter-actions">
+                            <button class="btn btn-primary btn-sm" @click="applyUsageFilter">筛选</button>
+                        </div>
+                    </div>
+
+                    <div v-if="usageRows.length" class="table-scroll">
+                        <table class="data-table">
+                            <thead>
+                                <tr>
+                                    <th>时间</th>
+                                    <th>令牌</th>
+                                    <th>模型</th>
+                                    <th>字符</th>
+                                    <th>音频</th>
+                                    <th>预扣 / 实际</th>
+                                    <th>状态</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <tr v-for="u in usageRows" :key="u.id">
+                                    <td><span class="text-mute">{{ fmtTime(u.created_at) }}</span></td>
+                                    <td><span class="cell-name">{{ u.token_name || ('#' + u.token_id) }}</span></td>
+                                    <td><span class="cell-mono">{{ u.model }}</span></td>
+                                    <td><span class="cell-mono">{{ formatQty(u.characters) }}</span></td>
+                                    <td><span class="cell-mono">{{ u.audio_ms ? (u.audio_ms / 1000).toFixed(1) + 's' : '—' }}</span></td>
+                                    <td><span class="cell-mono">{{ formatQty(u.pre_consumed) }} / {{ formatQty(u.actual_quota) }}</span></td>
+                                    <td>
+                                        <span class="pill" :class="usageStatusClass(u.status)">
+                                            <span class="pill-dot"></span>{{ usageStatusText(u.status) }}
+                                        </span>
+                                    </td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                    <div v-else class="empty">
+                        <div class="empty-icon">▤</div>
+                        <div class="empty-title">没有调用记录</div>
+                        <div class="empty-desc">当前筛选条件下没有数据</div>
+                    </div>
+                    <div class="pager" v-if="usageTotal > usageLimit">
+                        <button class="btn btn-sm" :disabled="usageOffset <= 0" @click="usagePage(usageOffset - usageLimit)">← 上一页</button>
+                        <span class="pager-info">第 {{ usageOffset + 1 }}-{{ Math.min(usageOffset + usageLimit, usageTotal) }} / 共 {{ usageTotal }} 条</span>
+                        <button class="btn btn-sm" :disabled="usageOffset + usageLimit >= usageTotal" @click="usagePage(usageOffset + usageLimit)">下一页 →</button>
+                    </div>
+                </div>
+
+                <!-- ⑥ 余额流水(charge_logs) -->
+                <div class="data-card card-gap" id="chargelogs">
+                    <div class="card-head">
+                        <div>
+                            <div class="card-title">余额流水</div>
+                            <div class="card-sub">共 {{ logTotal }} 条 · 只记余额来源（充值/兑换/调整/赠送），调用消费见上方「调用流水」</div>
+                        </div>
+                        <div class="card-tools">
+                            <select v-model="logFilterType" @change="applyLogFilter" class="select-sm">
+                                <option value="">全部类型</option>
+                                <option value="charge">充值 charge</option>
+                                <option value="redeem">兑换 redeem</option>
+                                <option value="manual_adjust">手动调整 manual_adjust</option>
+                                <option value="grant">赠送 grant</option>
+                            </select>
+                        </div>
+                    </div>
+                    <div v-if="logRows.length" class="table-scroll">
+                        <table class="data-table">
+                            <thead>
+                                <tr>
+                                    <th>时间</th>
+                                    <th>类型</th>
+                                    <th>变动</th>
+                                    <th>变动后余额</th>
+                                    <th>来源</th>
+                                    <th>备注</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <tr v-for="l in logRows" :key="l.id">
+                                    <td><span class="text-mute">{{ fmtTime(l.created_at) }}</span></td>
+                                    <td><span class="tag" :class="logTypeTagClass(l.type)">{{ logTypeText(l.type) }}</span></td>
+                                    <td><span class="cell-mono" :class="l.delta < 0 ? 'text-danger' : 'text-success'">{{ l.delta > 0 ? '+' : '' }}{{ formatQty(l.delta) }}</span></td>
+                                    <td><span class="cell-mono">{{ formatQty(l.balance_after) }}</span></td>
+                                    <td><span class="cell-mono">{{ l.source || '—' }}</span></td>
+                                    <td><span class="text-dim">{{ l.remark || '—' }}</span></td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                    <div v-else class="empty">
+                        <div class="empty-icon">¥</div>
+                        <div class="empty-title">暂无余额流水</div>
+                        <div class="empty-desc">充值 / 兑换 / 管理员调整都会在这里留痕</div>
+                    </div>
+                    <div class="pager" v-if="logTotal > logLimit">
+                        <button class="btn btn-sm" :disabled="logOffset <= 0" @click="logPage(logOffset - logLimit)">← 上一页</button>
+                        <span class="pager-info">第 {{ logOffset + 1 }}-{{ Math.min(logOffset + logLimit, logTotal) }} / 共 {{ logTotal }} 条</span>
+                        <button class="btn btn-sm" :disabled="logOffset + logLimit >= logTotal" @click="logPage(logOffset + logLimit)">下一页 →</button>
+                    </div>
+                </div>
+
+                <!-- ⑦ 充值码兑换 + 改密 -->
+                <div class="settings-grid">
+                    <div class="card" id="balance">
+                        <div class="card-head">
+                            <div>
+                                <div class="card-title">充值码兑换</div>
+                                <div class="card-sub">16 位大写字母 + 数字；欠费状态下仍可兑换（自助恢复通道）</div>
+                            </div>
+                        </div>
+                        <div class="field">
+                            <label>充值码</label>
+                            <div class="input-group">
+                                <input v-model="redeemCode" class="mono" maxlength="16" placeholder="如 ABCD1234EFGH5678"
+                                       @keyup.enter="doRedeem" @input="redeemCode = (redeemCode || '').toUpperCase().trim()">
+                                <button class="btn btn-primary" :disabled="redeeming || !redeemCode" @click="doRedeem">
+                                    {{ redeeming ? '兑换中...' : '兑换' }}
+                                </button>
+                            </div>
+                            <div class="hint">兑换成功后余额立即增加，并写入余额流水（type=redeem）</div>
+                        </div>
+                        <div v-if="redeemErr" class="alert alert-danger" style="margin-bottom:0;">
+                            <span class="alert-icon">⚠</span>
+                            <div class="alert-body"><div class="alert-desc">{{ redeemErr }}</div></div>
+                        </div>
+                    </div>
+
+                    <div class="card">
+                        <div class="card-head">
+                            <div>
+                                <div class="card-title">修改密码</div>
+                                <div class="card-sub">密码长度 ≥ 8 位且不能为纯空白；改密后其它设备上的登录态立即失效</div>
+                            </div>
+                        </div>
+                        <div class="field">
+                            <label>当前密码</label>
+                            <input type="password" v-model="pwdForm.old" autocomplete="current-password">
+                        </div>
+                        <div class="field">
+                            <label>新密码</label>
+                            <input type="password" v-model="pwdForm.new" autocomplete="new-password">
+                        </div>
+                        <div class="field">
+                            <label>确认新密码</label>
+                            <input type="password" v-model="pwdForm.confirm" autocomplete="new-password" @keyup.enter="doChangePassword">
+                        </div>
+                        <div class="actions">
+                            <button class="btn btn-primary" :disabled="changingPwd" @click="doChangePassword">
+                                {{ changingPwd ? '提交中...' : '修改密码' }}
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </main>
+        </div>
+
+        <!-- 新建/编辑令牌 modal -->
+        <teleport to="body">
+            <transition name="modal">
+                <div v-if="showTokenModal" class="modal-backdrop" @click.self="closeTokenModal">
+                    <div class="modal" @click.stop>
+                        <div class="modal-head">
+                            <h2>{{ tokenCreated ? '令牌已创建' : (tokenEditing ? '编辑令牌' : '新建令牌') }}</h2>
+                            <button class="btn-icon" @click="closeTokenModal" title="关闭" style="flex:0; padding:4px 10px;">×</button>
+                        </div>
+                        <div class="modal-body">
+                            <!-- 明文 key 仅此一次 -->
+                            <template v-if="tokenCreated">
+                                <div class="alert alert-success">
+                                    <div class="alert-title">⚠ 请立即复制保存 —— 这个 Key 只会显示这一次</div>
+                                    <div class="alert-desc">关闭后无法再次查看，只能删除该令牌并重新创建。</div>
+                                </div>
+                                <div class="key-reveal mono">
+                                    <span>{{ createdKey }}</span>
+                                    <button class="btn btn-sm" @click="copyCreatedKey">复制</button>
+                                </div>
+                                <div class="field mt-8">
+                                    <label class="checkbox">
+                                        <input type="checkbox" v-model="keyCopied">
+                                        <span>我已复制并妥善保存</span>
+                                    </label>
+                                </div>
+                            </template>
+
+                            <template v-else>
+                                <div class="field">
+                                    <label>令牌名称 <span class="req">*</span></label>
+                                    <input v-model="tokenForm.name" placeholder="如 我的脚本 / 生产环境">
+                                </div>
+
+                                <div class="field">
+                                    <label class="checkbox">
+                                        <input type="checkbox" v-model="tokenForm.unlimited">
+                                        <span>不限额度（unlimited）</span>
+                                    </label>
+                                    <div class="hint">不限额令牌不影响准入；注意：欠费停服是用户级策略，不限额度令牌同样会被 402 拒绝。</div>
+                                </div>
+
+                                <div class="field" v-if="!tokenForm.unlimited">
+                                    <label>限额（limit_quota）</label>
+                                    <div class="tri-state">
+                                        <label class="radio">
+                                            <input type="radio" value="keep" v-model="tokenForm.limitMode" :disabled="!tokenEditing">
+                                            <span>不修改{{ tokenEditing ? '' : '（新建即不限）' }}</span>
+                                        </label>
+                                        <label class="radio">
+                                            <input type="radio" value="unlimited" v-model="tokenForm.limitMode">
+                                            <span>不限（传 null，清除限额）</span>
+                                        </label>
+                                        <label class="radio">
+                                            <input type="radio" value="value" v-model="tokenForm.limitMode">
+                                            <span>设定具体值</span>
+                                        </label>
+                                    </div>
+                                    <input v-if="tokenForm.limitMode === 'value'" type="number" min="0" step="1"
+                                           v-model.number="tokenForm.limitQuota" placeholder="如 100000" class="mt-8">
+                                    <div class="hint">
+                                        限额是**准入阈值**：结算补扣可能让「限额已用」小幅超出（约 5%），属预期行为。
+                                        展示的「限额已用」是该令牌的历史累计值，设置限额时会一上来就被占用。
+                                    </div>
+                                </div>
+
+                                <div class="field" v-if="tokenEditing">
+                                    <label>状态</label>
+                                    <select v-model.number="tokenForm.status">
+                                        <option :value="1">启用</option>
+                                        <option :value="2">停用</option>
+                                    </select>
+                                </div>
+
+                                <div v-if="modalErr" class="alert alert-danger" style="margin-top:14px;">
+                                    <span class="alert-icon">⚠</span>
+                                    <div class="alert-body"><div class="alert-desc">{{ modalErr }}</div></div>
+                                </div>
+                            </template>
+                        </div>
+                        <div class="modal-foot">
+                            <template v-if="tokenCreated">
+                                <button class="btn btn-primary" :disabled="!keyCopied" @click="closeTokenModal">完成</button>
+                            </template>
+                            <template v-else>
+                                <button class="btn" @click="closeTokenModal">取消</button>
+                                <button class="btn btn-primary" :disabled="submitting" @click="submitToken">
+                                    {{ submitting ? '提交中...' : (tokenEditing ? '保存' : '创建') }}
+                                </button>
+                            </template>
+                        </div>
+                    </div>
+                </div>
+            </transition>
+        </teleport>
+    </div>
+
+    <script src="/dashboard/admin-shell.js"></script>
+    <script src="/portal/portal-shell.js"></script>
+    <script>
+    const { createApp, ref, computed, onMounted, onBeforeUnmount } = Vue;
+    const { http, toast, USE_MOCK, mountPortalShell, isAdminKey, logout,
+            formatInt, formatQty, fmtTime, fmtDate } = window.portal;
+
+    // 401/403 判定(§17 错误码总表)
+    const isAuthError = (e) => {
+        const s = e.response?.status;
+        return s === 401 || s === 403;
+    };
+
+    createApp({
+        setup() {
+            const me = ref(null);
+            const tokens = ref([]);
+            const totals = ref({});
+            const statsDays = ref(14);
+            const chartBars = ref([]);
+            const actionErr = ref('');
+
+            const usageRows = ref([]);
+            const usageTotal = ref(0);
+            const usageOffset = ref(0);
+            const usageLimit = 20;
+            const usageFilter = ref({ token_id: '', status: '', from: '', to: '' });
+
+            const logRows = ref([]);
+            const logTotal = ref(0);
+            const logOffset = ref(0);
+            const logLimit = 20;
+            const logFilterType = ref('');
+
+            const redeemCode = ref('');
+            const redeemErr = ref('');
+            const redeeming = ref(false);
+
+            const pwdForm = ref({ old: '', new: '', confirm: '' });
+            const changingPwd = ref(false);
+
+            const showTokenModal = ref(false);
+            const tokenEditing = ref(false);
+            const tokenEditingId = ref(0);
+            const tokenCreated = ref(false);
+            const createdKey = ref('');
+            const keyCopied = ref(false);
+            const submitting = ref(false);
+            const modalErr = ref('');
+            const tokenForm = ref({ name: '', unlimited: false, limitMode: 'keep', limitQuota: 0, status: 1 });
+
+            // ---------- 展示辅助 ----------
+            const fmtBytes = (n) => {
+                if (n === null || n === undefined) return '—';
+                if (n < 1024) return n + ' B';
+                if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB';
+                return (n / 1024 / 1024).toFixed(2) + ' MB';
+            };
+            // X26:三态必须显式处理,否则 status=0 会渲染成空白
+            const usageStatusText = (s) => s === 0 ? '进行中' : s === 1 ? '已结算' : s === 2 ? '已退款' : '未知';
+            const usageStatusClass = (s) => s === 0 ? 'pill-accent' : s === 1 ? 'pill-success' : s === 2 ? 'pill-warning' : 'pill-mute';
+            const logTypeText = (t) => ({
+                charge: '充值', redeem: '兑换', manual_adjust: '手动调整', grant: '赠送',
+            }[t] || t || '—');
+            const logTypeTagClass = (t) => t === 'redeem' || t === 'charge' ? 'tag-accent' : (t === 'manual_adjust' ? 'tag-warn' : '');
+            const balanceState = computed(() => {
+                const b = me.value ? me.value.balance : 0;
+                return b < 0 ? '已欠费停服' : b === 0 ? '余额不足' : '正常';
+            });
+            const balanceClass = computed(() => {
+                const b = me.value ? me.value.balance : 0;
+                return b < 0 ? 'balance-danger' : b === 0 ? 'balance-warn' : '';
+            });
+            const balancePillClass = computed(() => {
+                const b = me.value ? me.value.balance : 0;
+                return b < 0 ? 'pill-danger' : b === 0 ? 'pill-warning' : 'pill-success';
+            });
+            // ---------- 加载 ----------
+            const loadMe = async () => {
+                const r = await http.get('/me');
+                me.value = r.data;
+            };
+            const loadTokens = async () => {
+                const r = await http.get('/me/tokens', { params: { limit: 100, offset: 0 } });
+                tokens.value = r.data.items || [];
+            };
+            const loadStats = async () => {
+                const r = await http.get('/me/stats', { params: { days: statsDays.value } });
+                totals.value = r.data.totals || {};
+                const trend = r.data.trend || [];
+                const max = Math.max(1, ...trend.map(t => t.actual_quota || 0));
+                chartBars.value = trend.map(t => ({
+                    date: t.date,
+                    label: String(t.date).slice(5),          // MM-DD
+                    q: t.actual_quota || 0,
+                    req: t.requests || 0,
+                    h: Math.max(2, Math.round(((t.actual_quota || 0) / max) * 100)),
+                }));
+            };
+            const loadUsage = async () => {
+                const f = usageFilter.value;
+                const params = { limit: usageLimit, offset: usageOffset.value };
+                if (f.token_id !== '' && f.token_id !== null) params.token_id = f.token_id;
+                if (f.status !== '') params.status = f.status;
+                if (f.from) params.from = f.from;
+                if (f.to) params.to = f.to;
+                const r = await http.get('/me/usage', { params });
+                usageRows.value = r.data.items || [];
+                usageTotal.value = r.data.total || 0;
+            };
+            const loadLogs = async () => {
+                const params = { limit: logLimit, offset: logOffset.value };
+                if (logFilterType.value) params.type = logFilterType.value;
+                const r = await http.get('/me/balance/logs', { params });
+                logRows.value = r.data.items || [];
+                logTotal.value = r.data.total || 0;
+            };
+
+            const boot = async () => {
+                actionErr.value = '';
+                try {
+                    await loadMe();
+                    mountPortalShell({
+                        activeNav: 'overview',
+                        name: me.value ? me.value.name : '',
+                        balance: me.value ? me.value.balance : undefined,
+                        isAdmin: !!(me.value && me.value.is_admin),
+                        onReload: () => boot(),
+                    });
+                    await Promise.all([loadTokens(), loadStats(), loadUsage(), loadLogs()]);
+                } catch (e) {
+                    if (isAuthError(e)) { logout(); return; }
+                    actionErr.value = e.response?.data?.error?.message || e.message;
+                }
+            };
+
+            // 刷新按钮/侧栏「刷新」都走这里(定义在 boot 之后使用,避免 TDZ)
+            const reloadAll = () => { boot(); };
+
+            // ---------- 交互 ----------
+            const scrollTo = (id) => {
+                const el = document.getElementById(id);
+                if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+            };
+            const usagePage = (o) => { usageOffset.value = Math.max(0, o); loadUsage(); };
+            const applyUsageFilter = () => { usageOffset.value = 0; loadUsage(); };
+            const clearUsageFilter = () => {
+                usageFilter.value = { token_id: '', status: '', from: '', to: '' };
+                usageOffset.value = 0;
+                loadUsage();
+            };
+            const applyLogFilter = () => { logOffset.value = 0; loadLogs(); };
+            const logPage = (o) => { logOffset.value = Math.max(0, o); loadLogs(); };
+
+            // 充值码兑换(§8.2)
+            const doRedeem = async () => {
+                redeemErr.value = '';
+                const code = (redeemCode.value || '').trim().toUpperCase();
+                if (code.length !== 16) { redeemErr.value = '充值码为 16 位大写字母或数字'; return; }
+                redeeming.value = true;
+                try {
+                    const r = await http.post('/me/redeem', { code });
+                    toast('ok', `兑换成功，增加 ${formatQty(r.data.quota)} 额度，当前余额 ${formatQty(r.data.balance)}`);
+                    redeemCode.value = '';
+                    await Promise.all([loadMe(), loadLogs()]);
+                } catch (e) {
+                    if (isAuthError(e)) { logout(); return; }
+                    const code2 = e.response?.data?.error?.code;
+                    const msg = e.response?.data?.error?.message || e.message;
+                    redeemErr.value = code2 === 'invalid_code' ? '充值码不存在，请核对后重试'
+                        : code2 === 'code_used' ? '该充值码已被使用（每个码只能用一次）'
+                            : msg;
+                } finally { redeeming.value = false; }
+            };
+
+            // 改密(§8.2 X9:成功后用返回的新 token 覆盖槽)
+            const doChangePassword = async () => {
+                actionErr.value = '';
+                const f = pwdForm.value;
+                if (!f.old) { actionErr.value = '请输入当前密码'; return; }
+                if (!f.new || f.new.trim().length < 8) { actionErr.value = '新密码长度至少 8 位，且不能为纯空白'; return; }
+                if (f.new !== f.confirm) { actionErr.value = '两次输入的新密码不一致'; return; }
+                changingPwd.value = true;
+                // 关键:改密接口在「原密码不正确」时返 401 invalid_credentials,
+                // 而 401 拦截器会清掉共享凭证槽。先让 portal-shell 做一次「401 保留槽」保护,
+                // 否则用户只是打错一次旧密码就会被登出。
+                // ⚠️ 顺序:必须先 restore() 再写新 token —— 否则保护会把旧 token 写回,
+                //    把 X9 的「用新 token 覆盖」吃掉(改密后旧 token 立即失效,用户会被踢出)。
+                const restore = window.portal.beginCredProtect();
+                try {
+                    const r = await http.post('/me/password', { old: f.old, new: f.new });
+                    restore();
+                    if (r.data && r.data.token) {
+                        window.admin.setCred(r.data.token);   // 同一凭证槽(X4),X9:用新 token 覆盖
+                    }
+                    pwdForm.value = { old: '', new: '', confirm: '' };
+                    toast('ok', '密码已修改，其它设备上的登录态已失效');
+                } catch (e) {
+                    if (isAuthError(e)) {
+                        if (e.response?.status === 401 && e.response?.data?.error?.code === 'invalid_credentials') {
+                            restore();                             // 原密码错误:恢复槽,留在页面提示
+                            actionErr.value = '当前密码不正确';
+                        } else {
+                            logout();                              // session_revoked / session_invalid:真失效
+                            return;
+                        }
+                    } else {
+                        restore();
+                        actionErr.value = e.response?.data?.error?.message || e.message;
+                    }
+                } finally {
+                    changingPwd.value = false;
+                }
+            };
+
+            // ---------- 令牌 ----------
+            const openTokenCreate = () => {
+                tokenEditing.value = false; tokenEditingId.value = 0; tokenCreated.value = false;
+                createdKey.value = ''; keyCopied.value = false;
+                tokenForm.value = { name: '', unlimited: false, limitMode: 'unlimited', limitQuota: 0, status: 1 };
+                modalErr.value = ''; showTokenModal.value = true;
+            };
+            const openTokenEdit = (t) => {
+                tokenEditing.value = true; tokenEditingId.value = t.id; tokenCreated.value = false;
+                tokenForm.value = {
+                    name: t.name,
+                    unlimited: !!t.unlimited,
+                    limitMode: 'keep',                       // 默认不改限额(X6 三态)
+                    limitQuota: (t.limit_quota === null || t.limit_quota === undefined) ? 0 : t.limit_quota,
+                    status: t.status === 2 ? 2 : 1,
+                };
+                modalErr.value = ''; showTokenModal.value = true;
+            };
+            const closeTokenModal = () => { showTokenModal.value = false; tokenCreated.value = false; };
+
+            const submitToken = async () => {
+                modalErr.value = '';
+                const f = tokenForm.value;
+                if (!f.name || !f.name.trim()) { modalErr.value = '请填写令牌名称'; return; }
+                if (!f.unlimited && f.limitMode === 'value' && (f.limitQuota === '' || f.limitQuota === null || Number(f.limitQuota) < 0)) {
+                    modalErr.value = '请填写非负的限额数值';
+                    return;
+                }
+                submitting.value = true;
+                try {
+                    if (tokenEditing.value) {
+                        const patch = {};
+                        if (f.name.trim()) patch.name = f.name.trim();
+                        if (f.status) patch.status = f.status;
+                        // 三态(X6):'keep' = 不传字段(不改);'unlimited' = 传 null(清为不限);'value' = 传数字
+                        if (!f.unlimited && f.limitMode === 'unlimited') patch.limit_quota = null;
+                        else if (!f.unlimited && f.limitMode === 'value') patch.limit_quota = Number(f.limitQuota);
+                        if (Object.keys(patch).length === 0) { modalErr.value = '没有需要修改的字段'; submitting.value = false; return; }
+                        await http.patch(`/me/tokens/${tokenEditingId.value}`, patch);
+                        toast('ok', '令牌已更新');
+                        showTokenModal.value = false;
+                    } else {
+                        const body = { name: f.name.trim(), unlimited: !!f.unlimited };
+                        if (!f.unlimited) body.limit_quota = f.limitMode === 'value' ? Number(f.limitQuota) : null;
+                        const r = await http.post('/me/tokens', body);
+                        createdKey.value = r.data.key || '';
+                        keyCopied.value = false;
+                        tokenCreated.value = true;   // 转入「仅此一次」视图
+                    }
+                    await loadTokens();
+                } catch (e) {
+                    if (isAuthError(e)) { logout(); return; }
+                    modalErr.value = e.response?.data?.error?.message || e.message;
+                } finally { submitting.value = false; }
+            };
+
+            const copyCreatedKey = async () => {
+                try {
+                    await navigator.clipboard.writeText(createdKey.value);
+                    keyCopied.value = true;
+                    toast('ok', '已复制到剪贴板');
+                } catch (e) {
+                    toast('err', '复制失败，请手动选中复制');
+                }
+            };
+
+            const toggleToken = async (t) => {
+                const target = t.status === 1 ? 2 : 1;
+                try {
+                    await http.patch(`/me/tokens/${t.id}`, { status: target });
+                    await loadTokens();
+                    toast('ok', target === 1 ? '令牌已启用' : '令牌已停用');
+                } catch (e) {
+                    if (isAuthError(e)) { logout(); return; }
+                    actionErr.value = e.response?.data?.error?.message || e.message;
+                    await loadTokens();
+                }
+            };
+
+            const removeToken = async (t) => {
+                if (!confirm(`确定删除令牌「${t.name}」(${t.key_prefix}…) 吗？\n删除后该 Key 立即失效，历史调用流水仍保留。`)) return;
+                try {
+                    await http.delete(`/me/tokens/${t.id}`);
+                    await loadTokens();
+                    toast('ok', '令牌已删除');
+                } catch (e) {
+                    if (isAuthError(e)) { logout(); return; }
+                    actionErr.value = e.response?.data?.error?.message || e.message;
+                }
+            };
+
+            // ---------- 初始化 ----------
+            let pollTimer = null;
+            onMounted(() => {
+                const cred = window.admin.getCred();
+                if (cred && isAdminKey(cred)) {
+                    // 门户接口只认 JWT(§6 #14):admin_key 直连会全部 401,直接引导走账号密码登录
+                    toast('warn', '用户门户需要账号密码登录，正在跳转登录页');
+                    setTimeout(() => { location.href = '/login'; }, 1200);
+                    return;
+                }
+                if (!cred) { location.href = '/login'; return; }
+                boot();
+                // 进行中(status=0)的流水会自动结算,轻量轮询刷新
+                pollTimer = setInterval(() => {
+                    if (usageRows.value.some(u => u.status === 0)) { loadUsage(); loadMe(); }
+                }, 15000);
+            });
+            onBeforeUnmount(() => { if (pollTimer) clearInterval(pollTimer); });
+
+            return {
+                me, tokens, totals, statsDays, chartBars, actionErr,
+                usageRows, usageTotal, usageOffset, usageLimit, usageFilter,
+                logRows, logTotal, logOffset, logLimit, logFilterType,
+                redeemCode, redeemErr, redeeming, pwdForm, changingPwd,
+                showTokenModal, tokenEditing, tokenCreated, createdKey, keyCopied, submitting, modalErr, tokenForm,
+                USE_MOCK,
+                formatInt, formatQty, fmtTime, fmtDate, fmtBytes,
+                usageStatusText, usageStatusClass, logTypeText, logTypeTagClass,
+                balanceState, balanceClass, balancePillClass,
+                reloadAll, scrollTo, usagePage, applyUsageFilter, clearUsageFilter, applyLogFilter, logPage,
+                doRedeem, doChangePassword,
+                openTokenCreate, openTokenEdit, closeTokenModal, submitToken, copyCreatedKey,
+                toggleToken, removeToken, logout,
+            };
+        },
+    }).mount('#app');
+    </script>
+</body>
+</html>

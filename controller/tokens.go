@@ -82,13 +82,16 @@ func TokensListHandler(w http.ResponseWriter, r *http.Request) {
 // ---- POST /api/admin/users/{id}/tokens ------------------------------
 
 type tokenCreateReq struct {
-	Name      string `json:"name"`
-	Unlimited *bool  `json:"unlimited"`
-	Quota     *int64 `json:"quota"`
+	Name string `json:"name"`
+	// Unlimited=true 表示该 token 不计费(但仍受欠费停服约束,决策 X24)。
+	Unlimited *bool `json:"unlimited"`
+	// LimitQuota 是**可选准入限额**(nil = 不限额度)。
+	// STAGE4 起取代旧的 `quota`(那写的是已冻结的 remain_quota)。
+	LimitQuota *int64 `json:"limit_quota"`
 }
 
 // TokensCreateHandler POST /api/admin/users/{id}/tokens
-// → 201 {id,name,key_prefix,remain_quota,unlimited,status,key}
+// → 201 {id,name,key_prefix,limit_quota,unlimited,status,key}
 // **key 明文仅此一次**(决策 #1:服务端随机生成)。
 func TokensCreateHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
@@ -122,17 +125,14 @@ func TokensCreateHandler(w http.ResponseWriter, r *http.Request) {
 	if req.Unlimited != nil {
 		unlimited = *req.Unlimited
 	}
-	var quota int64
-	if req.Quota != nil {
-		quota = *req.Quota
-	}
-	if quota < 0 {
+	// limit_quota 省略 / null 都表示"不限额度"(D18);给了值则必须 >= 0
+	if req.LimitQuota != nil && *req.LimitQuota < 0 {
 		middleware.SendJSONError(w, http.StatusBadRequest,
-			"quota must be >= 0", "invalid_request_error", "bad_quota")
+			"limit_quota must be >= 0", "invalid_request_error", "bad_quota")
 		return
 	}
 
-	id, plainKey, err := s.TokenCreateWithKey(uid, req.Name, unlimited, quota)
+	id, plainKey, err := s.TokenCreateWithKey(uid, req.Name, unlimited, req.LimitQuota)
 	if err != nil {
 		switch {
 		case errors.Is(err, store.ErrInvalid):
@@ -156,13 +156,15 @@ func TokensCreateHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// 明文 key 只在此响应出现一次(日志也刻意不打 key)
-	log.Printf("[tokens] created token_id=%d user_id=%d prefix=%s unlimited=%v quota=%d (明文 key 仅本次响应返回)",
-		t.ID, uid, t.KeyPrefix, t.Unlimited, t.RemainQuota)
+	log.Printf("[tokens] created token_id=%d user_id=%d prefix=%s unlimited=%v limit_quota=%v (明文 key 仅本次响应返回)",
+		t.ID, uid, t.KeyPrefix, t.Unlimited, t.LimitQuota)
 	writeJSON(w, http.StatusCreated, map[string]any{
 		"id":           t.ID,
 		"name":         t.Name,
 		"key_prefix":   t.KeyPrefix,
-		"remain_quota": t.RemainQuota,
+		"limit_quota":  t.LimitQuota,
+		"used_quota":   t.UsedQuota,
+		"remain_quota": t.RemainQuota, // 冻结的历史值,只读展示
 		"unlimited":    t.Unlimited,
 		"status":       t.Status,
 		"key":          plainKey, // ← 仅此一次
@@ -175,11 +177,12 @@ type tokenUpdateReq struct {
 	Name      *string `json:"name"`
 	Unlimited *bool   `json:"unlimited"`
 	Status    *int    `json:"status"`
-	Quota     *int64  `json:"quota"` // 绝对值(决策 #4)
+	// LimitQuota 三态(决策 X6):省略=不改、null=清为不限、数字=设为该值。
+	LimitQuota store.OptInt64 `json:"limit_quota"`
 }
 
 // TokensUpdateHandler PATCH /api/admin/tokens/{id}
-// 指针语义:nil=不改;quota 是绝对值覆盖(决策 #4)。
+// 指针语义:nil=不改;limit_quota 三态见 store.OptInt64。
 func TokensUpdateHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPatch {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -200,10 +203,10 @@ func TokensUpdateHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	patch := store.TokenUpdatePatch{
-		Name:      req.Name,
-		Unlimited: req.Unlimited,
-		Status:    req.Status,
-		Quota:     req.Quota,
+		Name:       req.Name,
+		Unlimited:  req.Unlimited,
+		Status:     req.Status,
+		LimitQuota: req.LimitQuota,
 	}
 	if err := s.TokenUpdate(id, patch); err != nil {
 		switch {

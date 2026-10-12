@@ -19,9 +19,11 @@ type Migration struct {
 // 留作占位,本期为空。
 var migrations = []Migration{}
 
-// schemaVersionRequested 是期望的 schema 版本号;db.go 里直接写常量。
-// 这里留个常量引用便于未来从 db.go 解耦。
-const schemaVersionRequested = 1
+// schemaVersionRequested 是期望的 schema 版本号。
+//
+// 历史遗留:schemaVersionRequested 曾写死为 1,与 db.go 的 schemaVersion 长期不一致
+// (公开 API 会报错版本)。STAGE4 起统一以 db.go 的 schemaVersion 为唯一真源。
+const schemaVersionRequested = schemaVersion
 
 // CurrentVersion 返回当前代码期望的 schema 版本。
 func CurrentVersion() int { return schemaVersionRequested }

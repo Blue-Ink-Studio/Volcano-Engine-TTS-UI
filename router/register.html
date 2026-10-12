@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>火山 TTS · 注册</title>
+    <script src="https://cdn.bootcdn.net/ajax/libs/vue/3.4.21/vue.global.prod.js"></script>
+    <script src="https://cdn.bootcdn.net/ajax/libs/axios/1.6.7/axios.min.js"></script>
+    <script>try{var t=localStorage.getItem('ttsTheme')||'auto',d=t==='auto'?(matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light'):t;document.documentElement.setAttribute('data-theme',d)}catch(e){}</script>
+    <link rel="stylesheet" href="/portal/admin.css">
+</head>
+<body>
+    <div id="app">
+        <div class="login-screen">
+            <div class="login-card">
+                <div class="login-logo">TTS</div>
+                <h1>注册账号</h1>
+                <div class="sub">注册后即可在用户门户创建令牌并调用接口</div>
+
+                <!-- 注册已关闭(403 register_disabled 或 register-status.allow=false) -->
+                <div v-if="disabled" class="alert alert-warning" style="text-align:left;">
+                    <span class="alert-icon">⚠</span>
+                    <div class="alert-body">
+                        <div class="alert-title">注册已关闭，请联系管理员</div>
+                        <div class="alert-desc">管理员可在「系统设置 → 允许自由注册」中开启，或直接为你建号。</div>
+                    </div>
+                </div>
+
+                <template v-else>
+                    <input v-model="form.name" class="login-input" placeholder="用户名" autocomplete="username" autofocus>
+                    <input v-model="form.password" type="password" class="login-input" placeholder="密码（至少 8 位）" autocomplete="new-password">
+                    <input v-model="form.confirm" type="password" class="login-input" placeholder="再次输入密码" autocomplete="new-password" @keyup.enter="onRegister">
+                    <div class="hint" style="text-align:left;">密码长度 ≥ 8 位，且不能为纯空白字符</div>
+
+                    <button class="btn btn-primary btn-lg" @click="onRegister" :disabled="submitting" style="width:100%; margin-top:14px;">
+                        {{ submitting ? '提交中...' : '注 册' }}
+                    </button>
+                </template>
+
+                <div v-if="err" class="login-err">⚠ {{ err }}</div>
+                <div v-if="okMsg" class="login-ok">✓ {{ okMsg }}</div>
+
+                <div class="login-foot">
+                    已有账号？<a href="/login">去登录</a>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="/dashboard/admin-shell.js"></script>
+    <script>
+    const { createApp, ref, onMounted } = Vue;
+    const { http, toast, formatInt } = window.admin;
+
+    createApp({
+        setup() {
+            const form = ref({ name: '', password: '', confirm: '' });
+            const err = ref('');
+            const okMsg = ref('');
+            const disabled = ref(false);
+            const submitting = ref(false);
+
+            // 公开开关(D22):GET /api/auth/register-status → {"allow":bool}
+            const loadRegisterStatus = async () => {
+                try {
+                    const r = await http.get('/auth/register-status');
+                    if (!r.data || r.data.allow !== true) disabled.value = true;
+                } catch (e) {
+                    // 接口未就绪/失败时不阻塞表单,交提交时的 403 兜底
+                }
+            };
+
+            const onRegister = async () => {
+                err.value = ''; okMsg.value = '';
+                const name = (form.value.name || '').trim();
+                const pwd = form.value.password || '';
+                if (!name) { err.value = '请填写用户名'; return; }
+                if (!pwd || !pwd.trim()) { err.value = '密码不能为空或纯空白'; return; }
+                if (pwd.length < 8) { err.value = '密码长度至少 8 位'; return; }
+                if (pwd !== form.value.confirm) { err.value = '两次输入的密码不一致'; return; }
+
+                submitting.value = true;
+                try {
+                    const r = await http.post('/auth/register', { name, password: pwd });
+                    const bal = r.data && r.data.balance;
+                    okMsg.value = '注册成功' + (bal !== undefined && bal !== null ? `，已赠送 ${formatInt(bal)} 额度` : '') + '，正在跳转登录页...';
+                    toast('ok', '注册成功');
+                    setTimeout(() => { location.href = '/login'; }, 1200);
+                } catch (e) {
+                    const code = e.response?.data?.error?.code;
+                    const msg = e.response?.data?.error?.message || e.message;
+                    if (code === 'register_disabled') {
+                        disabled.value = true;
+                        err.value = '注册已关闭，请联系管理员';
+                    } else if (code === 'user_exists') {
+                        err.value = '该用户名已被占用，请换一个';
+                    } else if (code === 'weak_password') {
+                        err.value = '密码不合规：长度至少 8 位，且不能为纯空白';
+                    } else if (code === 'missing_field') {
+                        err.value = '请填写完整的用户名与密码';
+                    } else {
+                        err.value = msg;
+                    }
+                } finally { submitting.value = false; }
+            };
+
+            onMounted(loadRegisterStatus);
+
+            return { form, err, okMsg, disabled, submitting, onRegister };
+        },
+    }).mount('#app');
+    </script>
+</body>
+</html>

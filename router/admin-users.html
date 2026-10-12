@@ -52,6 +52,7 @@
                             <tr>
                                 <th>用户</th>
                                 <th>状态</th>
+                                <th>余额</th>
                                 <th>已用额度</th>
                                 <th>令牌数</th>
                                 <th>创建时间</th>
@@ -69,12 +70,17 @@
                                         <span class="pill-dot"></span>{{ statusText(u.status) }}
                                     </span>
                                 </td>
+                                <td>
+                                    <span class="cell-mono" :class="balClass(u.balance)">{{ fmtBal(u.balance) }}</span>
+                                    <span v-if="balState(u.balance)" class="cell-sub">{{ balState(u.balance) }}</span>
+                                </td>
                                 <td><span class="cell-mono">{{ u.used_quota }}</span></td>
                                 <td><span class="cell-mono">{{ u.token_count }}</span></td>
                                 <td><span class="text-mute">{{ fmt(u.created_at) }}</span></td>
                                 <td class="th-actions">
                                     <div class="td-actions">
                                         <button class="btn btn-sm" @click="view(u)">详情</button>
+                                        <button class="btn btn-sm" @click="openCharge(u)">充值</button>
                                         <button class="btn btn-sm" @click="openEdit(u)">编辑</button>
                                         <button class="btn btn-sm btn-danger-ghost" @click="remove(u)" v-if="u.status !== 3">删除</button>
                                     </div>
@@ -94,7 +100,7 @@
                         <div class="empty-icon">⌕</div>
                         <div class="empty-title">没有匹配的用户</div>
                         <div class="empty-desc">尝试调整搜索词</div>
-                        <button class="btn" @click="search=''; applySearch()">清除搜索</button>
+                        <button class="btn" @click="search=''; loadUsers()">清除搜索</button>
                     </div>
                 </div>
 
@@ -146,6 +152,51 @@
                 </div>
             </transition>
         </teleport>
+
+        <!-- 充值 / 扣减 modal(POST /api/admin/users/{id}/charge) -->
+        <teleport to="body">
+            <transition name="modal">
+                <div v-if="showChargeModal" class="modal-backdrop" @click.self="closeChargeModal">
+                    <div class="modal" @click.stop>
+                        <div class="modal-head">
+                            <h2>调整余额</h2>
+                            <button class="btn-icon" @click="closeChargeModal" title="关闭" style="flex: 0; padding: 4px 10px;">×</button>
+                        </div>
+                        <div class="modal-body">
+                            <div class="field">
+                                <label>用户</label>
+                                <div class="input-static">{{ chargeTarget.name }} (#{{ chargeTarget.id }}) · 当前余额 {{ fmtBal(chargeTarget.balance) }}</div>
+                            </div>
+                            <div class="field">
+                                <label>变动额度 delta <span class="req">*</span></label>
+                                <input v-model.number="chargeForm.delta" type="number" step="1" placeholder="正数=充值，负数=扣减，如 100000">
+                                <div class="hint">
+                                    正数 → 记 <code>charge</code>；负数 → 记 <code>manual_adjust</code>，且不能把余额扣成负数（后端返 400 insufficient_balance）。
+                                </div>
+                            </div>
+                            <div class="field">
+                                <label>备注 remark</label>
+                                <input v-model="chargeForm.remark" placeholder="如 存量用户补偿 / 工单 123">
+                                <div class="hint">会写进用户的余额流水（门户可见），便于对账</div>
+                            </div>
+                            <div v-if="chargeErr" class="alert alert-danger" style="margin-top: 14px;">
+                                <span class="alert-icon">⚠</span>
+                                <div class="alert-body">
+                                    <div class="alert-title">充值失败</div>
+                                    <div class="alert-desc">{{ chargeErr }}</div>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="modal-foot">
+                            <button class="btn" @click="closeChargeModal">取消</button>
+                            <button class="btn btn-primary" @click="submitCharge" :disabled="chargeSubmitting">
+                                {{ chargeSubmitting ? '提交中...' : '确认调整' }}
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </transition>
+        </teleport>
     </div>
 
     <script src="/dashboard/admin-shell.js"></script>
@@ -168,6 +219,10 @@
             const statusText = (s) => s === 1 ? '启用' : s === 2 ? '停用' : s === 3 ? '已删除' : '未知';
             const statusClass = (s) => s === 1 ? 'pill-success' : s === 2 ? 'pill-warning' : 'pill-mute';
             const fmt = (v) => formatStart(v);
+            // STAGE4:余额展示(X24:`<0` = 欠费停服)
+            const fmtBal = (b) => (b === null || b === undefined) ? '—' : Number(b).toLocaleString('zh-CN');
+            const balClass = (b) => (typeof b === 'number' && b < 0) ? 'text-danger' : '';
+            const balState = (b) => (typeof b !== 'number') ? '' : (b < 0 ? '已欠费 · API 已暂停' : (b === 0 ? '余额不足' : ''));
 
             let searchTimer = null;
             const onSearch = () => {
@@ -250,6 +305,44 @@
                 }
             };
 
+            // ---- 充值 / 扣减(POST /api/admin/users/{id}/charge)----
+            const showChargeModal = ref(false);
+            const chargeTarget = ref({ id: 0, name: '', balance: 0 });
+            const chargeForm = ref({ delta: null, remark: '' });
+            const chargeErr = ref('');
+            const chargeSubmitting = ref(false);
+
+            const openCharge = (u) => {
+                chargeTarget.value = { id: u.id, name: u.name, balance: u.balance };
+                chargeForm.value = { delta: null, remark: '' };
+                chargeErr.value = '';
+                showChargeModal.value = true;
+            };
+            const closeChargeModal = () => { showChargeModal.value = false; };
+
+            const submitCharge = async () => {
+                chargeErr.value = '';
+                const delta = Number(chargeForm.value.delta);
+                if (!chargeForm.value.delta && chargeForm.value.delta !== 0) { chargeErr.value = '请填写变动额度 delta'; return; }
+                if (!Number.isFinite(delta) || delta === 0) { chargeErr.value = 'delta 必须是非 0 的整数（0 会被后端判为 no_fields）'; return; }
+                if (!Number.isInteger(delta)) { chargeErr.value = 'delta 必须是整数'; return; }
+                chargeSubmitting.value = true;
+                try {
+                    const body = { delta };
+                    if (chargeForm.value.remark.trim()) body.remark = chargeForm.value.remark.trim();
+                    const r = await http.post(`/admin/users/${chargeTarget.value.id}/charge`, body);
+                    toast('ok', `余额已更新为 ${fmtBal(r.data.balance)}`);
+                    showChargeModal.value = false;
+                    await loadUsers();
+                } catch (e) {
+                    const code = e.response?.data?.error?.code;
+                    const msg = e.response?.data?.error?.message || e.message;
+                    chargeErr.value = code === 'insufficient_balance'
+                        ? '扣减后会变成负余额，后端拒绝（insufficient_balance）。欠费只能由实际调用结算补扣产生，不能手工扣出。'
+                        : code === 'not_found' ? '用户不存在' : msg;
+                } finally { chargeSubmitting.value = false; }
+            };
+
             onMounted(() => {
                 if (!getKey()) { location.href = '/dashboard/login'; return; }
                 mountShell({
@@ -263,9 +356,11 @@
 
             return {
                 overview, items, total, offset, limit, loaded, actionErr, search,
-                statusText, statusClass, fmt, onSearch, goPage,
+                statusText, statusClass, fmt, fmtBal, balClass, balState, onSearch, goPage, loadUsers,
                 showModal, editing, form, submitting, modalErr,
                 openCreate, openEdit, closeModal, submit, view, remove, reloadAll,
+                showChargeModal, chargeTarget, chargeForm, chargeErr, chargeSubmitting,
+                openCharge, closeChargeModal, submitCharge,
             };
         },
     }).mount('#app');

@@ -36,7 +36,10 @@ type SettingsResponse struct {
 	ModelType         int    `json:"model_type"`
 	ExplicitLanguage  string `json:"explicit_language"`
 	EnableSubtitle    bool   `json:"enable_subtitle"`
-	UpdatedAt         string `json:"updated_at"` // RFC3339,来自 settings.installed_at(沿用)
+	// STAGE4(§8.3 / X3):注册开关与注册赠送额度,复用 settings 表,不新建表。
+	AllowRegister bool   `json:"allow_register"`
+	InitBalance   int    `json:"init_balance"`
+	UpdatedAt     string `json:"updated_at"` // RFC3339,来自 settings.installed_at(沿用)
 }
 
 // SettingsGetHandler GET /api/settings
@@ -84,6 +87,13 @@ func SettingsGetHandler(w http.ResponseWriter, r *http.Request) {
 	if v, _ := s.SettingsGetBool("enable_subtitle", false); v {
 		resp.EnableSubtitle = true
 	}
+	// STAGE4:注册开关默认 false(安全默认,§19.1);init_balance 只对自助注册生效(D16)
+	if v, _ := s.SettingsGetBool(SettingAllowRegister, false); v {
+		resp.AllowRegister = true
+	}
+	if v, _ := s.SettingsGetInt(SettingInitBalance, 0); v > 0 {
+		resp.InitBalance = v
+	}
 	if ts := all["installed_at"]; ts != "" {
 		resp.UpdatedAt = ts
 	}
@@ -103,6 +113,9 @@ type SettingsUpdateRequest struct {
 	ModelType         *int    `json:"model_type,omitempty"`
 	ExplicitLanguage  *string `json:"explicit_language,omitempty"`
 	EnableSubtitle    *bool   `json:"enable_subtitle,omitempty"`
+	// STAGE4(§8.3):注册开关 + 注册赠送额度(仅自助注册生效,D16)
+	AllowRegister *bool `json:"allow_register,omitempty"`
+	InitBalance   *int  `json:"init_balance,omitempty"`
 }
 
 // SettingsUpdateHandler PUT /api/settings
@@ -181,6 +194,19 @@ func SettingsUpdateHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	if body.EnableSubtitle != nil {
 		updates["enable_subtitle"] = boolToStr(*body.EnableSubtitle)
+	}
+	// STAGE4(§8.3):allow_register / init_balance。init_balance 不允许为负,
+	// 否则注册赠送会变成"建号即欠费"(X24 的停服判定会被立刻触发)。
+	if body.AllowRegister != nil {
+		updates[SettingAllowRegister] = boolToStr(*body.AllowRegister)
+	}
+	if body.InitBalance != nil {
+		if *body.InitBalance < 0 {
+			middleware.SendJSONError(w, http.StatusBadRequest,
+				"init_balance must be >= 0", "invalid_request_error", "invalid_value")
+			return
+		}
+		updates[SettingInitBalance] = strconv.Itoa(*body.InitBalance)
 	}
 
 	if len(updates) == 0 {

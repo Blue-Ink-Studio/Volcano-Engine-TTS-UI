@@ -303,6 +303,38 @@ Prometheus 文本格式,无鉴权。可直接被 Prometheus 抓取或浏览器�
    - 反代**仅**把鉴权后的请求转发到 `:8080`
    - 此时 `OPENAI_TTS_API_KEY` 可不设
 
+### STAGE4(自助门户 + 计费)新增的三条必做项
+
+> 这一版引入了 WebUI 账号体系与钱包计费,以下三条**不是可选项**。
+
+1. **首次部署必须先给 `default` 账号设密**。
+   全新安装时 `default` 账号**没有密码**,此时它会处于"待设密"状态:
+   登录只会返回 `need_setup_password`,**不会签发任何凭证**(这是刻意的安全设计)。
+   请从**服务器本机**执行:
+   ```bash
+   curl -X POST http://127.0.0.1:8080/api/auth/setup-password \
+        -H 'Content-Type: application/json' \
+        -d '{"name":"default","password":"<强密码>"}'
+   ```
+   也可在任意机器携带有效 `admin_key` 调用(二选一通道)。
+   设密前,系统会自动把「自由注册」关闭并打 WARN 日志 —— 这是防止
+   "空密码管理员 + 开放注册"这一攻击面组合。
+   ⚠️ 注意:本机判定只认 **socket 对端地址**,不认 `X-Forwarded-For`/`X-Real-IP`;
+   若用**同机反代**,所有公网请求都会被判为"本机",此时请改用 `admin_key` 通道。
+
+2. **注册默认是关闭的**,需管理员显式开启。
+   `/dashboard/settings` → 「允许自由注册」(或 `PUT /api/admin/settings {"allow_register":true}`)。
+   可同时设置「注册赠送额度」`init_balance`(默认 0)。
+
+3. **从 3b 升级时必须先给存量用户充值**。
+   计费的扣费源已从 `tokens.remain_quota` 迁到 **`users.balance`**,而 3b 时代
+   从未有过"充值"概念 ⇒ 存量用户的 `balance` 从 0 起步,**其旧 token 调用会直接 402**。
+   升级后请先逐个充值(管理后台用户列表的「充值」按钮,或
+   `POST /api/admin/users/{id}/charge {"delta":N}`)再放流量。
+   另外:`users.balance` 允许被"结算补扣"扣成**负数**,负数即**欠费停服**,
+   直到充值使余额恢复(`balance >= 本次预扣额`)才自动放行;
+   **欠费状态下用户仍可登录门户并兑换充值码自救**。
+
 ### v0.3.0 起各端点的暴露面
 
 v0.3.0 已把健康与指标端点收口,**默认不再有匿名可读的监控端点**:

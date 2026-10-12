@@ -26,6 +26,7 @@
                         <p class="page-sub">#{{ user.id }} · 已用额度 {{ user.used_quota }} · 创建于 {{ fmt(user.created_at) }}</p>
                     </div>
                     <div class="page-actions">
+                        <button class="btn" @click="openCharge">充值</button>
                         <button class="btn" @click="editUser">编辑</button>
                         <button class="btn btn-danger-ghost" @click="removeUser" v-if="user.status !== 3">删除</button>
                     </div>
@@ -36,6 +37,41 @@
                     <div class="alert-body">
                         <div class="alert-title">操作失败</div>
                         <div class="alert-desc">{{ actionErr }}</div>
+                    </div>
+                </div>
+
+                <!-- 钱包与角色(STAGE4) -->
+                <div class="stat-grid">
+                    <div class="balance-card" :class="balanceCardClass">
+                        <div class="stat-top">
+                            <span class="stat-label">账户余额</span>
+                            <span class="pill" :class="balancePillClass">{{ balanceState }}</span>
+                        </div>
+                        <div class="stat-value balance-value">{{ fmtQty(user.balance) }}<span class="stat-unit">额度</span></div>
+                        <div class="stat-foot">
+                            计费从余额扣减（token 只做认证与准入限额）；
+                            欠费（&lt; 0）时该用户所有调用 402 <code>balance_negative</code>，含不限额度令牌。
+                        </div>
+                        <div class="balance-actions">
+                            <button class="btn btn-primary btn-sm" @click="openCharge">充值 / 调整</button>
+                        </div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-top">
+                            <span class="stat-label">管理员角色</span>
+                            <span class="pill" :class="user.is_admin ? 'pill-accent' : 'pill-mute'">
+                                <span class="pill-dot"></span>{{ user.is_admin ? '管理员' : '普通用户' }}
+                            </span>
+                        </div>
+                        <div class="stat-value" style="font-size:18px;">{{ user.is_admin ? 'is_admin = 1' : 'is_admin = 0' }}</div>
+                        <div class="stat-foot">
+                            管理员可访问 /dashboard；降级/禁用/删除最后一个启用的管理员会被拒绝（409 <code>last_admin</code>）。
+                        </div>
+                        <div class="balance-actions">
+                            <button class="btn btn-sm" :class="user.is_admin ? 'btn-danger' : 'btn-primary'" @click="toggleAdmin">
+                                {{ user.is_admin ? '降级为普通用户' : '提升为管理员' }}
+                            </button>
+                        </div>
                     </div>
                 </div>
 
@@ -156,8 +192,9 @@
                                 <td><span class="cell-mono">{{ u.pre_consumed }}/{{ u.actual_quota }}</span></td>
                                 <td><span class="cell-mono">{{ u.channel_id ?? '—' }}</span></td>
                                 <td>
-                                    <span class="pill" :class="u.status === 1 ? 'pill-success' : 'pill-danger'">
-                                        <span class="pill-dot"></span>{{ u.status === 1 ? '结算' : '退款' }}
+                                    <!-- X26:usage 三态 0=进行中 1=已结算 2=已退款,缺 0 会渲染成空白 -->
+                                    <span class="pill" :class="usageStatusClass(u.status)">
+                                        <span class="pill-dot"></span>{{ usageStatusText(u.status) }}
                                     </span>
                                 </td>
                                 <td><span class="cell-mono cell-truncate" :title="u.request_id">{{ u.request_id }}</span></td>
@@ -280,11 +317,54 @@
                 </div>
             </transition>
         </teleport>
+        <!-- 充值 / 扣减 modal(POST /api/admin/users/{id}/charge) -->
+        <teleport to="body">
+            <transition name="modal">
+                <div v-if="showChargeModal" class="modal-backdrop" @click.self="closeChargeModal">
+                    <div class="modal" @click.stop>
+                        <div class="modal-head">
+                            <h2>调整余额</h2>
+                            <button class="btn-icon" @click="closeChargeModal" title="关闭" style="flex: 0; padding: 4px 10px;">×</button>
+                        </div>
+                        <div class="modal-body">
+                            <div class="field">
+                                <label>当前余额</label>
+                                <div class="input-static">{{ fmtQty(user.balance) }}</div>
+                            </div>
+                            <div class="field">
+                                <label>变动额度 delta <span class="req">*</span></label>
+                                <input v-model.number="chargeForm.delta" type="number" step="1" placeholder="正数=充值，负数=扣减，如 100000">
+                                <div class="hint">
+                                    正数 → 流水记 <code>charge</code>；负数 → 记 <code>manual_adjust</code>，且不能扣成负余额。
+                                </div>
+                            </div>
+                            <div class="field">
+                                <label>备注 remark</label>
+                                <input v-model="chargeForm.remark" placeholder="如 存量用户补偿 / 工单 123">
+                            </div>
+                            <div v-if="chargeErr" class="alert alert-danger" style="margin-top: 14px;">
+                                <span class="alert-icon">⚠</span>
+                                <div class="alert-body">
+                                    <div class="alert-title">充值失败</div>
+                                    <div class="alert-desc">{{ chargeErr }}</div>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="modal-foot">
+                            <button class="btn" @click="closeChargeModal">取消</button>
+                            <button class="btn btn-primary" @click="submitCharge" :disabled="chargeSubmitting">
+                                {{ chargeSubmitting ? '提交中...' : '确认调整' }}
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </transition>
+        </teleport>
     </div>
 
     <script src="/dashboard/admin-shell.js"></script>
     <script>
-    const { createApp, ref, onMounted } = Vue;
+    const { createApp, ref, computed, onMounted } = Vue;
     const { http, getKey, toast, mountShell, formatStart, formatBytes } = window.admin;
 
     createApp({
@@ -303,6 +383,10 @@
             const statusClass = (s) => s === 1 ? 'pill-success' : s === 2 ? 'pill-warning' : 'pill-mute';
             const fmt = (v) => formatStart(v);
             const fmtBytes = (n) => formatBytes(n);
+            // STAGE4:余额(X24)与 usage 三态(X26)
+            const fmtQty = (n) => (n === null || n === undefined) ? '—' : Number(n).toLocaleString('zh-CN');
+            const usageStatusText = (s) => s === 0 ? '进行中' : s === 1 ? '已结算' : s === 2 ? '已退款' : '未知';
+            const usageStatusClass = (s) => s === 0 ? 'pill-accent' : s === 1 ? 'pill-success' : s === 2 ? 'pill-warning' : 'pill-mute';
 
             // 按天聚合字符数 → CSS 柱状图
             const buildChart = (rows) => {
@@ -370,6 +454,74 @@
                     toast('ok', '用户已删除');
                     location.href = '/dashboard/users';
                 } catch (e) { actionErr.value = e.response?.data?.error?.message || e.message; }
+            };
+
+            // ---- 余额卡展示 ----
+            const balanceState = computed(() => {
+                const b = user.value ? user.value.balance : 0;
+                return (typeof b !== 'number') ? '未知' : (b < 0 ? '已欠费停服' : (b === 0 ? '余额不足' : '正常'));
+            });
+            const balanceCardClass = computed(() => {
+                const b = user.value ? user.value.balance : 0;
+                return (typeof b === 'number' && b < 0) ? 'balance-danger' : (b === 0 ? 'balance-warn' : '');
+            });
+            const balancePillClass = computed(() => {
+                const b = user.value ? user.value.balance : 0;
+                return (typeof b !== 'number') ? 'pill-mute' : (b < 0 ? 'pill-danger' : (b === 0 ? 'pill-warning' : 'pill-success'));
+            });
+
+            // ---- 充值 / 扣减 ----
+            const showChargeModal = ref(false);
+            const chargeForm = ref({ delta: null, remark: '' });
+            const chargeErr = ref('');
+            const chargeSubmitting = ref(false);
+            const openCharge = () => {
+                chargeForm.value = { delta: null, remark: '' };
+                chargeErr.value = '';
+                showChargeModal.value = true;
+            };
+            const closeChargeModal = () => { showChargeModal.value = false; };
+            const submitCharge = async () => {
+                chargeErr.value = '';
+                const delta = Number(chargeForm.value.delta);
+                if (chargeForm.value.delta === null || chargeForm.value.delta === '') { chargeErr.value = '请填写变动额度 delta'; return; }
+                if (!Number.isFinite(delta) || delta === 0) { chargeErr.value = 'delta 必须是非 0 的整数'; return; }
+                if (!Number.isInteger(delta)) { chargeErr.value = 'delta 必须是整数'; return; }
+                chargeSubmitting.value = true;
+                try {
+                    const body = { delta };
+                    if (chargeForm.value.remark.trim()) body.remark = chargeForm.value.remark.trim();
+                    const r = await http.post(`/admin/users/${uid}/charge`, body);
+                    toast('ok', `余额已更新为 ${fmtQty(r.data.balance)}`);
+                    showChargeModal.value = false;
+                    user.value = (await http.get(`/admin/users/${uid}`)).data;
+                } catch (e) {
+                    const code = e.response?.data?.error?.code;
+                    chargeErr.value = code === 'insufficient_balance'
+                        ? '扣减后会变成负余额，后端拒绝（insufficient_balance）。欠费只能由实际调用结算补扣产生。'
+                        : (e.response?.data?.error?.message || e.message);
+                } finally { chargeSubmitting.value = false; }
+            };
+
+            // ---- is_admin 调整(PATCH /api/admin/users/{id})----
+            const toggleAdmin = async () => {
+                const target = !user.value.is_admin;
+                if (!confirm(target
+                    ? `确定把 "${user.value.name}" 提升为管理员吗？\n管理员可访问全部管理接口。`
+                    : `确定把 "${user.value.name}" 降级为普通用户吗？\n若它是最后一个启用的管理员，后端会拒绝（409 last_admin）。`)) return;
+                actionErr.value = '';
+                try {
+                    await http.patch(`/admin/users/${uid}`, { is_admin: target });
+                    toast('ok', target ? '已提升为管理员' : '已降级为普通用户');
+                    user.value = (await http.get(`/admin/users/${uid}`)).data;
+                } catch (e) {
+                    const code = e.response?.data?.error?.code;
+                    const msg = e.response?.data?.error?.message || e.message;
+                    actionErr.value = code === 'last_admin'
+                        ? '至少保留一个启用的管理员：该用户是当前唯一的管理员，无法降级。'
+                        : msg;
+                    toast('err', actionErr.value);
+                }
             };
 
             // ---- 令牌 ----
@@ -448,7 +600,9 @@
 
             return {
                 user, tokens, usageRows, totals, chartBars, actionErr, loadState,
-                statusText, statusClass, fmt, fmtBytes,
+                statusText, statusClass, fmt, fmtBytes, fmtQty, usageStatusText, usageStatusClass,
+                balanceState, balanceCardClass, balancePillClass,
+                showChargeModal, chargeForm, chargeErr, chargeSubmitting, openCharge, closeChargeModal, submitCharge, toggleAdmin,
                 showUserModal, userForm, modalErr, submitting, editUser, closeUserModal, submitUser, removeUser,
                 showTokenModal, tokenEditing, tokenCreated, createdKey, tokenForm,
                 openTokenCreate, openTokenEdit, closeTokenModal, submitToken, copyKey,

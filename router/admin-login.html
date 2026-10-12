@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>管理后台 · 登录</title>
+    <title>火山 TTS · 登录</title>
     <script src="https://cdn.bootcdn.net/ajax/libs/vue/3.4.21/vue.global.prod.js"></script>
     <script src="https://cdn.bootcdn.net/ajax/libs/axios/1.6.7/axios.min.js"></script>
     <script>try{var t=localStorage.getItem('ttsTheme')||'auto',d=t==='auto'?(matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light'):t;document.documentElement.setAttribute('data-theme',d)}catch(e){}</script>
@@ -14,42 +14,220 @@
         <div class="login-screen">
             <div class="login-card">
                 <div class="login-logo">TTS</div>
-                <h1>管理后台</h1>
-                <div class="sub">输入 OPENAI_TTS_API_KEY 登录</div>
-                <input v-model="keyInput" type="password" placeholder="API Key" @keyup.enter="onLogin" autofocus class="login-input">
-                <button class="btn btn-primary btn-lg" @click="onLogin" :disabled="!keyInput" style="width: 100%;">登 录</button>
-                <div v-if="loginErr" class="login-err">⚠ {{ loginErr }}</div>
+
+                <!-- ===== 统一登录页(D15):①账号密码 → JWT ②admin_key 直连 ===== -->
+                <template v-if="view === 'login'">
+                    <h1>火山 TTS</h1>
+                    <div class="sub">登录后按角色进入管理后台或用户门户</div>
+
+                    <div class="login-tabs">
+                        <button class="login-tab" :class="{ active: tab === 'pwd' }" @click="tab = 'pwd'">账号密码</button>
+                        <button class="login-tab" :class="{ active: tab === 'key' }" @click="tab = 'key'">管理员密钥</button>
+                    </div>
+
+                    <!-- ① 账号密码 -->
+                    <template v-if="tab === 'pwd'">
+                        <input v-model="pwdForm.name" class="login-input" placeholder="用户名" autocomplete="username" autofocus @keyup.enter="onLoginPassword">
+                        <input v-model="pwdForm.password" type="password" class="login-input" placeholder="密码" autocomplete="current-password" @keyup.enter="onLoginPassword">
+                        <button class="btn btn-primary btn-lg" style="width:100%;" @click="onLoginPassword" :disabled="submitting || !pwdForm.name || !pwdForm.password">
+                            {{ submitting ? '登录中...' : '登 录' }}
+                        </button>
+                    </template>
+
+                    <!-- ② admin_key 直连(保留原有行为) -->
+                    <template v-else>
+                        <input v-model="keyInput" type="password" class="login-input" placeholder="API Key / admin_key" @keyup.enter="onLoginKey" autofocus>
+                        <button class="btn btn-primary btn-lg" style="width:100%;" @click="onLoginKey" :disabled="submitting || !keyInput">
+                            {{ submitting ? '登录中...' : '登 录' }}
+                        </button>
+                        <div class="hint" style="text-align:left;">
+                            管理员密钥只能进入管理后台；用户门户必须用「账号密码」登录。
+                        </div>
+                    </template>
+
+                    <div v-if="err" class="login-err">⚠ {{ err }}</div>
+                    <div v-if="okMsg" class="login-ok">✓ {{ okMsg }}</div>
+
+                    <div class="login-foot" v-if="registerAllowed">
+                        还没有账号？<a href="/register">注册</a>
+                    </div>
+                </template>
+
+                <!-- ===== 首次设置密码(D29 / D23:本机来源或携带 admin_key) ===== -->
+                <template v-else>
+                    <h1>设置密码</h1>
+                    <div class="sub">
+                        账号 <b>{{ pwdForm.name }}</b> 还没有设置密码。为安全起见，首次设置密码只允许在<b>服务器本机</b>操作，
+                        或在上方「管理员密钥」标签页填入有效 admin_key 后重试。
+                    </div>
+
+                    <input v-model="setupForm.password" type="password" class="login-input" placeholder="新密码（至少 8 位）" autocomplete="new-password" autofocus>
+                    <input v-model="setupForm.confirm" type="password" class="login-input" placeholder="再次输入新密码" autocomplete="new-password" @keyup.enter="onSetupPassword">
+                    <div class="hint" style="text-align:left;">密码长度 ≥ 8 位，且不能为纯空白字符</div>
+
+                    <button class="btn btn-primary btn-lg" style="width:100%; margin-top:14px;" @click="onSetupPassword" :disabled="submitting">
+                        {{ submitting ? '提交中...' : '设置密码并返回登录' }}
+                    </button>
+                    <button class="btn" style="width:100%; margin-top:8px;" @click="backToLogin">← 返回登录</button>
+
+                    <div v-if="setupErr" class="login-err">⚠ {{ setupErr }}</div>
+                </template>
             </div>
         </div>
     </div>
 
     <script src="/dashboard/admin-shell.js"></script>
     <script>
-    const { createApp, ref } = Vue;
-    const { http, setKey, clearKey, getKey } = window.admin;
+    const { createApp, ref, onMounted } = Vue;
+    const {
+        http, toast, clearCred, getCred,
+        login, loginWithPassword, setupPassword,
+    } = window.admin;
+
+    // 登录失败统一文案(§17):invalid_credentials **不区分**账号是否存在
+    const CRED_MSG = '用户名或密码错误';
+    const KEY_MSG = '鉴权失败';
+
     createApp({
         setup() {
+            const view = ref('login');        // login | setup
+            const tab = ref('pwd');           // pwd | key
+            const pwdForm = ref({ name: '', password: '' });
+            const setupForm = ref({ password: '', confirm: '' });
             const keyInput = ref('');
-            const loginErr = ref('');
+            const err = ref('');
+            const setupErr = ref('');
+            const okMsg = ref('');
+            const submitting = ref(false);
+            const registerAllowed = ref(false);
 
-            // 已登录则直接跳 dashboard
-            if (getKey()) {
-                http.get('/admin/overview').then(() => {
-                    location.href = '/dashboard';
-                }).catch(() => { clearKey(); });
-            }
-
-            const onLogin = async () => {
-                loginErr.value = '';
+            // 底部注册链接显隐(D22):GET /api/auth/register-status → {"allow":bool}
+            const loadRegisterStatus = async () => {
                 try {
-                    await window.admin.login(keyInput.value);
-                    location.href = '/dashboard';
+                    const r = await http.get('/auth/register-status');
+                    registerAllowed.value = !!(r.data && r.data.allow === true);
                 } catch (e) {
-                    loginErr.value = '鉴权失败: ' + (e.response?.data?.error?.message || e.message);
+                    registerAllowed.value = false;   // 接口不可用时默认隐藏
                 }
             };
 
-            return { keyInput, loginErr, onLogin };
+            // 已登录则直接按角色分流(X10 / §6.1:前端必须自己做角色分流)
+            const probeExistingCred = async () => {
+                const cred = getCred();
+                if (!cred) return;
+                // 先按 JWT 试 /api/me(admin JWT 也可用,D28)
+                try {
+                    const r = await http.get('/me');
+                    location.href = (r.data && r.data.is_admin) ? '/dashboard' : '/portal';
+                    return;
+                } catch (e) {
+                    // 非 JWT(admin_key)或会话已失效 → 再按 admin_key 试
+                }
+                try {
+                    await http.get('/admin/overview');
+                    location.href = '/dashboard';
+                } catch (e) {
+                    clearCred();
+                }
+            };
+
+            // ① 账号密码登录
+            const onLoginPassword = async () => {
+                err.value = ''; okMsg.value = '';
+                const name = (pwdForm.value.name || '').trim();
+                const password = pwdForm.value.password || '';
+                if (!name) { err.value = '请填写用户名'; return; }
+                if (!password) { err.value = '请填写密码'; return; }
+
+                submitting.value = true;
+                try {
+                    const d = await loginWithPassword(name, password);
+                    if (d && d.need_setup_password) {
+                        // D29:绝无 token;转入设密视图
+                        setupErr.value = '';
+                        setupForm.value = { password: '', confirm: '' };
+                        view.value = 'setup';
+                        return;
+                    }
+                    toast('ok', '登录成功');
+                    location.href = d.is_admin ? '/dashboard' : '/portal';
+                } catch (e) {
+                    err.value = loginErrText(e);
+                } finally { submitting.value = false; }
+            };
+
+            const loginErrText = (e) => {
+                const code = e.response?.data?.error?.code;
+                const msg = e.response?.data?.error?.message;
+                if (code === 'invalid_credentials') return CRED_MSG;
+                if (code === 'too_many_attempts') return '连续失败次数过多，请 15 分钟后重试';
+                if (code === 'user_disabled') return '账号已被禁用，请联系管理员';
+                return msg || e.message || CRED_MSG;
+            };
+
+            // ② admin_key 直连
+            const onLoginKey = async () => {
+                err.value = ''; okMsg.value = '';
+                if (!keyInput.value) return;
+                submitting.value = true;
+                try {
+                    await login(keyInput.value);
+                    toast('ok', '登录成功');
+                    location.href = '/dashboard';
+                } catch (e) {
+                    err.value = KEY_MSG + ': ' + (e.response?.data?.error?.message || e.message);
+                } finally { submitting.value = false; }
+            };
+
+            // ③ 首次设置密码
+            const onSetupPassword = async () => {
+                setupErr.value = '';
+                const p = setupForm.value.password || '';
+                if (!p || !p.trim()) { setupErr.value = '密码不能为空或纯空白'; return; }
+                if (p.length < 8) { setupErr.value = '密码长度至少 8 位'; return; }
+                if (p !== setupForm.value.confirm) { setupErr.value = '两次输入的密码不一致'; return; }
+
+                submitting.value = true;
+                try {
+                    // 用当前槽内凭证做 auth:槽里若是有效 admin_key 即可满足设密通道(D23/D32)
+                    await setupPassword((pwdForm.value.name || '').trim(), p);
+                    toast('ok', '密码设置成功，请用新密码登录');
+                    backToLogin();
+                    okMsg.value = '密码设置成功，请用新密码登录';
+                } catch (e) {
+                    const code = e.response?.data?.error?.code;
+                    const msg = e.response?.data?.error?.message;
+                    if (code === 'setup_not_allowed') {
+                        setupErr.value = '当前通道不允许设置密码：请在本机操作，或使用管理员密钥（切到「管理员密钥」标签页填入 admin_key 后重试）。';
+                    } else if (code === 'password_already_set') {
+                        setupErr.value = '该账号已经设置过密码，请直接登录；忘记密码请联系管理员重置。';
+                    } else if (code === 'weak_password') {
+                        setupErr.value = '密码不合规：长度至少 8 位，且不能为纯空白。';
+                    } else if (code === 'user_not_found') {
+                        setupErr.value = '用户不存在，请确认用户名是否正确。';
+                    } else {
+                        setupErr.value = msg || e.message;
+                    }
+                } finally { submitting.value = false; }
+            };
+
+            const backToLogin = () => {
+                view.value = 'login';
+                setupErr.value = '';
+                setupForm.value = { password: '', confirm: '' };
+                pwdForm.value.password = '';
+                tab.value = 'pwd';
+            };
+
+            onMounted(() => {
+                loadRegisterStatus();
+                probeExistingCred();
+            });
+
+            return {
+                view, tab, pwdForm, setupForm, keyInput, err, setupErr, okMsg, submitting, registerAllowed,
+                onLoginPassword, onLoginKey, onSetupPassword, backToLogin,
+            };
         },
     }).mount('#app');
     </script>

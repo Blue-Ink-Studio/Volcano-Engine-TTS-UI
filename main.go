@@ -116,6 +116,23 @@ func main() {
 		}
 	}
 
+	// 4.6) STAGE4:JWT secret 初始化 + 初始安全策略(D21/D24/D30/X19)
+	//
+	// 顺序很关键:
+	//   - JWT secret 必须 **fail-fast**:带着不可用的 secret 继续服务,会让所有
+	//     登录请求在签发/校验时静默失败,表现为"谁都登不进来"且原因难查。
+	//   - 安全策略必须**在 seed 之后**执行 —— 全新安装时 default 用户此刻才存在,
+	//     migrate() 阶段它还不存在,所以策略不能写在迁移里(见 store.EnforceInitialSecurityPolicy)。
+	if err := middleware.InitJWTSecret(dbPath); err != nil {
+		log.Fatalf("[main][FATAL] JWT secret 初始化失败: %v", err)
+	}
+	middleware.SetSessionStore(st)
+	if st != nil {
+		if err := st.EnforceInitialSecurityPolicy(); err != nil {
+			log.Printf("[main][WARN] 初始安全策略执行失败(不阻断启动): %v", err)
+		}
+	}
+
 	// 5) 启动摘要日志(此时 Auth.APIKeys 已是 DB 值,日志反映真实状态)
 	setting.LogStartupSummary()
 
