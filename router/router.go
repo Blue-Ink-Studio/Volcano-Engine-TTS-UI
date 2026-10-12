@@ -93,8 +93,10 @@ func Setup() *mux.Router {
 		_, _ = w.Write(setupHTML)
 	}).Methods("GET")
 	// v0.3.0:安装状态不再匿名暴露(原本 normal 模式下仍返回 {installed, mode})
-	r.Handle("/api/setup/status", middleware.RequireAdminOrJWT(http.HandlerFunc(controller.SetupStatusHandler))).Methods("GET")
-	r.HandleFunc("/api/setup/prefill", controller.SetupPrefillHandler).Methods("GET")
+	// STAGE5:/api/setup/status 改为**匿名**(契约 §7)—— setup.html 必须在未登录状态
+	// 判模式;它只回 {installed, mode} 两个字段,不含任何敏感信息。
+	r.HandleFunc("/api/setup/status", controller.SetupStatusHandler).Methods("GET")
+	// /api/setup/prefill 已删除(STAGE5 §7):setup 不再有可预填的字段。
 	r.HandleFunc("/api/setup", controller.SetupSubmitHandler).Methods("POST")
 
 	// ===== v0.3.0 阶段 3:管理面板入口从 /admin 迁至 /dashboard =====
@@ -204,12 +206,13 @@ func Setup() *mux.Router {
 	r.Handle("/api/admin/settings", middleware.RequireAdminOrJWT(http.HandlerFunc(controller.SettingsGetHandler))).Methods("GET")
 	r.Handle("/api/admin/settings", middleware.RequireAdminOrJWT(http.HandlerFunc(controller.SettingsUpdateHandler))).Methods("PUT")
 	r.Handle("/api/admin/settings/api-key", middleware.RequireAdminOrJWT(http.HandlerFunc(controller.SettingsAPIKeyHandler))).Methods("PUT")
-	r.Handle("/api/admin/settings/auth-key", middleware.RequireAdminOrJWT(http.HandlerFunc(controller.SettingsAuthKeyHandler))).Methods("PUT")
+	// STAGE5:`auth_key` 已退役(契约 §8)—— 它的两条写入路由(admin 前缀与过渡别名)一并下线。
+	// 业务鉴权现在只看 tokens 表(用户自建令牌);管理鉴权看 owner JWT 或 admin_key。
 
 	r.Handle("/api/settings", middleware.RequireAdminOrJWT(http.HandlerFunc(controller.SettingsGetHandler))).Methods("GET")
 	r.Handle("/api/settings", middleware.RequireAdminOrJWT(http.HandlerFunc(controller.SettingsUpdateHandler))).Methods("PUT")
 	r.Handle("/api/settings/api-key", middleware.RequireAdminOrJWT(http.HandlerFunc(controller.SettingsAPIKeyHandler))).Methods("PUT")
-	r.Handle("/api/settings/auth-key", middleware.RequireAdminOrJWT(http.HandlerFunc(controller.SettingsAuthKeyHandler))).Methods("PUT")
+	// STAGE5:`/api/settings/auth-key` 同样已下线(auth_key 退役)。
 	r.Handle("/api/settings/admin-key", middleware.RequireAdminOrJWT(http.HandlerFunc(controller.SettingsAdminKeyHandler))).Methods("PUT")
 	r.Handle("/api/settings/cors", middleware.RequireAdminOrJWT(http.HandlerFunc(controller.SettingsCORSHandler))).Methods("PUT")
 

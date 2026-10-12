@@ -47,7 +47,7 @@ func parsePagination(r *http.Request) (limit, offset int) {
 // ---- 响应视图(只含契约字段) -----------------------------------------
 
 // userListItem 对应契约 GET /users 的 items 元素。
-// STAGE4(§8.3)追加 balance / is_admin:admin 列表要能直接看到钱包与角色。
+// STAGE4 追加 balance / is_admin;STAGE5 追加 role / user_group（is_admin 改为派生）。
 type userListItem struct {
 	ID         int64  `json:"id"`
 	Name       string `json:"name"`
@@ -55,19 +55,23 @@ type userListItem struct {
 	UsedQuota  int64  `json:"used_quota"`
 	TokenCount int    `json:"token_count"`
 	Balance    int64  `json:"balance"`
-	IsAdmin    bool   `json:"is_admin"`
+	Role       string `json:"role"`
+	UserGroup  string `json:"user_group"`
+	IsAdmin    bool   `json:"is_admin"` // 派生自 Role
 	CreatedAt  string `json:"created_at"`
 }
 
 // userDetail 对应契约 GET /users/{id} 与 PATCH 的响应。
-// STAGE4(§8.3)追加 balance / is_admin。
+// STAGE4 追加 balance / is_admin;STAGE5 追加 role / user_group（is_admin 改为派生）。
 type userDetail struct {
 	ID        int64  `json:"id"`
 	Name      string `json:"name"`
 	Status    int    `json:"status"`
 	UsedQuota int64  `json:"used_quota"`
 	Balance   int64  `json:"balance"`
-	IsAdmin   bool   `json:"is_admin"`
+	Role      string `json:"role"`
+	UserGroup string `json:"user_group"`
+	IsAdmin   bool   `json:"is_admin"` // 派生自 Role
 	CreatedAt string `json:"created_at"`
 	UpdatedAt string `json:"updated_at"`
 }
@@ -79,6 +83,8 @@ func newUserDetail(u *store.User) userDetail {
 		Status:    u.Status,
 		UsedQuota: u.UsedQuota,
 		Balance:   u.Balance,
+		Role:      u.Role,
+		UserGroup: u.UserGroup,
 		IsAdmin:   u.IsAdmin,
 		CreatedAt: u.CreatedAt,
 		UpdatedAt: u.UpdatedAt,
@@ -117,6 +123,8 @@ func UsersListHandler(w http.ResponseWriter, r *http.Request) {
 			UsedQuota:  it.UsedQuota,
 			TokenCount: it.TokenCount,
 			Balance:    it.Balance,
+			Role:       it.Role,
+			UserGroup:  it.UserGroup,
 			IsAdmin:    it.IsAdmin,
 			CreatedAt:  it.CreatedAt,
 		})
@@ -136,11 +144,15 @@ func UsersListHandler(w http.ResponseWriter, r *http.Request) {
 //   - password 不传 → password_hash 留空,该账号走"首次设密"流程(D8/D23)
 //   - balance > 0 → 走 UserCreateWithBalance 记 charge_logs(type=grant, D33)
 type userCreateReq struct {
-	Name     string  `json:"name"`
-	Status   *int    `json:"status"`
-	Balance  *int    `json:"balance"`
-	IsAdmin  *bool   `json:"is_admin"`
-	Password *string `json:"password"`
+	Name    string `json:"name"`
+	Status  *int   `json:"status"`
+	Balance *int   `json:"balance"`
+	// STAGE5:role / user_group 为首选字段;is_admin 保留为兼容别名(契约 §6.2)。
+	// `role:"owner"` 在此**被拒绝** —— owner 只能由 setup 创建或经 TransferOwner 转让。
+	Role      *string `json:"role"`
+	UserGroup *string `json:"user_group"`
+	IsAdmin   *bool   `json:"is_admin"`
+	Password  *string `json:"password"`
 }
 
 // UsersCreateHandler POST /api/admin/users
@@ -194,9 +206,36 @@ func UsersCreateHandler(w http.ResponseWriter, r *http.Request) {
 		hash = h
 	}
 
-	isAdmin := false
-	if req.IsAdmin != nil {
-		isAdmin = *req.IsAdmin
+	// STAGE5:role 优先,is_admin 为兼容别名(is_admin=true → 'admin',**永不是 owner**)。
+	role := store.RoleUser
+	if req.IsAdmin != nil && *req.IsAdmin {
+		role = store.RoleAdmin
+	}
+	if req.Role != nil {
+		role = strings.TrimSpace(*req.Role)
+	}
+	if !store.ValidRole(role) {
+		middleware.SendJSONError(w, http.StatusBadRequest,
+			"role must be owner/admin/user", "invalid_request_error", "invalid_role")
+		return
+	}
+	// owner 的唯一性由 DB 索引兜底,但建号接口直接拒绝更清楚:想换超管请用 PATCH {role:"owner"} 转让。
+	if role == store.RoleOwner {
+		middleware.SendJSONError(w, http.StatusBadRequest,
+			`owner can only be created by setup or transferred via PATCH {"role":"owner"}`,
+			"invalid_request_error", "invalid_role")
+		return
+	}
+	// user_group:省略 → default;给了就当白名单子集校验(非空)
+	userGroup := "default"
+	if req.UserGroup != nil {
+		userGroup = store.NormalizeUserGroup(*req.UserGroup)
+	}
+	if !store.ValidUserGroup(userGroup) {
+		middleware.SendJSONError(w, http.StatusBadRequest,
+			"user_group must be a non-empty subset of default/vip/svip",
+			"invalid_request_error", "invalid_group")
+		return
 	}
 	// 负数余额无意义:按 0 处理(不写 charge_logs)
 	balance := int64(0)
@@ -204,7 +243,10 @@ func UsersCreateHandler(w http.ResponseWriter, r *http.Request) {
 		balance = int64(*req.Balance)
 	}
 
-	newUser := store.User{Name: req.Name, Status: status, PasswordHash: hash, IsAdmin: isAdmin}
+	newUser := store.User{
+		Name: req.Name, Status: status, PasswordHash: hash,
+		Role: role, UserGroup: userGroup,
+	}
 	var id int64
 	var err error
 	if balance > 0 {
@@ -234,14 +276,17 @@ func UsersCreateHandler(w http.ResponseWriter, r *http.Request) {
 			"read back failed", "server_error", "db_read_failed")
 		return
 	}
-	log.Printf("[users] 建号成功 id=%d name=%q is_admin=%v balance=%d", u.ID, u.Name, u.IsAdmin, u.Balance)
+	log.Printf("[users] 建号成功 id=%d name=%q role=%s user_group=%s balance=%d",
+		u.ID, u.Name, u.Role, u.UserGroup, u.Balance)
 	writeJSON(w, http.StatusCreated, map[string]any{
 		"id":         u.ID,
 		"name":       u.Name,
 		"status":     u.Status,
 		"created_at": u.CreatedAt,
 		"balance":    u.Balance,
-		"is_admin":   u.IsAdmin,
+		"role":       u.Role,
+		"user_group": u.UserGroup,
+		"is_admin":   u.IsAdmin, // 派生自 role
 	})
 }
 
@@ -277,39 +322,45 @@ func UsersGetHandler(w http.ResponseWriter, r *http.Request) {
 // ---- PATCH /api/admin/users/{id} -----------------------------------
 
 type userUpdateReq struct {
-	Name    *string `json:"name"`
-	Status  *int    `json:"status"`
-	IsAdmin *bool   `json:"is_admin"` // STAGE4(D26):升降级
+	Name   *string `json:"name"`
+	Status *int    `json:"status"`
+	// STAGE5:role / user_group 为首选;is_admin 为兼容别名(**role 优先**,契约 §6.2)
+	Role      *string `json:"role"`
+	UserGroup *string `json:"user_group"`
+	IsAdmin   *bool   `json:"is_admin"`
 }
 
-// guardLastAdmin 实施「最后一个 admin 保护」(D26 §8.3)。
+// guardLastOwner 实施「唯一 owner 保护」(STAGE5 §5,取代 STAGE4 的 last_admin)。
 //
-// 判定口径:目标用户本身 `is_admin=1 且 status=1`,且当前**可用管理员总数 <= 1** 时,
-// 拒绝把该行降级 / 禁用 / 删除 —— 否则系统将不再有管理员。
-// 不需要保护的操作(改名、启用、充值等)直接放行,不查计数。
+// 判定口径:目标 `role='owner'` 且当前未被软删的 owner 总数 <= 1 时,拒绝把它
+// 降级 / 禁用 / 删除 —— 否则系统将不再有超管。
 //
-// 返回 true 表示已写出 409 last_admin(调用方直接 return)。
-func guardLastAdmin(w http.ResponseWriter, s *store.Store, u *store.User, degrade, disable bool) bool {
+// 两处刻意与 STAGE4 不同:
+//   - **admin 不再受保护**(定案 C2):admin 被全部降级无害,owner 随时能再提人;
+//   - **不给 admin_key 开后门**:admin_key 的自救路径是 TransferOwner(转让),
+//     那条路永远留下**恰好一个** owner;而"降成零 owner"不是自救,是自锁。
+//
+// 返回 true 表示已写出 409 last_owner(调用方直接 return)。
+func guardLastOwner(w http.ResponseWriter, s *store.Store, u *store.User, degrade, disable bool) bool {
 	if u == nil || (!degrade && !disable) {
 		return false
 	}
-	// 目标不是"可用管理员" → 不在保护范围(禁用中的 admin 可以随便降级/再禁用)
-	if !u.IsAdmin || u.Status != 1 {
-		return false
+	if u.Role != store.RoleOwner {
+		return false // 只有 owner 需要保护
 	}
-	n, err := s.UserCountActiveAdmins()
+	n, err := s.CountActiveOwners()
 	if err != nil {
-		log.Printf("[users] count active admins: %v", err)
+		log.Printf("[users] count active owners: %v", err)
 		middleware.SendJSONError(w, http.StatusInternalServerError,
-			"count admins failed", "server_error", "db_read_failed")
+			"count owners failed", "server_error", "db_read_failed")
 		return true
 	}
 	if n > 1 {
 		return false
 	}
-	log.Printf("[users] 拒绝操作:user_id=%d 是唯一可用管理员(D26)", u.ID)
+	log.Printf("[users] 拒绝操作:user_id=%d 是唯一 owner(STAGE5 §5)", u.ID)
 	middleware.SendJSONError(w, http.StatusConflict,
-		"at least one enabled admin must remain", "invalid_request_error", "last_admin")
+		"the system must keep at least one owner", "invalid_request_error", "last_owner")
 	return true
 }
 
@@ -352,13 +403,86 @@ func UsersUpdateHandler(w http.ResponseWriter, r *http.Request) {
 		sendNotFound(w, "user not found")
 		return
 	}
-	degrade := req.IsAdmin != nil && !*req.IsAdmin
-	disable := req.Status != nil && *req.Status == 2 // 2 = disabled(1=enabled, 3=deleted 走 DELETE)
-	if guardLastAdmin(w, s, cur, degrade, disable) {
+	// STAGE5:解析期望 role —— `role` 字段优先,`is_admin` 为兼容别名。
+	// desiredRole == "" 表示"本次不改 role"。
+	desiredRole := ""
+	if req.IsAdmin != nil {
+		if *req.IsAdmin {
+			desiredRole = store.RoleAdmin
+		} else {
+			desiredRole = store.RoleUser
+		}
+	}
+	if req.Role != nil {
+		desiredRole = strings.TrimSpace(*req.Role)
+		if !store.ValidRole(desiredRole) {
+			middleware.SendJSONError(w, http.StatusBadRequest,
+				"role must be owner/admin/user", "invalid_request_error", "invalid_role")
+			return
+		}
+	}
+
+	// 转让 owner:显式 `role:"owner"` ⇒ 原子 TransferOwner。
+	//
+	// 定案 A2:本端点整体**只挂 RequireAdminOrJWT**,owner 权限在这里**按字段条件判定** ——
+	// 若给整个端点挂 RequireOwner,admin 连改 user_group 都会被 403,违反权限矩阵。
+	if desiredRole == store.RoleOwner && cur.Role != store.RoleOwner {
+		if !middleware.RequireOwnerForRequest(r) {
+			middleware.SendJSONError(w, http.StatusForbidden,
+				"owner privilege required", "authentication_error", "owner_required")
+			return
+		}
+		oldID, err := s.CurrentOwnerID()
+		if err != nil {
+			log.Printf("[users] current owner id: %v", err)
+			middleware.SendJSONError(w, http.StatusInternalServerError,
+				"read owner failed", "server_error", "db_read_failed")
+			return
+		}
+		if err := s.TransferOwner(oldID, id); err != nil {
+			switch {
+			case errors.Is(err, store.ErrNotFound):
+				sendNotFound(w, "user not found")
+			case errors.Is(err, store.ErrInvalid):
+				middleware.SendJSONError(w, http.StatusBadRequest,
+					"target user is not eligible for ownership (must be enabled)",
+					"invalid_request_error", "invalid_target")
+			default:
+				log.Printf("[users] transfer owner old=%d new=%d: %v", oldID, id, err)
+				middleware.SendJSONError(w, http.StatusInternalServerError,
+					"transfer owner failed", "server_error", "db_write_failed")
+			}
+			return
+		}
+		log.Printf("[users] owner 转让:old=%d new=%d", oldID, id)
+		desiredRole = "" // 已由 TransferOwner 写入,避免通用 patch 二次写
+	}
+
+	// user_group 预校验,给出精确的 invalid_group(store 层只会报 ErrInvalid)
+	if req.UserGroup != nil {
+		norm := store.NormalizeUserGroup(*req.UserGroup)
+		if !store.ValidUserGroup(norm) {
+			middleware.SendJSONError(w, http.StatusBadRequest,
+				"user_group must be a non-empty subset of default/vip/svip",
+				"invalid_request_error", "invalid_group")
+			return
+		}
+		req.UserGroup = &norm
+	}
+
+	degrade := desiredRole != "" && desiredRole != store.RoleOwner
+	disable := req.Status != nil && *req.Status == 2 // 2 = disabled(3=deleted 走 DELETE)
+	if guardLastOwner(w, s, cur, degrade, disable) {
 		return
 	}
 
-	patch := store.UserUpdatePatch{Name: req.Name, Status: req.Status, IsAdmin: req.IsAdmin}
+	var rolePtr *string
+	if desiredRole != "" {
+		rolePtr = &desiredRole
+	}
+	patch := store.UserUpdatePatch{
+		Name: req.Name, Status: req.Status, Role: rolePtr, UserGroup: req.UserGroup,
+	}
 	if err := s.UserUpdate(id, patch); err != nil {
 		switch {
 		case errors.Is(err, store.ErrNotFound):
@@ -414,7 +538,7 @@ func UsersDeleteHandler(w http.ResponseWriter, r *http.Request) {
 			"get user failed", "server_error", "db_read_failed")
 		return
 	}
-	if guardLastAdmin(w, s, cur, false, true) {
+	if guardLastOwner(w, s, cur, false, true) {
 		return
 	}
 	if err := s.UserSoftDelete(id); err != nil {

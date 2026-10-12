@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log"
 	"net/http"
-	"os"
 	"strings"
 	"time"
 
@@ -57,61 +56,33 @@ func SetupStatusHandler(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(resp)
 }
 
-// SetupPrefillHandler GET /api/setup/prefill
-// 仅在安装模式有响应;返回旧 env 变量值,便于引导页预填,实现平滑迁移。
-func SetupPrefillHandler(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	if installer.GetMode() != installer.ModeSetup {
-		http.Error(w, "not in setup mode", http.StatusNotFound)
-		return
-	}
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	resp := map[string]any{
-		"settings": prefillFromEnv(),
-	}
-	_ = json.NewEncoder(w).Encode(resp)
-}
+// SetupPrefillHandler 与 prefillFromEnv 已在 STAGE5 **删除**。
+//
+// 原因(契约 §7):setup 只收 `{token, admin:{name,password}}`,不再有
+// api_key / auth_key / 音色等需要预填的字段 —— 预填功能失去意义,
+// 而且它会继续把旧 env(BYTEDANCE_TTS_*)的形状暴露给前端,容易误导。
+// 路由侧的注册也一并移除(main/router)。
 
-// prefillFromEnv 读 BYTEDANCE_TTS_* 等旧 env,作为引导页预填值。
-// 读不到就返回空串,前端会用默认值。
-func prefillFromEnv() map[string]string {
-	get := func(k string) string { return os.Getenv(k) }
-	return map[string]string{
-		"api_key":            "", // API key 永不回显,即便 env 里有;必须让用户重新输入
-		"default_resource_id": get("BYTEDANCE_TTS_RESOURCE_ID"),
-		"default_speaker":    get("BYTEDANCE_TTS_SPEAKER"),
-		"default_format":     get("BYTEDANCE_TTS_FORMAT"),
-		"sample_rate":        get("BYTEDANCE_TTS_SAMPLE_RATE"),
-		"model":              get("BYTEDANCE_TTS_MODEL"),
-		"model_type":         get("BYTEDANCE_TTS_MODEL_TYPE"),
-		"explicit_language":  get("BYTEDANCE_TTS_EXPLICIT_LANGUAGE"),
-		"enable_subtitle":    get("BYTEDANCE_TTS_ENABLE_SUBTITLE"),
-		"timeout":            get("BYTEDANCE_TTS_TIMEOUT"),
-	}
-}
-
-// SetupRequestBody 是 POST /api/setup 的请求体结构。
+// SetupRequestBody 是 POST /api/setup 的请求体(STAGE5 契约 §7)。
+//
+// STAGE5 起 setup **只做一件事:注册超管账号**。
+// 渠道凭证 / 音色全部移出安装流程 —— 本系统是多渠道 hub,
+// 在建站阶段绑死一个上游 api_key + 音色是单渠道时代的遗产,建站后到
+// 渠道管理页动态添加即可。
 type SetupRequestBody struct {
-	Token    string            `json:"token"`
-	Settings map[string]string `json:"settings"`
-	Voices   []SetupVoice      `json:"voices"`
-}
-
-// SetupVoice 是 POST /api/setup 里 voices 数组的条目。
-type SetupVoice struct {
-	Name       string `json:"name"`
-	Speaker    string `json:"speaker"`
-	ResourceID string `json:"resource_id"`
-	Model      string `json:"model"`
-	Language   string `json:"language"`
+	Token string `json:"token"`
+	Admin struct {
+		Name     string `json:"name"`
+		Password string `json:"password"`
+	} `json:"admin"`
 }
 
 // SetupSubmitHandler POST /api/setup
-// 校验 token → 校验字段 → 写 settings → 写 voices → 写 lock。
-// 必须在安装模式才接受;装完后永久 404。
+//
+// STAGE5 流程:校验 token → 校验超管用户名/口令 → **单事务**创建超管 + 写基础配置
+// → 写 lock → 切正常模式。必须在安装模式才接受;装完后永久 404。
+//
+// 不再设置 api_key / auth_key / voices —— 渠道建站后到渠道管理页添加(契约 §7)。
 func SetupSubmitHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -138,15 +109,22 @@ func SetupSubmitHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 校验 settings 必填项
-	if err := validateSetupSettings(body.Settings); err != nil {
-		middleware.SendJSONError(w, http.StatusBadRequest, err.Error(), "invalid_request_error", "missing_field")
+	// 超管用户名:必填 + 长度上限(与注册接口同口径 maxUserNameLen)
+	adminName := strings.TrimSpace(body.Admin.Name)
+	if adminName == "" {
+		middleware.SendJSONError(w, http.StatusBadRequest,
+			"admin.name is required", "invalid_request_error", "missing_name")
 		return
 	}
-
-	// 校验 voices
-	if err := validateSetupVoices(body.Voices); err != nil {
-		middleware.SendJSONError(w, http.StatusBadRequest, err.Error(), "invalid_request_error", "invalid_voice")
+	if len([]rune(adminName)) > maxUserNameLen {
+		middleware.SendJSONError(w, http.StatusBadRequest,
+			"admin.name is too long", "invalid_request_error", "invalid_name")
+		return
+	}
+	// 超管口令沿用 D19 规范(>=8、非纯空白)—— 空密码的超管等于没有超管
+	if err := ValidatePassword(body.Admin.Password); err != nil {
+		middleware.SendJSONError(w, http.StatusBadRequest,
+			err.Error(), "invalid_request_error", "weak_password")
 		return
 	}
 
@@ -157,80 +135,52 @@ func SetupSubmitHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 写 settings(包含 initialized=1)
-	settingsKV := make(map[string]string, len(body.Settings)+1)
-	for k, v := range body.Settings {
-		settingsKV[k] = v
-	}
-	settingsKV["initialized"] = "1"
-	settingsKV["installed_at"] = time.Now().UTC().Format(time.RFC3339)
-
-	// 【修复】原版先写 settings 再循环插 voice,任一 voice 失败时已写入的
-	// settings 不回滚 → db 处于半残状态(用户重启还要踩"已装但配置不完整"的坑)。
-	// 改用 store.SetupApply 一次性事务:settings + voices 任一失败整体回滚,
-	// db 保持 setup 前的状态(无脏数据)。
-	//
-	// voice 行的 resource_id 留空时,自动用 settings.default_resource_id 兜底。
-	// 用户在 step 2 填了 default_resource_id 后,step 3 的 voice 行 resource_id
-	// 可以不填 — 保持一致。否则会出现 "settings 里 seed-icl-2.0,voice 里 volc.megatts.icl"
-	// 这种 mismatch,运行时 500。
-	voices := make([]store.Voice, 0, len(body.Voices))
-	defaultResourceID := settingsKV["default_resource_id"]
-	for _, v := range body.Voices {
-		voiceResourceID := v.ResourceID
-		if voiceResourceID == "" {
-			voiceResourceID = defaultResourceID
-			log.Printf("[setup] voice %q resource_id 留空,自动用 default_resource_id=%q", v.Name, defaultResourceID)
-		}
-		voices = append(voices, store.Voice{
-			Name:       v.Name,
-			Speaker:    v.Speaker,
-			ResourceID: voiceResourceID,
-			Model:      v.Model,
-			Language:   v.Language,
-			Enabled:    true,
-		})
-	}
-
-	// 预检 voices 数量(避免空提交也走事务);setup 校验已要求至少 1 条,
-	// 防御性兜底。
-	if len(voices) == 0 {
-		middleware.SendJSONError(w, http.StatusBadRequest,
-			"at least one voice is required", "invalid_request_error", "no_voices")
-		return
-	}
-
-	inserted, err := s.SetupApply(settingsKV, voices)
+	hash, err := HashPassword(body.Admin.Password)
 	if err != nil {
-		log.Printf("[setup] 提交失败,事务回滚 - 错误=%v", err)
-		// 区分客户端/服务端错误,沿用 admin.go 的 400/500 模式
-		if errors.Is(err, store.ErrInvalid) {
-			middleware.SendJSONError(w, http.StatusBadRequest,
-				err.Error(), "invalid_request_error", "voice_invalid")
-			return
-		}
+		log.Printf("[setup] hash owner password: %v", err)
 		middleware.SendJSONError(w, http.StatusInternalServerError,
-			fmt.Sprintf("failed to apply setup: %v", err),
-			"server_error", "db_write_failed")
+			"hash password failed", "server_error", "internal_error")
 		return
 	}
 
-	// 立即把 auth_key 灌到鉴权 key 列表(setting.SetAuthAPIKeys),这样后续
-	// /v1/audio/speech 和 /admin 在本进程内能立刻用新 key(无需等 LoadRuntimeConfig)。
-	authKey := strings.TrimSpace(body.Settings["auth_key"])
-	if authKey != "" {
-		setting.SetAuthAPIKeys([]string{authKey})
+	// 基础配置:只写"已初始化"与安装时间。
+	//
+	// 刻意**不写** api_key / auth_key / default_speaker —— 它们属于"渠道级配置",
+	// 由渠道管理页承担(契约 §2/§7)。这正是 STAGE5 要消除的架构矛盾:
+	// setup 不该把一个上游的凭证焊进建站流程。
+	settingsKV := map[string]string{
+		"initialized":  "1",
+		"installed_at": time.Now().UTC().Format(time.RFC3339),
 	}
 
-	// 装完 reload TTS 全局配置(让 TTSOptions 立即有可用的 api_key/speaker/resource_id,
-	// 否则 /v1/audio/speech 会因为 TTSConfigErr 在启动期被设而返 503,要重启才生效)。
-	if err := setting.LoadRuntimeConfig(GetSetupStore()); err != nil {
-		log.Printf("[setup] warning: 装完 LoadRuntimeConfig 失败: %v(下次启动会恢复)", err)
+	// **DB 写入单事务**(D5):超管 + 基础配置一起提交,任一失败整体回滚。
+	ownerID, err := s.SetupCreateOwner(
+		store.User{Name: adminName, Status: 1, PasswordHash: hash},
+		settingsKV)
+	if err != nil {
+		log.Printf("[setup] 创建超管失败,事务回滚 - 错误=%v", err)
+		switch {
+		case errors.Is(err, store.ErrDuplicate):
+			middleware.SendJSONError(w, http.StatusConflict,
+				"admin name already exists", "invalid_request_error", "user_exists")
+		case errors.Is(err, store.ErrInvalid):
+			middleware.SendJSONError(w, http.StatusBadRequest,
+				err.Error(), "invalid_request_error", "bad_request")
+		default:
+			middleware.SendJSONError(w, http.StatusInternalServerError,
+				fmt.Sprintf("failed to apply setup: %v", err),
+				"server_error", "db_write_failed")
+		}
+		return
 	}
+	log.Printf("[setup] 超管已创建 user_id=%d name=%q(role=owner, user_group=default, balance=0)",
+		ownerID, adminName)
 
-	log.Printf("[setup] 写入 settings=%d, voices=%d/%d (事务原子提交)", len(settingsKV), inserted, len(voices))
-
-	// 写 lock(原子):从这一刻起,/api/setup 永久关闭
+	// 写 lock(原子):从这一刻起,/api/setup 永久关闭。
+	//
+	// 顺序刻意为"先提交 DB、再建 lock":两者无法放进同一个事务(文件 vs SQLite),
+	// 而"DB 已提交但 lock 没写成"是可恢复的(重启会再判一次并允许重跑),
+	// 反过来"lock 写了但 DB 没提交"会把实例锁死在"装好了但没超管"的状态。
 	if err := installer.CreateLock(GetSetupDBPath()); err != nil {
 		log.Printf("[setup] 写 lock 失败: %v", err)
 		middleware.SendJSONError(w, http.StatusInternalServerError, "failed to create install lock", "server_error", "lock_write_failed")
@@ -238,59 +188,22 @@ func SetupSubmitHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	// 切到正常模式(本进程内)
 	installer.SetMode(installer.ModeNormal)
-	log.Printf("[setup] 安装完成!后续请求将进入正常模式")
+	log.Printf("[setup] 安装完成!后续请求将进入正常模式(请用刚创建的超管登录)")
 
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"ok":       true,
 		"message":  "installed",
-		"redirect": "/dashboard", // v0.3.0: 管理入口由 /admin 迁至 /dashboard
-		"settings": len(settingsKV),
-		"voices":   inserted,
+		"redirect": "/login", // STAGE5(D7):装完去统一登录页,用超管登录
+		"owner":    adminName,
 	})
 }
 
-// validateSetupSettings 校验必填项。
-// auth_key (鉴权) 也是必填 — 让 setup 成为"单一配置入口",
-// 用户装完不用再回去设 OPENAI_TTS_API_KEY env。
-func validateSetupSettings(m map[string]string) error {
-	required := []string{"api_key", "auth_key", "default_resource_id", "default_speaker"}
-	var missing []string
-	for _, k := range required {
-		if strings.TrimSpace(m[k]) == "" {
-			missing = append(missing, k)
-		}
-	}
-	if len(missing) > 0 {
-		return fmt.Errorf("missing required fields: %v", missing)
-	}
-	return nil
-}
-
-// validateSetupVoices 校验音色列表;至少 1 条。
-// 详细合法性(白名单、speaker 非空)由 store.VoiceInsert 负责。
-func validateSetupVoices(vs []SetupVoice) error {
-	if len(vs) == 0 {
-		return fmt.Errorf("at least one voice is required")
-	}
-	names := make(map[string]struct{}, len(vs))
-	for i, v := range vs {
-		if strings.TrimSpace(v.Name) == "" {
-			return fmt.Errorf("voices[%d]: name is required", i)
-		}
-		if strings.TrimSpace(v.Speaker) == "" {
-			return fmt.Errorf("voices[%d] (%s): speaker is required", i, v.Name)
-		}
-		// 【UX 改进】resource_id 留空是允许的 — 装时(下面那个循环)会自动用
-		// settings.default_resource_id 兜底。用户只填 step 2 一处即可。
-		_ = v.ResourceID // (保留以便以后加更细的校验)
-		if _, dup := names[v.Name]; dup {
-			return fmt.Errorf("voices[%d]: duplicate name %q", i, v.Name)
-		}
-		names[v.Name] = struct{}{}
-	}
-	return nil
-}
+// validateSetupSettings 与 validateSetupVoices 已在 STAGE5 删除。
+//
+// 旧的 setup 要求 api_key / auth_key / default_resource_id / default_speaker 四项必填,
+// 并要求至少 1 条音色 —— 那是"单渠道建站"的约束。STAGE5 把这些全部移出安装流程后,
+// 这两条校验不再有任何输入可校验(setup 只收超管账号)。
 
 // secureEqualString wraps common.SecureEqualString 保持向后兼容(原文件内已有调用)。
 func secureEqualString(a, b string) bool { return common.SecureEqualString(a, b) }

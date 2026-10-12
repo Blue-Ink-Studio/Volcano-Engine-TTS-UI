@@ -362,13 +362,23 @@ func SettingsAdminKeyHandler(w http.ResponseWriter, r *http.Request) {
 	key := strings.TrimSpace(body.AdminKey)
 
 	if key == "" {
-		// 清除独立管理凭证 → 回退 auth_key。回退后若 auth_key 也为空,
-		// 管理接口将全部 401(RequireAdmin 不再空凭证放行),这里必须挡住。
-		authKey, _, _ := s.SettingsGet("auth_key")
-		if authKey == "" {
+		// 清除独立管理凭证。STAGE5(定案 A4)把前置判断换掉了:
+		//
+		//   旧判断:"auth_key 为空则拒绝" —— auth_key 已退役,这条会让用户**永远清不掉**
+		//           admin_key,是个说不通的拒绝;
+		//   新判断:"系统里必须还有一个**可用的 owner 账号**"。管理入口以账号为主,
+		//           admin_key 只是运维后门;真正会锁死的是"没有能登录的 owner"。
+		ownerOK, err := s.HasUsableOwner()
+		if err != nil {
+			log.Printf("[settings] admin-key clear: check usable owner: %v", err)
+			middleware.SendJSONError(w, http.StatusInternalServerError,
+				"check owner failed", "server_error", "db_read_failed")
+			return
+		}
+		if !ownerOK {
 			middleware.SendJSONError(w, http.StatusBadRequest,
-				"admin_key cannot be cleared while auth_key is empty (would lock out admin access)",
-				"invalid_request_error", "missing_field")
+				"admin_key cannot be cleared while no usable owner account exists (would lock out admin access)",
+				"invalid_request_error", "no_usable_owner")
 			return
 		}
 		if err := s.SettingsDelete("admin_key"); err != nil {
@@ -376,10 +386,10 @@ func SettingsAdminKeyHandler(w http.ResponseWriter, r *http.Request) {
 			middleware.SendJSONError(w, http.StatusInternalServerError, "clear admin_key failed", "server_error", "db_write_failed")
 			return
 		}
-		setting.SetAdminKeys([]string{authKey}, "auth_key")
-		log.Printf("[settings] admin_key cleared; admin auth falls back to auth_key")
+		setting.SetAdminKeys(nil, "none")
+		log.Printf("[settings] admin_key cleared; 管理鉴权现在完全依赖 owner 账号的 JWT")
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
-		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "admin_key_set": false, "admin_key_source": "auth_key"})
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "admin_key_set": false, "admin_key_source": "none"})
 		return
 	}
 

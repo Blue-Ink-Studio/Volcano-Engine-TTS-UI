@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 )
 
@@ -14,13 +15,105 @@ import (
 // 负余额由"欠费停服"处理。见 docs/STAGE4_PORTAL_BILLING_PLAN.md 决策 X24。
 var ErrInsufficientBalance = errors.New("store: insufficient balance")
 
+// 角色常量(STAGE5):role 是权限的**唯一真源**。
+const (
+	RoleOwner = "owner" // 超管:唯一且可转让
+	RoleAdmin = "admin" // 管理员:可管用户/充值,但动不了 owner
+	RoleUser  = "user"  // 普通用户
+)
+
+// RoleIsAdmin 把 role 映射为对外派生的 is_admin(STAGE5 §6.1)。
+// 前端读写路径都基于它,从而"删列不删语义"。
+func RoleIsAdmin(role string) bool { return role == RoleOwner || role == RoleAdmin }
+
+// ValidRole 校验 role 取值。
+func ValidRole(role string) bool {
+	switch role {
+	case RoleOwner, RoleAdmin, RoleUser:
+		return true
+	}
+	return false
+}
+
+// 用户分组白名单(STAGE5 §3.3:本期只做数据层约束,路由匹配后续做)。
+//
+// 硬编码枚举 —— 本期没有 group 表;将来做分组表时再迁。
+var allowedUserGroups = []string{"default", "vip", "svip"}
+
+// ValidUserGroup 校验 `user_group` 的集合(语义等同 ValidGroupSet,保留此名以贴合调用点)。
+func ValidUserGroup(csv string) bool { return ValidGroupSet(csv) }
+
+// ValidGroupSet 校验**组集合 CSV**:非空、每一项都在白名单内。
+//
+// `user_group`(用户可用的组)与 `channel_group`(渠道服务的组)取值域相同,
+// 因此共用一个校验器 —— 将来做分组表时只需改这里一处。
+func ValidGroupSet(csv string) bool {
+	set, ok := parseCSVSet(csv)
+	if !ok || len(set) == 0 {
+		return false
+	}
+	for g := range set {
+		found := false
+		for _, a := range allowedUserGroups {
+			if g == a {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return false
+		}
+	}
+	return true
+}
+
+// NormalizeUserGroup 归一化组集合 CSV(语义等同 NormalizeGroupSet,保留此名以贴合调用点)。
+func NormalizeUserGroup(csv string) string { return NormalizeGroupSet(csv) }
+
+// NormalizeGroupSet 归一化**组集合 CSV**:trim + 去重 + 排序,再拼回 CSV。
+//
+// 为什么必须归一化:同一语义的多种写法("default, vip" / "vip,default" / "default,default")
+// 会让将来的匹配逻辑与排查都变难;而且 `',vip,'` 这种带分隔符的成员判断要求
+// 前后无空格(见契约 §6.3)。
+//
+// user_group 与 channel_group 共用(取值域相同)。
+func NormalizeGroupSet(csv string) string { return normalizeCSVSet(csv) }
+
+// parseCSVSet 把 CSV 拆成集合;返回 (集合, 是否解析成功)。
+// 空串 → 空集合(由调用方判断是否允许)。
+func parseCSVSet(csv string) (map[string]struct{}, bool) {
+	set := make(map[string]struct{})
+	for _, raw := range strings.Split(csv, ",") {
+		g := strings.TrimSpace(raw)
+		if g == "" {
+			continue
+		}
+		set[g] = struct{}{}
+	}
+	return set, true
+}
+
+// normalizeCSVSet = trim + 去重 + **字典序排序**,再拼回 CSV。
+func normalizeCSVSet(csv string) string {
+	set, _ := parseCSVSet(csv)
+	if len(set) == 0 {
+		return ""
+	}
+	out := make([]string, 0, len(set))
+	for g := range set {
+		out = append(out, g)
+	}
+	sort.Strings(out)
+	return strings.Join(out, ",")
+}
+
 // User 是 users 表的一行。
 //
-// STAGE4 新增字段:
-//   - PasswordHash:bcrypt 串(空串 = 未设密,配合 D29 永不签发凭证)
-//   - IsAdmin:是否管理员(seed 的 default 用户迁移时置 1)
-//   - Balance:钱包余额 —— 调用扣费的**主源**(决策 C),可为负(欠费)
-//   - TokenVersion:改密踢旧用(D9);JWT claims 带 ver,不一致即 401
+// STAGE4 引入钱包与登录态;STAGE5 引入 role/user_group 并**冻结 is_admin**:
+//   - Role:权限唯一真源(owner/admin/user)
+//   - UserGroup:组集合 CSV(如 "default,vip"),默认 "default"
+//   - IsAdmin:**派生字段**,由 Role 计算而来,**不再来自 is_admin 列**
+//     (该列已冻结、新建恒 0,唯一的用途是升级时的历史输入)
 type User struct {
 	ID        int64  `json:"id"`
 	Name      string `json:"name"`
@@ -29,7 +122,9 @@ type User struct {
 	UsedQuota int64  `json:"used_quota"` // 聚合对账镜像(结算时累加 actual)
 	// PasswordHash 永远不参与 JSON 序列化(json:"-"),防止任何直接序列化泄露。
 	PasswordHash string `json:"-"`
-	IsAdmin      bool   `json:"is_admin"`
+	Role         string `json:"role"`
+	UserGroup    string `json:"user_group"`
+	IsAdmin      bool   `json:"is_admin"` // 派生:RoleIsAdmin(Role)
 	Balance      int64  `json:"balance"`
 	TokenVersion int64  `json:"token_version"`
 	CreatedAt    string `json:"created_at"`
@@ -38,14 +133,22 @@ type User struct {
 
 // userColumns 是 users 表的统一 SELECT 列顺序;
 // UserGet/UserGetByName/UserList/UserSearch 共用,避免四处 scan 顺序漂移。
-const userColumns = `id, name, status, quota, used_quota, password_hash, is_admin, balance, token_version, created_at, updated_at`
+//
+// ⚠️ STAGE5 起**不再 SELECT `is_admin`**(冻结列,运行期一律不读,见契约 §6.1);
+// `IsAdmin` 由 Role 派生。迁移路径仍可读该列(它是历史输入),见 db.go 的回填。
+const userColumns = `id, name, status, quota, used_quota, password_hash, role, user_group, balance, token_version, created_at, updated_at`
 
 // scanUser 按 userColumns 的顺序把一行扫成 User。
 func scanUser(r scanner) (User, error) {
 	var u User
 	err := r.Scan(&u.ID, &u.Name, &u.Status, &u.Quota, &u.UsedQuota,
-		&u.PasswordHash, &u.IsAdmin, &u.Balance, &u.TokenVersion, &u.CreatedAt, &u.UpdatedAt)
-	return u, err
+		&u.PasswordHash, &u.Role, &u.UserGroup, &u.Balance, &u.TokenVersion,
+		&u.CreatedAt, &u.UpdatedAt)
+	if err != nil {
+		return u, err
+	}
+	u.IsAdmin = RoleIsAdmin(u.Role)
+	return u, nil
 }
 
 // execer 抽象 *sql.DB 与 *sql.Tx 的 Exec,便于插入语句在两种上下文复用。
@@ -65,10 +168,28 @@ func insertUser(e execer, u User) (int64, error) {
 	if u.Status != 1 && u.Status != 2 {
 		return 0, fmt.Errorf("%w: status must be 1 or 2", ErrInvalid)
 	}
+
+	// STAGE5:role / user_group 的默认值与校验。
+	// is_admin **恒写 0** —— 它是冻结列,不再反映真实角色(契约 §6.1);
+	// role 才是唯一真源。owner 的唯一性由 partial unique index 兜底(第二个会 ErrDuplicate)。
+	if u.Role == "" {
+		u.Role = RoleUser
+	}
+	if !ValidRole(u.Role) {
+		return 0, fmt.Errorf("%w: role must be owner/admin/user", ErrInvalid)
+	}
+	if u.UserGroup == "" {
+		u.UserGroup = "default"
+	}
+	u.UserGroup = NormalizeUserGroup(u.UserGroup)
+	if !ValidUserGroup(u.UserGroup) {
+		return 0, fmt.Errorf("%w: user_group must be a non-empty subset of default/vip/svip", ErrInvalid)
+	}
+
 	res, err := e.Exec(`
-		INSERT INTO users (name, status, quota, used_quota, password_hash, is_admin, balance, token_version, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, 0, datetime('now'), datetime('now'))`,
-		u.Name, u.Status, u.Quota, u.UsedQuota, u.PasswordHash, u.IsAdmin, u.Balance)
+		INSERT INTO users (name, status, quota, used_quota, password_hash, role, user_group, is_admin, balance, token_version, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, 0, datetime('now'), datetime('now'))`,
+		u.Name, u.Status, u.Quota, u.UsedQuota, u.PasswordHash, u.Role, u.UserGroup, u.Balance)
 	if err != nil {
 		if isUniqueViolation(err) {
 			return 0, ErrDuplicate
@@ -221,7 +342,7 @@ func (s *Store) UserSearch(search string, limit, offset int) ([]UserListItem, in
 	}
 
 	q := `SELECT u.id, u.name, u.status, u.quota, u.used_quota,
-	             u.password_hash, u.is_admin, u.balance, u.token_version,
+	             u.password_hash, u.role, u.user_group, u.balance, u.token_version,
 	             u.created_at, u.updated_at,
 	             (SELECT COUNT(*) FROM tokens t WHERE t.user_id = u.id AND t.status = 1)
 	      FROM users u` + where + ` ORDER BY u.id ASC LIMIT ? OFFSET ?`
@@ -236,10 +357,11 @@ func (s *Store) UserSearch(search string, limit, offset int) ([]UserListItem, in
 	for rows.Next() {
 		var it UserListItem
 		if err := rows.Scan(&it.ID, &it.Name, &it.Status, &it.Quota, &it.UsedQuota,
-			&it.PasswordHash, &it.IsAdmin, &it.Balance, &it.TokenVersion,
+			&it.PasswordHash, &it.Role, &it.UserGroup, &it.Balance, &it.TokenVersion,
 			&it.CreatedAt, &it.UpdatedAt, &it.TokenCount); err != nil {
 			return nil, 0, fmt.Errorf("store: user search scan: %w", err)
 		}
+		it.IsAdmin = RoleIsAdmin(it.Role) // 派生,不读 is_admin 列
 		out = append(out, it)
 	}
 	if err := rows.Err(); err != nil {
@@ -249,12 +371,18 @@ func (s *Store) UserSearch(search string, limit, offset int) ([]UserListItem, in
 }
 
 // UserUpdatePatch 是 user 部分更新的入参(指针语义:nil=不改)。
+//
+// STAGE5:`IsAdmin *bool` 已由 `Role`/`UserGroup` 取代 —— role 是唯一真源。
+// API 层的 `is_admin` 兼容别名在 **controller** 里映射为 role(契约 §6.2),
+// store 层不再感知 `is_admin`(那是冻结列)。
+//
 // Status 只接受 1(enabled)/2(disabled):3(deleted)必须走 UserSoftDelete,
 // 避免"用 PATCH 绕过删除语义"。
 type UserUpdatePatch struct {
-	Name    *string
-	Status  *int
-	IsAdmin *bool // STAGE4:管理员标记升降级(受"最后一个 admin 保护"约束,见 D26)
+	Name      *string
+	Status    *int
+	Role      *string
+	UserGroup *string
 }
 
 // UserUpdate 按字段部分更新;未命中 → ErrNotFound;
@@ -273,8 +401,8 @@ func (s *Store) UserUpdate(id int64, p UserUpdatePatch) error {
 		return ErrNotFound
 	}
 
-	sets := make([]string, 0, 4)
-	args := make([]any, 0, 5)
+	sets := make([]string, 0, 5)
+	args := make([]any, 0, 6)
 	if p.Name != nil {
 		name := strings.TrimSpace(*p.Name)
 		if name == "" {
@@ -287,9 +415,22 @@ func (s *Store) UserUpdate(id int64, p UserUpdatePatch) error {
 		sets = append(sets, "status=?")
 		args = append(args, *p.Status)
 	}
-	if p.IsAdmin != nil {
-		sets = append(sets, "is_admin=?")
-		args = append(args, *p.IsAdmin)
+	if p.Role != nil {
+		if !ValidRole(*p.Role) {
+			return fmt.Errorf("%w: role must be owner/admin/user", ErrInvalid)
+		}
+		// owner 的"上位"必须走 TransferOwner(原子,契约 §6.5);
+		// 通用 PATCH 只负责把 role 写成 admin/user,以及由 controller 拦住的 last_owner 场景。
+		sets = append(sets, "role=?")
+		args = append(args, *p.Role)
+	}
+	if p.UserGroup != nil {
+		norm := NormalizeUserGroup(*p.UserGroup)
+		if !ValidUserGroup(norm) {
+			return fmt.Errorf("%w: user_group must be a non-empty subset of default/vip/svip", ErrInvalid)
+		}
+		sets = append(sets, "user_group=?")
+		args = append(args, norm)
 	}
 	if len(sets) == 0 {
 		return nil // 空 patch:合法 noop(上面已确认存在且未软删)
@@ -425,15 +566,110 @@ func (s *Store) UserSetPassword(userID int64, hash string) (int64, error) {
 	return u.TokenVersion, nil
 }
 
-// UserCountActiveAdmins 统计仍可用的管理员数(is_admin=1 且 status=1)。
-// 供"最后一个 admin 保护"判定(决策 D26):不允许把唯一管理员降级 / 禁用 / 删除。
-func (s *Store) UserCountActiveAdmins() (int, error) {
+// HasUsableOwner 报告是否存在**可用的 owner**:`role='owner'` 且 `status=1` 且**已设密码**。
+//
+// 用途(STAGE5 定案 A4):清空 `admin_key` 前的唯一硬前提检查。
+// 管理入口现在以账号为主、admin_key 只是运维后门,所以真正会"锁死"的是
+// "没有能登录的 owner",而不是旧判断里的"auth_key 为空"(auth_key 已退役)。
+//
+// 之所以还要查 `password_hash <> ''`:一个没设密的 owner 登录不了(D29),
+// 等于没有 owner。
+func (s *Store) HasUsableOwner() (bool, error) {
 	var n int
-	err := s.db.QueryRow(`SELECT COUNT(*) FROM users WHERE is_admin = 1 AND status = 1`).Scan(&n)
+	err := s.db.QueryRow(`
+		SELECT COUNT(*) FROM users
+		WHERE role = ? AND status = 1 AND password_hash <> ''`, RoleOwner).Scan(&n)
 	if err != nil {
-		return 0, fmt.Errorf("store: count active admins: %w", err)
+		return false, fmt.Errorf("store: has usable owner: %w", err)
+	}
+	return n > 0, nil
+}
+
+// CountActiveOwners 统计**可用 owner** 数(role='owner' 且未软删)。
+//
+// STAGE5 取代了 STAGE4 的 UserCountActiveAdmins:
+//   - 唯一需要保护的是 owner(唯一且不可降级/删除/禁用)。"最后一个 admin"不再需要保护 ——
+//     admin 被全部降级并无害,owner 随时能再提人(契约 §5/C2)。
+func (s *Store) CountActiveOwners() (int, error) {
+	var n int
+	err := s.db.QueryRow(`SELECT COUNT(*) FROM users WHERE role = ? AND status <> ?`,
+		RoleOwner, UserDeleteStatus).Scan(&n)
+	if err != nil {
+		return 0, fmt.Errorf("store: count active owners: %w", err)
 	}
 	return n, nil
+}
+
+// CurrentOwnerID 返回当前 owner 的 user_id;没有 owner 时返回 0。
+// 供 TransferOwner 定位"旧 owner"(契约 §6.5)。
+func (s *Store) CurrentOwnerID() (int64, error) {
+	var id int64
+	err := s.db.QueryRow(`SELECT id FROM users WHERE role = ? AND status <> ? LIMIT 1`,
+		RoleOwner, UserDeleteStatus).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, fmt.Errorf("store: current owner id: %w", err)
+	}
+	return id, nil
+}
+
+// TransferOwner 原子转让 owner:旧 owner → admin,新 owner → owner。
+//
+// 为什么必须单条语句:partial unique index(`WHERE role='owner' AND status<>3`)是
+// **每条语句后即时校验**的。若拆成两条且先升新,中间态会出现两个 owner ⇒ UNIQUE 失败。
+// 单条 `UPDATE ... CASE ... WHERE id IN (old,new)` 没有中间态。
+//
+// 校验(契约 §6.5 / 定案 A3):
+//   - oldID == newID → ErrInvalid(调用方应短路为幂等 no-op,返回 200)
+//   - 目标不存在 → ErrNotFound
+//   - 目标非启用(status != 1,含软删/禁用)→ ErrInvalid
+//     (把 owner 转给一个登不进的账号 = 角色上仍然没有可用 owner,等于自锁)
+func (s *Store) TransferOwner(oldID, newID int64) error {
+	if oldID == newID {
+		return fmt.Errorf("%w: cannot transfer owner to self", ErrInvalid)
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return fmt.Errorf("store: transfer owner begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	var status int
+	err = tx.QueryRow(`SELECT status FROM users WHERE id = ?`, newID).Scan(&status)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrNotFound
+	}
+	if err != nil {
+		return fmt.Errorf("store: transfer owner read target: %w", err)
+	}
+	if status != 1 {
+		return fmt.Errorf("%w: target user must be enabled (status=1)", ErrInvalid)
+	}
+
+	// 单条 CASE UPDATE:无中间态。
+	if _, err := tx.Exec(`
+		UPDATE users SET role = CASE WHEN id = ? THEN ? WHEN id = ? THEN ? END,
+		                  updated_at = datetime('now')
+		WHERE id IN (?, ?)`,
+		oldID, RoleAdmin, newID, RoleOwner, oldID, newID); err != nil {
+		return fmt.Errorf("store: transfer owner update: %w", err)
+	}
+
+	// 回读断言:newID 必须真的成为 owner(否则说明按 id 没命中,属数据异常)。
+	var role string
+	if err := tx.QueryRow(`SELECT role FROM users WHERE id = ?`, newID).Scan(&role); err != nil {
+		return fmt.Errorf("store: transfer owner readback: %w", err)
+	}
+	if role != RoleOwner {
+		return fmt.Errorf("store: transfer owner failed: user %d role=%q", newID, role)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("store: transfer owner commit: %w", err)
+	}
+	return nil
 }
 
 // UserListAll 返回全部用户(不分页),供 admin 侧需要全量遍历的场景(如批量充值脚本)。

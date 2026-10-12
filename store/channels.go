@@ -15,18 +15,25 @@ import (
 //
 // JSON tag 跟前台/admin.html 直接读 Go 字段对齐(参见 store/voices.go 顶部说明)。
 type Channel struct {
-	ID       int64             `json:"id"`
-	Name     string            `json:"name"`
-	Provider string            `json:"provider"`
+	ID       int64  `json:"id"`
+	Name     string `json:"name"`
+	Provider string `json:"provider"`
 	// CredentialsJSON 是序列化后的 provider.Credentials:
 	//   {"api_key": "...", "scope": {"resource_id": "...", ...}}
 	// 我们落 JSON 列而非拆字段,因为不同 provider 需要的 scope 维度差异很大
 	// (火山要 resource_id,Azure 要 region,自建要 base_url ...),
 	// 拆字段会被某一家绑死。读时反序列化为 provider.Credentials。
 	CredentialsJSON string `json:"credentials_json"`
-	Voices         string `json:"voices"` // 逗号分隔的对外 voice 名;空 = 不限
-	Priority       int    `json:"priority"`
-	Weight         int    `json:"weight"`
+	Voices          string `json:"voices"` // 逗号分隔的对外 voice 名;空 = 不限
+	// ChannelGroup 是该渠道可服务的用户组集合(STAGE5 埋点)。
+	//
+	// 语义(契约 §6.3):CSV 组集合,如 "default,vip";一个渠道可属多组。
+	// **本期只落数据、不参与路由**(§3.3):路由匹配与 403「该用户组无可用渠道」留到后续。
+	// 匹配时必须用带分隔符的判断(`','||channel_group||',' LIKE '%,vip,%'`),
+	// **严禁 `LIKE '%vip%'`** —— 那会把 svip 误判成 vip。
+	ChannelGroup string `json:"channel_group"`
+	Priority     int    `json:"priority"`
+	Weight       int    `json:"weight"`
 	// Status: 1 = enabled, 2 = disabled(对齐 voices.enabled 的 0/1 风格,
 	// 但本阶段管理接口未上线,只用 int 留扩展位,后续可加 "维护中" 之类状态)。
 	Status    int    `json:"status"`
@@ -38,7 +45,7 @@ type Channel struct {
 // ChannelList 列出所有渠道(按 priority DESC, id ASC),includeDisabled=false 时只返回 enabled。
 // 排序规则固定,便于 router 启动期一次性加载后做 priority 分桶。
 func (s *Store) ChannelList(includeDisabled bool) ([]Channel, error) {
-	q := `SELECT id, name, provider, credentials_json, voices, priority, weight, status, auto_ban, created_at, updated_at
+	q := `SELECT id, name, provider, credentials_json, voices, channel_group, priority, weight, status, auto_ban, created_at, updated_at
 	      FROM channels`
 	if !includeDisabled {
 		q += ` WHERE status = 1`
@@ -67,7 +74,7 @@ func (s *Store) ChannelList(includeDisabled bool) ([]Channel, error) {
 
 // ChannelGet 按 id 查;未命中返回 ErrNotFound。
 func (s *Store) ChannelGet(id int64) (*Channel, error) {
-	row := s.db.QueryRow(`SELECT id, name, provider, credentials_json, voices, priority, weight, status, auto_ban, created_at, updated_at
+	row := s.db.QueryRow(`SELECT id, name, provider, credentials_json, voices, channel_group, priority, weight, status, auto_ban, created_at, updated_at
 	                     FROM channels WHERE id = ?`, id)
 	c, err := scanChannel(row)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -106,11 +113,21 @@ func (s *Store) ChannelInsert(c Channel) (int64, error) {
 	if c.Status != 1 && c.Status != 2 {
 		c.Status = 1 // 默认启用
 	}
+	// STAGE5:渠道组集合。空 → 默认 default(与 DDL 的 NOT NULL DEFAULT 'default' 一致);
+	// 归一化(trim+去重+排序)后必须是白名单子集。
+	if strings.TrimSpace(c.ChannelGroup) == "" {
+		c.ChannelGroup = "default"
+	}
+	c.ChannelGroup = normalizeCSVSet(c.ChannelGroup)
+	if !ValidGroupSet(c.ChannelGroup) {
+		return 0, fmt.Errorf("%w: channel_group must be a non-empty subset of default/vip/svip", ErrInvalid)
+	}
 
 	res, err := s.db.Exec(`
-		INSERT INTO channels (name, provider, credentials_json, voices, priority, weight, status, auto_ban, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))`,
-		c.Name, c.Provider, c.CredentialsJSON, c.Voices, c.Priority, c.Weight, c.Status, boolToInt(c.AutoBan))
+		INSERT INTO channels (name, provider, credentials_json, voices, channel_group, priority, weight, status, auto_ban, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))`,
+		c.Name, c.Provider, c.CredentialsJSON, c.Voices, c.ChannelGroup,
+		c.Priority, c.Weight, c.Status, boolToInt(c.AutoBan))
 	if err != nil {
 		if isUniqueViolation(err) {
 			return 0, ErrChannelDuplicate
@@ -155,6 +172,7 @@ type ChannelUpdate struct {
 	Name            *string
 	CredentialsJSON *string
 	Voices          *string
+	ChannelGroup    *string // STAGE5:组集合 CSV(归一化 + 白名单校验)
 	Priority        *int
 	Weight          *int
 	Status          *int
@@ -183,11 +201,18 @@ func (s *Store) ChannelUpdate(id int64, p ChannelUpdate) error {
 		v := normalizeVoicesCSV(*p.Voices)
 		p.Voices = &v
 	}
+	if p.ChannelGroup != nil {
+		v := normalizeCSVSet(*p.ChannelGroup)
+		if !ValidGroupSet(v) {
+			return fmt.Errorf("%w: channel_group must be a non-empty subset of default/vip/svip", ErrInvalid)
+		}
+		p.ChannelGroup = &v
+	}
 
 	// 2) 动态构造 UPDATE —— 避免拼 SQL 字符串,改用 slice 占位符
 	//    (空 patch 时这里跳过 SQL,直接 200 noop)
-	sets := make([]string, 0, 7)
-	args := make([]any, 0, 8)
+	sets := make([]string, 0, 8)
+	args := make([]any, 0, 9)
 	if p.Name != nil {
 		sets = append(sets, "name=?")
 		args = append(args, strings.TrimSpace(*p.Name))
@@ -199,6 +224,10 @@ func (s *Store) ChannelUpdate(id int64, p ChannelUpdate) error {
 	if p.Voices != nil {
 		sets = append(sets, "voices=?")
 		args = append(args, *p.Voices)
+	}
+	if p.ChannelGroup != nil {
+		sets = append(sets, "channel_group=?")
+		args = append(args, *p.ChannelGroup)
 	}
 	if p.Priority != nil {
 		sets = append(sets, "priority=?")
@@ -278,7 +307,7 @@ func scanChannel(r scanner) (Channel, error) {
 	var c Channel
 	var autoBan int
 	err := r.Scan(&c.ID, &c.Name, &c.Provider, &c.CredentialsJSON, &c.Voices,
-		&c.Priority, &c.Weight, &c.Status, &autoBan, &c.CreatedAt, &c.UpdatedAt)
+		&c.ChannelGroup, &c.Priority, &c.Weight, &c.Status, &autoBan, &c.CreatedAt, &c.UpdatedAt)
 	if err != nil {
 		return c, err
 	}

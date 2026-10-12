@@ -252,21 +252,19 @@ func InitServerConfig() {
 	}
 }
 
+// InitAuthConfig 【STAGE5 已退役】。
+//
+// 原职责:把环境变量 `OPENAI_TTS_API_KEY`(逗号分隔)灌进业务鉴权 key 列表。
+//
+// STAGE5 契约 §8 退役了 `OPENAI_TTS_API_KEY`,且**不做过渡兼容**(当前无生产环境),
+// 因此这里不再读环境变量,业务鉴权 key 列表恒为空 ——
+// 业务鉴权完全由 `tokens` 表(用户自建令牌)承担,见 middleware/auth.go 的
+// AuthenticateWithStore 分支与 store.TokenGetByKey。
+//
+// 保留函数本身是为了不破坏 InitAllConfigs 的调用顺序(初始化序列的可读性
+// 比省一行调用更重要)。
 func InitAuthConfig() {
-	raw := os.Getenv("OPENAI_TTS_API_KEY")
-	if raw == "" {
-		SetAuthAPIKeys(nil)
-		return
-	}
-	parts := strings.Split(raw, ",")
-	keys := make([]string, 0, len(parts))
-	for _, p := range parts {
-		k := strings.TrimSpace(p)
-		if k != "" {
-			keys = append(keys, k)
-		}
-	}
-	SetAuthAPIKeys(keys)
+	SetAuthAPIKeys(nil)
 }
 
 func InitCORSConfig() {
@@ -444,26 +442,25 @@ func LoadRuntimeConfig(s Store) error {
 		Additions:      adds,
 	})
 
-	// 鉴权 key:DB > env(向后兼容)
-	authKey := all["auth_key"]
-	if authKey == "" {
-		authKey = os.Getenv("OPENAI_TTS_API_KEY")
-	}
-	if authKey != "" {
-		SetAuthAPIKeys([]string{authKey})
-	} else {
-		SetAuthAPIKeys(nil)
-	}
+	// 鉴权 key:【STAGE5 已退役】。
+	//
+	// 旧逻辑是 "auth_key(DB) > OPENAI_TTS_API_KEY(env)",作为"业务调用凭证"。
+	// STAGE5(契约 §8)把两者一并退役:业务凭证只来自 `tokens` 表(用户自建令牌),
+	// 一个"全局 key"既能调业务又没有身份,和多用户体系根本不相容。
+	//
+	// 因此这里恒置空。注意这不影响 /v1/audio/speech:
+	// 正常模式下走的是 middleware.AuthenticateWithStore(查 tokens 表),
+	// GetAuthAPIKeys() 只在安装模式的兜底分支里被使用。
+	SetAuthAPIKeys(nil)
 
-	// 管理凭证:admin_key(DB) > auth_key(DB) > OPENAI_TTS_API_KEY(env)
-	// 分离的目的:业务调用方拿到的 key 不应同时拥有管理后台权限。
-	// 不配 admin_key 时行为与旧版完全一致(回退用 auth_key),保证向后兼容。
-	switch {
-	case all["admin_key"] != "":
+	// 管理凭证:【STAGE5 起只有 admin_key(DB) 一个来源】。
+	//
+	// 旧优先级是 admin_key(DB) > auth_key(DB) > OPENAI_TTS_API_KEY(env),
+	// 后两者已退役。admin_key 现在定位为**可选的运维后门**(契约 D3d):
+	// 管理入口以 owner 账号 + JWT 为主,admin_key 用于"owner 忘密码"时自救。
+	if all["admin_key"] != "" {
 		SetAdminKeys([]string{all["admin_key"]}, "admin_key")
-	case authKey != "":
-		SetAdminKeys([]string{authKey}, "auth_key")
-	default:
+	} else {
 		SetAdminKeys(nil, "")
 	}
 
@@ -544,17 +541,15 @@ func getEnvBool(name string, def bool) bool {
 	return b
 }
 
-// InitSetupToken 加载或生成安装模式下的初始化凭证。
-//   - TTS_ADMIN_KEY 存在:用其值,SetupTokenSource="env"
-//   - TTS_ADMIN_KEY 空:随机生成 16 字节 = 32 字符 hex,SetupTokenSource="ephemeral",打印到日志
+// InitSetupToken 生成安装模式下的**一次性**初始化凭证。
+//
+// STAGE5(契约 D2/D3):**只随机生成,不再读 `TTS_ADMIN_KEY` 环境变量**。
+//
+// 为什么去掉 env 分支:env 渠道意味着"一个环境变量就能决定谁能完成安装"——
+// 在多用户体系落地后,安装凭证应当是**进程自己产生、只出现在启动日志里**的一次性秘密,
+// 而不是可以被部署脚本/镜像长期携带的静态值。
 func InitSetupToken() {
-	v := os.Getenv("TTS_ADMIN_KEY")
-	if v != "" {
-		SetupToken = v
-		SetupTokenSource = "env"
-		return
-	}
-	// 临时 token:16 字节随机 = 32 字符 hex,够用且短
+	// 16 字节随机 = 32 字符 hex:够用且短,便于从日志里复制
 	b := make([]byte, 16)
 	if _, err := rand.Read(b); err != nil {
 		// 极端情况:随机源失败,降级为时间戳(不应发生)
@@ -565,7 +560,7 @@ func InitSetupToken() {
 	}
 	SetupToken = hex.EncodeToString(b)
 	SetupTokenSource = "ephemeral"
-	log.Printf("[setup] 一次性安装 token(仅打印一次,公网部署请设置 TTS_ADMIN_KEY): %s", SetupToken)
+	log.Printf("[setup] 一次性安装 token(仅本次启动有效,从本行复制): %s", SetupToken)
 }
 
 // CheckEnvironmentVariables 返回 /health 用的环境变量状态快照。
@@ -611,19 +606,22 @@ func LogStartupSummary() {
 
 	authKeys := GetAuthAPIKeys()
 	if len(authKeys) == 0 {
-		log.Printf("OPENAI_TTS_API_KEY: 未设置(所有请求无需鉴权)")
+		// STAGE5(契约 §8):OPENAI_TTS_API_KEY / auth_key 已退役,这里恒为空是**预期状态**。
+		log.Printf("业务鉴权: 全局 key 已退役(STAGE5),凭证只来自 tokens 表(用户自建令牌)")
 	} else {
-		log.Printf("OPENAI_TTS_API_KEY: 已设置 %d 个有效密钥", len(authKeys))
+		log.Printf("业务鉴权: 检测到 %d 个全局 key(⚠️ 非预期状态,STAGE5 起不应再有)", len(authKeys))
 	}
 
-	// v0.3.0:管理凭证独立于业务凭证(admin_key > auth_key > env)
+	// v0.3.0 的 admin_key > auth_key > env 优先级在 STAGE5 收敛为**只有 admin_key**;
+	// admin_key 现在是可选的运维后门,管理入口以 owner 账号 + JWT 为主。
 	switch GetAdminKeySource() {
 	case "admin_key":
 		log.Printf("管理凭证: 使用独立 admin_key(业务 key 无法访问管理接口)")
 	case "auth_key":
-		log.Printf("管理凭证: 未单独配置 admin_key,回退使用 auth_key(业务 key 同时拥有管理权限)")
+		log.Printf("管理凭证: ⚠️ 来源为已退役的 auth_key —— 请改设 admin_key,或清空它以只依赖 owner 账号")
 	default:
-		log.Printf("管理凭证: ✗ 未配置(normal 模式下服务将拒绝启动)")
+		log.Printf("管理凭证: 未配置 admin_key(正常状态);管理入口依赖 owner 账号登录;" +
+			"建议在 /dashboard 设置 admin_key 作为紧急恢复凭证")
 	}
 
 	allowAll := GetCORSAllowAll()
@@ -672,7 +670,13 @@ func LogStartupSummary() {
 	}
 
 	if err := GetTTSConfigErr(); err != nil {
-		log.Printf("火山 TTS 整体: 初始化失败(%d 个必填项缺失),/v1/audio/speech 路由将全部返回 500", missingCount)
+		// STAGE5:这条"缺全局 TTS 配置"在渠道化之后**不再是服务不可用的原因**。
+		//
+		// 旧文案是"/v1/audio/speech 路由将全部返回 500",那在 STAGE5 已经是错的:
+		// 凭证由渠道自带,请求层只看"有没有 enabled 渠道",没有才返 503 no_channel
+		// (见 controller/tts.go)。留着旧文案会把排障引向错误方向。
+		log.Printf("火山 TTS 全局配置: 未就绪(%d 个必填项缺失)—— STAGE5 起不阻断服务,"+
+			"渠道自带凭证即可;仅当**无任何 enabled 渠道**时 /v1/audio/speech 返 503 no_channel", missingCount)
 	} else {
 		log.Printf("火山 TTS 整体: 初始化成功")
 	}

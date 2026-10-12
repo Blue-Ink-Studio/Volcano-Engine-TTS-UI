@@ -21,10 +21,15 @@ import (
 // 为什么不复用业务线的 Caller:Caller 带 TokenID,而 JWT 身份没有 token 概念。
 // 若图省事把 JWT 身份塞进 Caller、让 TokenID 留 0,会撞上 billing.PreConsume 的
 // `tokenID == 0` 校验,产生"看起来像 bug"的行为。两条线各用各的结构(§6.1)。
+//
+// STAGE5:角色以 **DB 里的 role 为准**(契约 §6.1)——
+// resolveSession 每次请求都回查用户行,所以改角色**立即生效**;
+// JWT claims 里的 is_admin 只作展示,不参与鉴权(勿改成按 claims 判权)。
 type SessionCaller struct {
 	UserID       int64
 	Name         string
-	IsAdmin      bool
+	Role         string // owner / admin / user
+	IsAdmin      bool   // 派生:RoleIsAdmin(Role)
 	TokenVersion int64
 }
 
@@ -106,7 +111,8 @@ func resolveSession(r *http.Request) (*SessionCaller, int, string) {
 	return &SessionCaller{
 		UserID:       u.ID,
 		Name:         u.Name,
-		IsAdmin:      u.IsAdmin,
+		Role:         u.Role,
+		IsAdmin:      u.IsAdmin, // store 层已按 role 派生
 		TokenVersion: u.TokenVersion,
 	}, 0, ""
 }
@@ -215,6 +221,22 @@ func MatchesAdminKey(token string) bool {
 		return false
 	}
 	return inAPIKeyList(token, keys)
+}
+
+// RequireOwnerForRequest 是 **owner 权限的字段级判定入口**(STAGE5 定案 A2)。
+//
+// 为什么不写成中间件:本期唯一需要 owner 权限的操作是"把某人转让为 owner",
+// 而它发生在**多用途端点** `PATCH /api/admin/users/{id}` 里 —— 该端点同时要允许
+// admin 改 `user_group` / 把用户提为 admin。若给整个端点挂 RequireOwner,
+// admin 连改 user_group 都会被 403,直接违反权限矩阵。
+//
+// 因此语义集中在这里、由 handler **按字段条件调用**:
+//
+//	admin_key 通道(通过 RequireAdminOrJWT 后 ctx 里没有 SessionCaller)⇒ 等价 owner,放行;
+//	会话线 ⇒ 必须 role == 'owner'。
+func RequireOwnerForRequest(r *http.Request) bool {
+	sc := SessionCallerFromContext(r.Context())
+	return sc == nil || sc.Role == store.RoleOwner
 }
 
 // IsLocalRequest 判断请求是否来自**本机**(决策 D32,用于首次设密通道)。

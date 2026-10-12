@@ -44,12 +44,14 @@ type channelView struct {
 	Provider        string `json:"provider"`
 	CredentialsJSON string `json:"credentials_json"` // 已脱敏(列表/详情)
 	Voices          string `json:"voices"`
-	Priority        int    `json:"priority"`
-	Weight          int    `json:"weight"`
-	Status          int    `json:"status"`
-	AutoBan         bool   `json:"auto_ban"`
-	CreatedAt       string `json:"created_at"`
-	UpdatedAt       string `json:"updated_at"`
+	// ChannelGroup 是渠道可服务的用户组集合 CSV(STAGE5 埋点,本期不参与路由)。
+	ChannelGroup string `json:"channel_group"`
+	Priority     int    `json:"priority"`
+	Weight       int    `json:"weight"`
+	Status       int    `json:"status"`
+	AutoBan      bool   `json:"auto_ban"`
+	CreatedAt    string `json:"created_at"`
+	UpdatedAt    string `json:"updated_at"`
 }
 
 // channelCreateReq 是 POST /api/admin/channels 的请求体。
@@ -61,21 +63,24 @@ type channelCreateReq struct {
 	Provider    string                `json:"provider"`
 	Credentials *provider.Credentials `json:"credentials"`
 	Voices      string                `json:"voices"`
-	Priority    int                   `json:"priority"`
-	Weight      int                   `json:"weight"`
-	Status      int                   `json:"status"`
+	// ChannelGroup:组集合 CSV,省略 → "default"(STAGE5 §3.3,本期只落数据)
+	ChannelGroup string `json:"channel_group"`
+	Priority     int    `json:"priority"`
+	Weight       int    `json:"weight"`
+	Status       int    `json:"status"`
 }
 
 // channelUpdateReq 是 PATCH /api/admin/channels/{id} 的请求体。
 // 所有字段都是指针:nil=不改,非 nil=改成这个值(决策 #2 指针语义)。
 type channelUpdateReq struct {
-	Name            *string                `json:"name"`
-	Credentials     *provider.Credentials  `json:"credentials"` // 整体替换(缺省=不改)
-	Voices          *string                `json:"voices"`
-	Priority        *int                   `json:"priority"`
-	Weight          *int                   `json:"weight"`
-	Status          *int                   `json:"status"`
-	AutoBan         *bool                  `json:"auto_ban"`
+	Name         *string               `json:"name"`
+	Credentials  *provider.Credentials `json:"credentials"` // 整体替换(缺省=不改)
+	Voices       *string               `json:"voices"`
+	ChannelGroup *string               `json:"channel_group"` // STAGE5:组集合 CSV
+	Priority     *int                  `json:"priority"`
+	Weight       *int                  `json:"weight"`
+	Status       *int                  `json:"status"`
+	AutoBan      *bool                 `json:"auto_ban"`
 }
 
 type channelStatusReq struct {
@@ -209,6 +214,7 @@ func viewFromStore(c store.Channel, mask bool) channelView {
 		Provider:        c.Provider,
 		CredentialsJSON: creds,
 		Voices:          c.Voices,
+		ChannelGroup:    c.ChannelGroup,
 		Priority:        c.Priority,
 		Weight:          c.Weight,
 		Status:          c.Status,
@@ -363,6 +369,7 @@ func ChannelsCreateHandler(w http.ResponseWriter, r *http.Request) {
 		Provider:        req.Provider,
 		CredentialsJSON: credsJSON,
 		Voices:          req.Voices,
+		ChannelGroup:    req.ChannelGroup, // 空 → store 层填 "default"
 		Priority:        req.Priority,
 		Weight:          req.Weight,
 		Status:          req.Status,
@@ -423,6 +430,10 @@ func ChannelsUpdateHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	upd := store.ChannelUpdate{}
+
+	// STAGE5:渠道组集合(指针语义:省略=不改)。归一化 + 白名单在 store 层做,
+	// 这里只把值透传;store 会 wrap ErrInvalid,由统一的 400 分支返回。
+	upd.ChannelGroup = req.ChannelGroup
 
 	// 字段直接传递(指针语义已经由 channelUpdateReq 表达)
 	if req.Name != nil {

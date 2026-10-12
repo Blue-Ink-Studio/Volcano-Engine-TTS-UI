@@ -1251,13 +1251,31 @@ POST /api/admin/users/{id:[0-9]+}/password-reset
 | `token_limit_exceeded` | 402 | token 限额已用尽 | 提示该令牌限额用尽，可到门户调额 |
 | `invalid_code` | 404 | 充值码不存在 | 输入框提示 |
 | `code_used` | 409 | 充值码已使用 | 输入框提示 |
-| `last_admin` | 409 | 唯一管理员保护 | 管理页提示"至少保留一个启用的管理员" |
+| `last_admin` | 409 | 唯一管理员保护（**STAGE5 起由 `last_owner` 取代**，见下） | 管理页提示"至少保留一个启用的管理员" |
 | `not_owner` | 403 | 越权操作他人资源 | 提示 + 刷新列表 |
 | `invalid_filter` | 400 | 筛选参数非法 | 重置筛选 |
 | `no_fields` | 400 | 空更新请求 | 表单校验提示 |
 | `not_found` | 404 | 资源不存在 | 现有 [httpjson.go:27](../controller/httpjson.go#L27) |
 | `db_read_failed` / `db_write_failed` | 500 | DB 故障 | 通用错误提示 |
 | `db_not_ready` | 503 | store 未就绪 | 启动中提示 |
+
+### 17.1 STAGE5 新增（v1.6 合并，权威定义见 [STAGE5_SETUP_ROLES_PLAN.md](STAGE5_SETUP_ROLES_PLAN.md)）
+
+| code | HTTP | 含义 | 前端处置 |
+|---|---|---|---|
+| `no_channel` | 503 | **无可用渠道**（判定 = enabled 渠道数为 0；**预扣之前**返回） | 「请到渠道管理添加」+ 跳渠道页 |
+| `owner_required` | 403 | 需 owner 权限（如转让 owner） | 「仅超级管理员可操作」 |
+| `last_owner` | 409 | 不能降级 / 删除 / 禁用**唯一** owner | 「系统必须保留一个超级管理员」 |
+| `invalid_role` | 400 | `role` 非法值 | 表单校验（owner / admin / user） |
+| `invalid_group` | 400 | `user_group` 非法值或空集 | 表单校验（default / vip / svip，**非空**） |
+| `invalid_target` | 400 | 转让 owner 的目标不可用（不存在 / 已软删 / 非启用） | 提示目标账号不可用 |
+
+> **⚠️ 前端必须按 `code` 分支，不要按 HTTP 状态码分支** —— `no_channel` 与
+> `db_not_ready` **同为 503 但语义完全不同**，按状态码分支会把"无渠道"显示成"服务未就绪"。
+>
+> **`admin_key` 的等价范围（v1.6 收紧措辞）**：STAGE5 起 `admin_key` **只在管理接口**
+> （`/api/admin/*`、`/dashboard*`）上等价 owner（运维后门，不受 role 矩阵与 owner 保护约束）；
+> **`/api/me/*` 仍然不接受 admin_key**（沿用 §6 的 #14 与 §6.1）。
 
 > 全部沿用 `{"error":{"message","type","code"}}`（[auth.go:129](../middleware/auth.go#L129)）。
 >
@@ -1631,3 +1649,4 @@ PASS=41  FAIL=0  SKIP=1
 | **v1.3** | **契约冻结，开放问题归零。** 新增 **X26**（`usage.status=0` 预扣中，定案 A：引入；含单向前进保护与"顺带修掉 3b 重复退款缺陷"）与 **X27**（依赖落定：**实测 `goproxy.cn` 可达**，钉 `jwt v5.3.1` + `x/crypto v0.58.0`，保留 bcrypt，PBKDF2/手写 HS256 仅作离线备案；记录"`go get` 须在沙箱外执行"）。**X25 定案 (a)**。§3 标题/引言、§4 落地命令、§5.5、§11.2、§12 风险表、§16、§18（新增 usage 三态与 pending 展示用例）同步。**新增 §20 明日开工第一步**（含阻塞项勾选表） |
 | **v1.4** | **实施期契约修正（由前后端实现反推，均已落地）。** ① §8 开头的"时间一律 `YYYY-MM-DD HH:MM:SS`"与 X17 矛盾 → 澄清为**3b 既有接口不变、本期新增接口用 RFC3339+Z**；② §8.2 的 `trend` 说明滞后 → 改为 `date(created_at,'+8 hours')` 并注明前端**不做**时区补偿；③ 新增 **`unlimited` 与 `limit_quota` 的关系**定案（`unlimited=true` 时限额被忽略，且**自助接口不得设置 `unlimited`** —— 否则用户可自建免计费令牌）；④ §8.4 静态资源路由修正为实际引用（`/portal/admin.css` + `/dashboard/admin-shell.js`，另注册 `/portal/admin-shell.js` 别名）；⑤ §17 记录对外契约变更：预扣失败的 code 由 `quota_exhausted` → **`insufficient_balance`**，并新增 `balance_negative` / `token_limit_exceeded` / `duplicate_request`；⑥ §7.2 **更正**"`PreConsume` 签名不变"的说法 —— 实际新增 `reqID` 参数（X26 的 pending 行需要预扣期定位键） |
 | **v1.5** | **实施完成。** 新增 **§5.5b `usage.upstream_req_id`**（实施期设计修正：`request_id` 必须作为稳定定位键，上游号另存一列）；§8.3 补充实施澄清（**同一 `insufficient_balance` 在管理端 charge 是 400、在 TTS 预扣是 402**、建号重名沿用 `duplicate_name`、`password-reset` 也有 400 `weak_password`、`guardLastAdmin` 非原子、两条 settings 路径均已注册）；**新增 §21「实施完成与验证证据」**：静态检查、**HTTP 端到端 41 PASS / 0 FAIL / 1 SKIP**、**store 单测 13 条全绿**、实施期修掉的 **3 个真实缺陷**（BUG-1 空密码登录走不到 D29、BUG-2 全新安装 default 不是管理员致 last_admin 保护失效、BUG-3 定位键被改写致状态机退化）、**残余验证缺口**与沙箱环境备注 |
+| **v1.6** | **为 STAGE5 合并对外错误码与措辞收紧（本文件仍是 STAGE4 的权威契约，STAGE5 的权威定义在 [STAGE5_SETUP_ROLES_PLAN.md](STAGE5_SETUP_ROLES_PLAN.md)）。** ① 新增 §17.1：`no_channel`(503) / `owner_required`(403) / `last_owner`(409) / `invalid_role`(400) / `invalid_group`(400) / `invalid_target`(400)，并把 `last_admin` 标注为被 `last_owner` 取代；② 明确**前端必须按 `code` 分支**（`no_channel` 与 `db_not_ready` 同为 503）；③ 收紧措辞：`admin_key` **只在管理接口上**等价 owner，`/api/me/*` 仍不接受 admin_key。 |

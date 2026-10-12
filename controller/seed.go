@@ -1,42 +1,16 @@
-// controller/seed.go — 阶段 3a 启动期 seed 旧 key
+// controller/seed.go — 【STAGE5 已退役,本文件不再含可执行代码】
+//
+// 原职责:启动期把 `OPENAI_TTS_API_KEY` 里的每个 key seed 成
+// 「默认 user `default`」下的一条 unlimited token。
+//
+// 为什么退役(STAGE5 契约 §8):
+//   - `OPENAI_TTS_API_KEY` 退役,业务调用方一律改用**门户自建的用户 token**;
+//   - 当前无生产环境 ⇒ 不做任何过渡兼容(不留"env 存在就 seed 一次"的旁路)。
+//
+// 为什么是**整段删除**而不是留一个"key 列表为空时自然 no-op"的实现:
+// 遗留的 env 会让它凭空造出一个 `default` 用户 + unlimited token,
+// 而 STAGE5 的 owner 保障逻辑(`store.EnsureOwnerExists`)会把"最早的 is_admin 历史用户"
+// 提为 owner —— 于是一个**环境变量**就能决定谁是超管。这是必须避免的隐性权限来源。
+//
+// 业务令牌的创建入口现在是:`POST /api/me/tokens`(controller/me.go)。
 package controller
-
-import (
-	"fmt"
-
-	"github.com/volcano-tts/tts-api/setting"
-	"github.com/volcano-tts/tts-api/store"
-)
-
-// SeedDefaultTokensIfEmpty 在 tokens 表为空时,把 OPENAI_TTS_API_KEY 的
-// 每个 key seed 成"默认 user 'default'"下的一条 unlimited token。
-//
-// 行为(决策 #3 对齐):
-//   - 仅当 tokens 表**全空**(SELECT COUNT(*)=0,不限 status)时才执行;跑过就跳过
-//   - 把 setting.GetAuthAPIKeys() 列表里的 key 逐个 seed
-//   - **单事务由 store.SeedDefaultTokens 原子完成**(default user + 全部 tokens
-//     成功才 commit,任一失败整体回滚)——不再在 controller 层循环 autocommit 插入
-//   - 失败仅 log warn,不阻断启动(决策:实现口径)
-//
-// 返回:
-//   - seeded > 0:本次实际新插入的 token 数
-//   - seeded == 0:未执行 seed(tokens 表非空,或 OPENAI_TTS_API_KEY 为空)
-func SeedDefaultTokensIfEmpty(s *store.Store) (int, error) {
-	// 1) 决策:仅当 tokens 表全空时执行(防止重复 seed)
-	n, err := s.TokenCount()
-	if err != nil {
-		return 0, fmt.Errorf("count tokens: %w", err)
-	}
-	if n > 0 {
-		return 0, nil
-	}
-
-	// 2) 拿 setting 里的 auth key 列表;空就跳过(seed 没东西可做)
-	authKeys := setting.GetAuthAPIKeys()
-	if len(authKeys) == 0 {
-		return 0, nil
-	}
-
-	// 3) 单事务下沉 store:user + tokens 原子提交,失败回滚(修复 P1)
-	return s.SeedDefaultTokens(authKeys, "default")
-}

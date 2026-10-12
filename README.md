@@ -52,14 +52,15 @@ curl -X POST http://localhost:8080/v1/audio/speech \
 
 ## 环境变量
 
-**只需 4 个启动引导变量**(安装前 / DB 还不存在时必需):
+**启动引导变量(STAGE5 起只剩路径/端口,不再有凭证类变量)**:
 
 | 变量 | 必设 | 用途 |
 |---|---|---|
-| `TTS_ADMIN_KEY` | ✓ (生产) | `/api/setup` 安装 token,首次安装时校验 |
 | `TTS_DB_PATH` | ✗ | DB 路径,默认 `./tts.db` |
 | `PORT` | ✗ | 监听端口,默认 `8080` |
-| `OPENAI_TTS_API_KEY` | ✓ (生产) | 业务端鉴权 key;未设 `admin_key` 时**也用于管理后台登录** |
+| `TTS_JWT_SECRET_PATH` | ✗ | JWT 会话密钥**文件路径**,默认跟 DB 同目录 |
+| ~~`TTS_ADMIN_KEY`~~ | — | **STAGE5 已退役**。安装 token 由进程随机生成并打印在启动日志里 |
+| ~~`OPENAI_TTS_API_KEY`~~ | — | **STAGE5 已退役**。业务凭证改为逐用户的 token(门户自建) |
 
 v0.3.0 新增(均可选):
 
@@ -67,11 +68,20 @@ v0.3.0 新增(均可选):
 |---|---|
 | `METRICS_ALLOW_CIDR` | 根路径 `/metrics` 的内网 CIDR 白名单(逗号分隔)。不配则根路径完全不注册 |
 
-> ⚠️ **v0.3.0 起,normal 模式下未配置任何管理凭证(DB `admin_key` / DB `auth_key` /
-> env `OPENAI_TTS_API_KEY` 三者皆空)时服务将拒绝启动** —— 因为管理接口在无凭证时会拒绝
-> 所有请求,启动一个进不去后台的实例没有意义。
+> ✅ **STAGE5 起不再有"缺凭证就拒绝启动"的行为。**
+>
+> 旧版(v0.3.0~STAGE4)在 normal 模式下若 `admin_key` / `auth_key` / `OPENAI_TTS_API_KEY`
+> 全为空会 `Fatal` 退出。STAGE5 把管理入口改成 **owner 账号 + JWT**,凭证不再是启动前提,
+> 因此该 fail-fast **已删除**(它会与"setup 只创建超管、渠道与凭证全部推迟到建站后"冲突,
+> 造成"装完重启即起不来"的死锁)。未配置 `admin_key` 时只打一条 WARN。
+>
+> ⚠️ **建议登录后在 `/dashboard` 设置一个 `admin_key`**:它是 owner 忘记密码时的**唯一后门**
+> (`admin_key` 在管理接口上等价 owner)。同机反代部署时**必须**设置,原因见"公网部署安全清单"。
 
-**所有业务配置**(`api_key` / `default_resource_id` / `default_speaker` / `default_format` / `sample_rate` / `model` / `model_type` / `explicit_language` / `enable_subtitle` / `timeout` / `cors_origins` / `cors_allow_all` / `auth_key` / **`admin_key`** / `trusted_proxy_hops`) — 全部在 `/dashboard` 设置,持久化到 SQLite。
+**所有业务配置**(`api_key` / `default_resource_id` / `default_speaker` / `default_format` / `sample_rate` / `model` / `model_type` / `explicit_language` / `enable_subtitle` / `timeout` / `cors_origins` / `cors_allow_all` / **`admin_key`** / `trusted_proxy_hops`) — 全部在 `/dashboard` 设置,持久化到 SQLite。
+
+> **STAGE5 起 `auth_key` 已退役**(连同它的两条写入路由)。渠道凭证属于**渠道级**配置,
+> 在 `/dashboard` → 渠道管理里逐渠道配置,不再有"全局 api_key"。
 
 env 仍可作为 fallback 读(老用户兼容),但**新用户应通过 WebUI 配**。
 
@@ -80,10 +90,19 @@ env 仍可作为 fallback 读(老用户兼容),但**新用户应通过 WebUI 配
 ### `/setup` 首次安装
 
 四步表单:
-1. **凭证**: 火山 API Key (必填) + OpenAI 鉴权 Key (可选)
-2. **默认路由**: 默认资源 ID (`seed-icl-2.0`) + 默认音色名 + 默认格式 + 采样率
-3. **音色列表**: 每个 voice 一行,填对外名 + 火山 speaker ID
-4. **确认**: 提交写入 DB,自动跳 `/dashboard`
+1. **安装令牌**: 从**启动日志**复制那行 `[setup] 一次性安装 token(仅本次启动有效,从本行复制): <32位hex>`
+2. **创建超管**: 自定义用户名(防撞库)+ 口令(≥8 位)
+3. **确认**: 提交 → 写入 DB(`role=owner`,`balance=0`)→ 自动跳 `/login`
+4. **登录后**: 首页若无渠道会提示「请到渠道管理添加」
+
+> **STAGE5 起 setup 不再要求填写任何渠道凭证或音色。**
+> 本系统是多渠道 hub,建站阶段不应该绑死某一个上游的 `api_key` + 音色 ——
+> 装完后到 `/dashboard` → **渠道管理**逐渠道添加(凭证 + 该渠道支持的音色)即可。
+>
+> **装完请务必做两件事**:① 加一个渠道(否则 `/v1/audio/speech` 会返 `503 no_channel`);
+> ② 到设置页配一个 `admin_key`(owner 忘密码时的唯一后门)。
+>
+> 超管初始余额为 **0**:调用计费走余额,需要先给自己充值(生成充值码或直接改余额)。
 
 ### `/dashboard` 日常管理
 
@@ -91,7 +110,8 @@ env 仍可作为 fallback 读(老用户兼容),但**新用户应通过 WebUI 配
 |---|---|
 | 仪表盘 | 进程状态 / 内存 / 启动时长 / 配置检查 |
 | 音色管理 | CRUD 音色: 名称 / speaker / 资源 ID / 模型 / 语言 / 启用 / 描述 |
-| 设置 | 全局设置: API Key / 默认资源 ID / 默认音色 / 格式 / 采样率 / 子模型 / 鉴权 key |
+| 设置 | 全局设置: API Key / 默认资源 ID / 默认音色 / 格式 / 采样率 / 子模型 / **admin_key**(紧急恢复凭证) |
+| 渠道管理 | 多渠道 CRUD: 凭证 / 支持的音色 / 优先级 / 权重 / 启用 / 渠道分组(`channel_group`) |
 | CORS | 白名单 (逗号分隔) 或 `*` 模式 |
 | 退出 | 清除 session |
 
@@ -104,7 +124,12 @@ env 仍可作为 fallback 读(老用户兼容),但**新用户应通过 WebUI 配
 | 缺少 Authorization | 401 | `invalid_api_key` | Invalid API key provided. |
 | 音色不存在 | 400 | `unknown_voice` | `unknown voice: 'alloy'` |
 | 音色被 admin 禁用 | 403 | `voice_disabled` | `voice 'chun' is disabled` |
-| 服务未就绪 (DB 配置损坏) | 503 | `service_unavailable` | TTS service configuration error... |
+| 无可用渠道(未配置或全部禁用) | 503 | `no_channel` | no available channel; add one on the channel management page |
+| 余额不足 / 已欠费 | 402 | `insufficient_balance` / `balance_negative` | — |
+
+> ⚠️ **必须按 `code` 分支,不要按 HTTP 状态码分支**:`no_channel` 与 `db_not_ready`
+> **同为 503** 但语义完全不同。完整错误码总表见
+> [docs/STAGE4_PORTAL_BILLING_PLAN.md](docs/STAGE4_PORTAL_BILLING_PLAN.md) §17 / §17.1。
 
 ## API 端点
 

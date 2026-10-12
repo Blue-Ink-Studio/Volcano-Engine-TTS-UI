@@ -45,17 +45,22 @@ func SetMetricsTextWriter(fn metricsTextWriter) {
 
 // AdminOverviewResponse 是 GET /api/admin/overview 的响应体。
 type AdminOverviewResponse struct {
-	Mode              string                 `json:"mode"`
-	Installed         bool                   `json:"installed"`
-	DBPath            string                 `json:"db_path"`
-	LockPath          string                 `json:"lock_path"`
-	Version           string                 `json:"version"`
-	Commit            string                 `json:"commit"`
-	UptimeSeconds     int64                  `json:"uptime_seconds"`
-	StartTime         string                 `json:"start_time"`
-	VoiceCount        int                    `json:"voice_count"`
-	VoiceEnabledCount int                    `json:"voice_enabled_count"`
-	Memory            map[string]interface{} `json:"memory"`
+	Mode              string `json:"mode"`
+	Installed         bool   `json:"installed"`
+	DBPath            string `json:"db_path"`
+	LockPath          string `json:"lock_path"`
+	Version           string `json:"version"`
+	Commit            string `json:"commit"`
+	UptimeSeconds     int64  `json:"uptime_seconds"`
+	StartTime         string `json:"start_time"`
+	VoiceCount        int    `json:"voice_count"`
+	VoiceEnabledCount int    `json:"voice_enabled_count"`
+	// STAGE5(§7.3 / N5):渠道计数。前端判"要不要显示无渠道引导"必须用
+	// **channel_enabled_count**,不能用 channel_count —— 渠道全被禁用时总数仍非零,
+	// 而服务实际不可用(调用会 503 no_channel)。
+	ChannelCount        int                    `json:"channel_count"`
+	ChannelEnabledCount int                    `json:"channel_enabled_count"`
+	Memory              map[string]interface{} `json:"memory"`
 }
 
 // AdminOverviewHandler GET /api/admin/overview
@@ -87,6 +92,12 @@ func AdminOverviewHandler(w http.ResponseWriter, r *http.Request) {
 		if n, err := s.VoiceCountEnabled(); err == nil {
 			resp.VoiceEnabledCount = n
 		}
+		// STAGE5:渠道总数取自 DB;enabled 数取自**内存路由表**(与
+		// `/v1/audio/speech` 的 no_channel 判定同源,两处口径必然一致)。
+		if n, err := s.ChannelCount(); err == nil {
+			resp.ChannelCount = n
+		}
+		resp.ChannelEnabledCount = CountEnabledChannels(GetRouter().Snapshot())
 	}
 
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")

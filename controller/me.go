@@ -69,7 +69,9 @@ func MeHandler(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"name":       u.Name,
 		"balance":    u.Balance,
-		"is_admin":   u.IsAdmin,
+		"role":       u.Role,       // STAGE5(P9)
+		"user_group": u.UserGroup,  // STAGE5(P9)
+		"is_admin":   u.IsAdmin,    // 派生自 role
 		"status":     u.Status,
 		"created_at": u.CreatedAt,
 	})

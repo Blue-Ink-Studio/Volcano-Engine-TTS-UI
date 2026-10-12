@@ -125,10 +125,22 @@ func OpenaiTTSHandler(w http.ResponseWriter, r *http.Request) {
 		r = r.WithContext(middleware.WithCaller(r.Context(), caller))
 	}
 
-	if err := setting.GetTTSConfigErr(); err != nil {
-		log.Printf("警告: TTS配置未就绪,拒绝请求 - 错误=%v 路径=%s 客户端=%s",
-			err, r.URL.Path, middleware.GetClientIP(r))
-		middleware.SendJSONError(w, http.StatusServiceUnavailable, "TTS service configuration error. Please check environment variables and restart the service.", "configuration_error", "service_unavailable")
+	// STAGE5(B2 / 契约 §7.1):**无可用渠道 → 503 no_channel**,且必须**在预扣之前**。
+	// 本位置就在 preConsumeQuota 之前,因此不会出现"先扣钱再 503"污染流水的情况。
+	//
+	// 为什么替换掉原来的 `setting.GetTTSConfigErr()` 判定:
+	//   - STAGE5 起 api_key / default_resource_id / default_speaker 这些"全局 TTS 配置"
+	//     不再由 setup 写入(凭证由渠道自带)⇒ 该错误会**永远非 nil**,
+	//     即使加完渠道也一律 503、根本调不通;
+	//   - `CountEnabledChannels(...) == 0` 才是真正的"无可用渠道"判据。
+	//   - **不能用 `GetRouter().Empty()`**:路由是用含 disabled 的**全量**渠道构建的,
+	//     "渠道全部被禁用"时它返回 false(见 adapter/route/router.go 的注释)。
+	if CountEnabledChannels(GetRouter().Snapshot()) == 0 {
+		log.Printf("警告: 无可用渠道(未配置或全部禁用),拒绝请求 - 路径=%s 客户端=%s",
+			r.URL.Path, middleware.GetClientIP(r))
+		middleware.SendJSONError(w, http.StatusServiceUnavailable,
+			"no available channel; add one on the channel management page",
+			"configuration_error", "no_channel")
 		return
 	}
 

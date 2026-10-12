@@ -31,7 +31,18 @@ import (
 //	5 → STAGE4 自助门户 + 完整计费(决策 C:扣费主源 token → user.balance):
 //	    users 补 4 列(password_hash/is_admin/balance/token_version)、
 //	    tokens 补 limit_quota、usage.status 增 0=预扣中态、新增 charge_logs/redemptions 表
-const schemaVersion = 5
+//	6 → STAGE5 Setup 改版 + 用户体系埋点:
+//	    users 补 role/user_group、channels 补 channel_group、is_admin 冻结(role 成唯一真源)、
+//	    owner 唯一性索引;并做一次**版本门控**的 is_admin → role 回填
+const schemaVersion = 6
+
+// stage5SchemaVersion 是引入「is_admin → role 一次性回填」的那个版本号。
+//
+// 门控必须钉在**引入时的那个版本**(6),而不是当前的 schemaVersion ——
+// 否则将来 schemaVersion 升到 7 时,`curVersion(6) < schemaVersion(7)` 会再次成立,
+// 回填被重跑。而重跑是破坏性的:is_admin 已冻结,`role='admin' WHERE is_admin=1`
+// 会把"曾提升、后降级"的账号**重新提权**(权限静默回弹)。
+const stage5SchemaVersion = 6
 
 // Store 是 SQLite 访问层的统一入口;所有 settings/voices 操作都通过它。
 type Store struct {
@@ -127,6 +138,12 @@ func (s *Store) migrate() error {
 		return fmt.Errorf("create schema_version: %w", err)
 	}
 
+	// 读取"升级前"的版本号 —— 供 STAGE5 的一次性回填做门控(见 stage5SchemaVersion 的注释)。
+	//
+	// 必须在**任何** INSERT schema_version 之前读,否则读到的就是升级后的值,
+	// 门控永远不成立、回填被跳过 ⇒ 所有历史 admin 静默降级成 user。
+	curVersion := s.currentSchemaVersion()
+
 	// settings 表(全局配置)
 	if _, err := s.db.Exec(`
 		CREATE TABLE IF NOT EXISTS settings (
@@ -157,11 +174,12 @@ func (s *Store) migrate() error {
 		return fmt.Errorf("create idx_voices_name: %w", err)
 	}
 
-	// 当前版本
-	if _, err := s.db.Exec(`
-		INSERT OR IGNORE INTO schema_version (version) VALUES (?)`, schemaVersion); err != nil {
-		return fmt.Errorf("insert schema_version: %w", err)
-	}
+	// ⚠️ schema_version 的写入**不在这个位置** —— 它被移到 migrate() 末尾(STAGE5 §4.2)。
+	//
+	// 原因:STAGE5 引入了一次「is_admin → role」的破坏性回填。若版本号在回填**之前**
+	// 就记下,一旦回填中途失败或进程被杀,下次启动会因"版本已是 6"而跳过回填
+	// ⇒ 所有历史 admin 静默降级成 user(且没有任何日志提示)。
+	// 因此版本标记必须与回填**在同一事务内**提交,末尾的那次写入只作记账。
 
 	// channels 表(多渠道路由,阶段 1 引入)。
 	//   - name 唯一:管理侧标识,不允许重名
@@ -375,41 +393,220 @@ func (s *Store) migrate() error {
 		return fmt.Errorf("create idx_usage_request_pending: %w", err)
 	}
 
-	// seed 的 default 用户升为管理员(幂等;存量库 is_admin=0 直接升级)。
-	if _, err := s.db.Exec(`UPDATE users SET is_admin = 1 WHERE name = 'default' AND is_admin = 0`); err != nil {
-		return fmt.Errorf("promote default user to admin: %w", err)
+	// ===== 阶段 5(STAGE5):Setup 改版 + 用户体系埋点 =====
+	//
+	// 契约:docs/STAGE5_SETUP_ROLES_PLAN.md。三列全部走 ensureColumn(只增不改删)。
+	// role 是**唯一真源**;is_admin 保留但冻结 —— 运行期一律不再读它(§6.1)。
+	if err := s.ensureColumn("users", "role",
+		`role TEXT NOT NULL DEFAULT 'user'`); err != nil {
+		return err
+	}
+	if err := s.ensureColumn("users", "user_group",
+		`user_group TEXT NOT NULL DEFAULT 'default'`); err != nil {
+		return err
+	}
+	if err := s.ensureColumn("channels", "channel_group",
+		`channel_group TEXT NOT NULL DEFAULT 'default'`); err != nil {
+		return err
+	}
+
+	// 一次性列值回填:**版本门控**,只在本库从 <6 升上来时执行。
+	//
+	// 不做门控的后果见 stage5SchemaVersion 的注释(重启会把被降级的账号重新提权)。
+	if curVersion < stage5SchemaVersion {
+		if err := s.applyStage5Backfill(); err != nil {
+			return err
+		}
+	}
+
+	// owner 唯一性:DB 级兜底(逻辑侧还有三处,见契约 §6.2)。
+	//
+	//   - 谓词带 `status <> 3`(UserDeleteStatus):**软删的 owner 不占位**。
+	//     否则一个被软删的 owner 会把系统永久锁死 —— 索引占位、账号登不进、
+	//     又没有"取消软删"的接口。
+	//   - 必须 `IF NOT EXISTS`:否则"建失败降 WARN"会变成每次启动刷一条 WARN。
+	//   - 必须放在回填**之后**:回填期间可能出现"零个/一个 owner"的中间态。
+	if _, err := s.db.Exec(`
+		CREATE UNIQUE INDEX IF NOT EXISTS idx_users_owner
+		    ON users(role) WHERE role = 'owner' AND status <> 3`); err != nil {
+		log.Printf("[store] WARN: 创建 owner 唯一性索引失败,降级为仅逻辑保证(不阻断启动): %v", err)
+	}
+
+	// 版本记账(与回填的原子标记互为兜底;此处 INSERT OR IGNORE 幂等)。
+	if _, err := s.db.Exec(`
+		INSERT OR IGNORE INTO schema_version (version) VALUES (?)`, schemaVersion); err != nil {
+		return fmt.Errorf("insert schema_version: %w", err)
 	}
 
 	return nil
 }
 
-// EnforceInitialSecurityPolicy 应用一次性的初始安全策略(决策 D24 + D31(c))。
+// currentSchemaVersion 返回库中已记录的最高 schema 版本;全新库(无记录)返回 0。
+// 读取失败也返回 0 —— 那会让门控成立、回填照跑,对空库是正确行为。
+func (s *Store) currentSchemaVersion() int {
+	var v int
+	if err := s.db.QueryRow(`SELECT COALESCE(MAX(version), 0) FROM schema_version`).Scan(&v); err != nil {
+		return 0
+	}
+	return v
+}
+
+// applyStage5Backfill 是 5→6 的**一次性**数据回填,单事务完成三件事:
 //
-// 【为什么必须由启动流程在 seed 之后单独调用】
-// 全新安装时 migrate() 跑在 seed 之前(main.go: Open → 之后才 SeedDefaultTokensIfEmpty),
-// 那一刻 default 用户还不存在,策略无处可依。因此本方法独立于 migrate,由 main 在 seed 后调用。
-//
-// 规则:
-//   - 仅当 settings.allow_register **从未被设置过**时才动作 —— 绝不覆盖管理员的显式设置(D31(c));
-//   - default 用户存在且 password_hash 为空 → 写入 allow_register=0 并打 WARN,
-//     提示尽快经由「本机来源」或「admin_key」通道设密。
-//
-// 幂等:可重复调用。注意 allow_register 未设置时 SettingsGetBool 会回退到 false,
-// 即"默认不允许自由注册";这里写 '0' 是为了把状态显式化并留下 WARN。
-func (s *Store) EnforceInitialSecurityPolicy() error {
-	// ⚠️【必须在 seed 之后跑,否则全新安装时形同虚设】
-	//
-	// migrate() 里的同一条 UPDATE 只对**升级**场景有效:全新安装时 migrate() 跑在
-	// seed 之前,那一刻 default 还不存在(影响 0 行),而 seed 的
-	// `INSERT OR IGNORE INTO users (name, status, quota, used_quota, ...)` 不带 is_admin,
-	// 于是新装的 default 永远是 is_admin=0 —— 管理角色缺失,连"最后一个 admin 保护"
-	// 都会因为"可用管理员数=0"而失效。
-	//
-	// 这条 UPDATE 幂等,且对升级场景是重复执行(无副作用)。
-	if _, err := s.db.Exec(`UPDATE users SET is_admin = 1 WHERE name = 'default' AND is_admin = 0`); err != nil {
-		return fmt.Errorf("store: enforce policy promote default: %w", err)
+//  1. is_admin → role 映射(此时 role 刚由 ensureColumn 建出,全部是默认 'user');
+//  2. 保证至少一个 owner(规则与启动期共用 ensureOwnerExistsTx);
+//  3. 写入版本号 —— **与 1/2 同事务**,这是本函数存在的核心理由:
+//     版本不能先记后改数据,否则中途失败会导致下次启动跳过回填(§4.2)。
+func (s *Store) applyStage5Backfill() error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return fmt.Errorf("store: stage5 backfill begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if _, err := tx.Exec(`
+		UPDATE users SET role = CASE WHEN is_admin = 1 THEN 'admin' ELSE 'user' END,
+		                  updated_at = datetime('now')`); err != nil {
+		return fmt.Errorf("store: stage5 map is_admin to role: %w", err)
 	}
 
+	ownerID, err := ensureOwnerExistsTx(tx)
+	if err != nil {
+		return err
+	}
+	if ownerID != 0 {
+		log.Printf("[store] STAGE5 回填:已把 user_id=%d 提升为 owner", ownerID)
+	}
+
+	if _, err := tx.Exec(`INSERT OR IGNORE INTO schema_version (version) VALUES (?)`,
+		stage5SchemaVersion); err != nil {
+		return fmt.Errorf("store: stage5 version mark: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("store: stage5 backfill commit: %w", err)
+	}
+	return nil
+}
+
+// ensureOwnerExistsTx 是 owner 保障的**唯一实现**(STAGE5 §5.2 / 定案 A5)。
+//
+// migrate 的一次性回填与启动期的 EnforceInitialSecurityPolicy 都调它,
+// 避免"两处各写一份提 owner 规则"造成漂移(那会提出两个 owner,再由唯一索引兜住 →
+// 表现为启动 WARN,问题被掩盖而不是被解决)。
+//
+// 幂等:已有可用 owner(role='owner' 且未软删)则直接返回 0。
+// 返回本次被提升的 user_id(0 = 未改动)。
+//
+// 候选顺序(均要求 status=1 启用 —— 把 owner 提给一个禁用/软删账号等于没提,
+// 系统仍无人可管,所以这里比契约原文的"非软删"更严):
+//  ① name='default' 且 is_admin=1(历史默认管理员,优先保持原状)
+//  ② 最早的 is_admin=1
+//  ③ 最早的启用用户(打 WARN,说明是兜底提升)
+func ensureOwnerExistsTx(tx *sql.Tx) (int64, error) {
+	var n int
+	if err := tx.QueryRow(`SELECT COUNT(*) FROM users WHERE role = 'owner' AND status <> ?`,
+		UserDeleteStatus).Scan(&n); err != nil {
+		return 0, fmt.Errorf("store: ensure owner count: %w", err)
+	}
+	if n > 0 {
+		return 0, nil
+	}
+
+	pick := func(query string, args ...any) (int64, bool, error) {
+		var id int64
+		err := tx.QueryRow(query, args...).Scan(&id)
+		if errors.Is(err, sql.ErrNoRows) {
+			return 0, false, nil
+		}
+		if err != nil {
+			return 0, false, fmt.Errorf("store: ensure owner pick: %w", err)
+		}
+		return id, true, nil
+	}
+
+	var (
+		id    int64
+		found bool
+		warn  bool
+		err   error
+	)
+	if id, found, err = pick(`SELECT id FROM users WHERE status = 1 AND is_admin = 1 AND name = 'default' ORDER BY id ASC LIMIT 1`); err != nil {
+		return 0, err
+	}
+	if !found {
+		if id, found, err = pick(`SELECT id FROM users WHERE status = 1 AND is_admin = 1 ORDER BY id ASC LIMIT 1`); err != nil {
+			return 0, err
+		}
+	}
+	if !found {
+		warn = true
+		if id, found, err = pick(`SELECT id FROM users WHERE status = 1 ORDER BY id ASC LIMIT 1`); err != nil {
+			return 0, err
+		}
+	}
+	if !found {
+		// 库是空的(或没有任何启用用户):不造 owner,交给 setup 创建。
+		return 0, nil
+	}
+
+	// 提升,带 NOT EXISTS 护卫(并发/重复调用都不会提出第二个 owner)。
+	res, err := tx.Exec(`
+		UPDATE users SET role = 'owner', updated_at = datetime('now')
+		WHERE id = ? AND NOT EXISTS (SELECT 1 FROM users WHERE role = 'owner' AND status <> ?)`,
+		id, UserDeleteStatus)
+	if err != nil {
+		return 0, fmt.Errorf("store: ensure owner promote id=%d: %w", id, err)
+	}
+	if affected, _ := res.RowsAffected(); affected == 0 {
+		return 0, nil
+	}
+	if warn {
+		log.Printf("[store] WARN: 系统既无 owner 也无 is_admin 历史用户,已把最早的启用用户 user_id=%d 提升为 owner(STAGE5 §5.2 兜底)", id)
+	}
+	return id, nil
+}
+
+// EnsureOwnerExists 是 ensureOwnerExistsTx 的自管事务版本(启动期调用)。
+//
+// 用途:owner 被删除/软删后自动补位,避免系统陷入"没人能管"的状态。
+// 注意它会**静默改变权限**(有人变成 owner),因此补位时必然打日志。
+func (s *Store) EnsureOwnerExists() (int64, error) {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return 0, fmt.Errorf("store: ensure owner begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	id, err := ensureOwnerExistsTx(tx)
+	if err != nil {
+		return 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("store: ensure owner commit: %w", err)
+	}
+	return id, nil
+}
+
+// EnforceInitialSecurityPolicy 应用启动期的初始安全策略,由 main 在**每次启动**调用一次。
+//
+// 做两件互相独立的事:
+//
+//	(a) 确保系统里始终有 owner —— 委托给 EnsureOwnerExists()(owner 保障的**唯一实现**,
+//	    STAGE5 §5.2 / 定案 A5)。全新安装时它什么都不做(setup 会创建 owner);
+//	    owner 被删除/软删后它会自动补位并打日志。
+//	(b) 【STAGE4 的 D24 防线,**必须保留**】default 账号存在且尚未设密码时,
+//	    强制 allow_register=0 并打 WARN —— 防止"空密码管理员 + 开放注册"这一攻击面组合。
+//
+// ⚠️ STAGE5 只允许改 (a):原先这里是「把 default 提升为 is_admin=1」,现在 is_admin 已冻结,
+// 必须改为 role 化的 owner 保障。**(b) 不得因为重写本函数而丢失。**
+//
+// 幂等:可重复调用。(b) 只在 allow_register **从未被设置过**时才动作,绝不覆盖管理员的显式设置(D31(c))。
+func (s *Store) EnforceInitialSecurityPolicy() error {
+	// (a) owner 保障(唯一实现,规则见 ensureOwnerExistsTx)
+	if _, err := s.EnsureOwnerExists(); err != nil {
+		return err
+	}
+
+	// (b) D24:空密码的 default + 开放注册 = 危险组合,强制关闭注册
 	var existing string
 	err := s.db.QueryRow(`SELECT value FROM settings WHERE key = 'allow_register'`).Scan(&existing)
 	switch {

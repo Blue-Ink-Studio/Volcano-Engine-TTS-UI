@@ -39,7 +39,15 @@ func (r *Router) Snapshot() []Channel {
 	return out
 }
 
-// Empty 没有任何启用渠道时返 true(让 controller 走 setting 兜底路径)。
+// Empty 报告路由里**一个渠道都没有**(含 disabled)。
+//
+// ⚠️ 注意它与"无可用渠道"**不等价**:本 Router 是用**含 disabled 的全量**渠道构建的
+// (见 controller.reloadChannels 里的 ChannelList(true)),所以"渠道全部被禁用"时
+// Empty() 仍返回 false。要判"无可用(enabled)渠道",请用
+// `controller.CountEnabledChannels(controller.GetRouter().Snapshot()) == 0`
+// —— STAGE5 的 503 no_channel 用的就是后者(契约 §7.1)。
+//
+// 保留本方法原语义:它被 controller/tts.go 用于"是否走 setting 兜底路径"的判定。
 func (r *Router) Empty() bool {
 	r.mu.RLock()
 	defer r.mu.RUnlock()

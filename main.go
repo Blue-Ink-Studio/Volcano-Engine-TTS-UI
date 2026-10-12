@@ -90,11 +90,16 @@ func main() {
 				modeName = "normal"
 			}
 			metrics.ConfigLoadFailures.Inc(telemetry.Labels{"mode": modeName})
-			if mode == installer.ModeNormal {
-				log.Printf("[main][FATAL] TTS 运行时配置加载失败 (normal mode, 服务无法启动): %v", err)
-				log.Fatalf("service cannot start in normal mode without valid config: %v", err)
-			}
-			log.Printf("[main][WARN] TTS 运行时配置加载失败 (setup mode, 需先 /setup): %v", err)
+			// STAGE5(契约 §3):这里**不再 fail-fast**。
+			//
+			// 原因:STAGE5 起渠道凭证由渠道自带,setup 不再写 api_key /
+			// default_resource_id / default_speaker,因此 normal 模式下"缺全局 TTS 配置"
+			// 是**正常状态**。继续 Fatalf 会让"装完 → 重启"直接起不来(H1),
+			// 而且没有任何入口去补配置(要进设置页得先能启动)—— 是死锁。
+			//
+			// 服务可用性改由"是否有 enabled 渠道"决定,在请求层返 503 no_channel。
+			log.Printf("[main][WARN] TTS 全局配置未就绪(mode=%s,不阻断启动;渠道自带凭证即可服务): %v",
+				modeName, err)
 		} else {
 			opts := setting.GetTTSOptions()
 			log.Printf("[main] TTS 运行时配置已加载(api_key=***, speaker=%s, resource=%s, format=%s)",
@@ -102,19 +107,15 @@ func main() {
 		}
 	}
 
-	// 4.5) 阶段 3a:seed 旧 key(决策 #4)
-	//   - tokens 表为空时,才 seed(跑过一次就不重复)
-	//   - 把 OPENAI_TTS_API_KEY 的每个 key 变成默认 user "default" 下的 unlimited token
-	//   - 单事务,失败回滚;失败只 log warn,不中断启动(setup 模式这时尚未配 key,
-	//     normal 模式若 seed 失败,/v1/audio/speech 直接 401,但管理接口不受影响)
-	if st != nil {
-		seeded, err := controller.SeedDefaultTokensIfEmpty(st)
-		if err != nil {
-			log.Printf("[main][WARN] seed 默认 token 失败: %v (业务鉴权可能受影响)", err)
-		} else if seeded > 0 {
-			log.Printf("[main] seed 默认 token 成功: %d 条(归属 user=default, unlimited=1)", seeded)
-		}
-	}
+	// 4.5)【STAGE5 已移除】阶段 3a 的 "seed 旧 key" 步骤。
+	//
+	// OPENAI_TTS_API_KEY 已退役(契约 §8),不再把 env 里的 key 变成 tokens 行;
+	// 业务调用方一律用门户自建的用户 token。
+	//
+	// ⚠️ 为什么是"整段移除"而不是"靠 GetAuthAPIKeys() 为空自然 no-op":
+	// 遗留的 env 会让 seed 凭空造出一个 `default` 用户 + unlimited token,
+	// 而随后的 owner 保障逻辑会围绕这个"多出来的管理员候选"产生意外分配。
+	// 与环境无关地移除这一整段,行为才可预测。
 
 	// 4.6) STAGE4:JWT secret 初始化 + 初始安全策略(D21/D24/D30/X19)
 	//
@@ -141,10 +142,17 @@ func main() {
 	// (不再像 v0.3.0 之前那样放行)。若此处不拦住,服务会正常起来,
 	// 但 /dashboard 与所有 /api/admin/* 全部 401 —— 相当于把自己锁在门外。
 	// 宁可启动失败并打印明确原因,也不要起来一个进不去后台的实例。
+	// 5.1) STAGE5(契约 §3):这里**不再 fail-fast**。
+	//
+	// STAGE5 起管理入口以 **owner 账号 + JWT** 为主:setup 会创建超管,
+	// admin_key(DB)只是**可选**的运维后门。因此"没有 admin_key"是完全正常的状态;
+	// 继续 Fatalf 会造成"装完 → 重启 → 起不来",而且此时没有任何入口去设置 admin_key
+	// (想进设置页得先能启动)—— 死锁。
+	//
+	// 保留一条 WARN:让运维知道此刻"owner 忘密码"只能靠账号密码,没有后门可救。
 	if installer.GetMode() == installer.ModeNormal && len(setting.GetAdminKeys()) == 0 {
-		log.Printf("[main][FATAL] normal 模式未配置任何管理凭证:admin_key / auth_key / OPENAI_TTS_API_KEY 均为空。")
-		log.Printf("[main][FATAL] 管理接口(含 /dashboard)将全部返回 401,服务拒绝启动。")
-		log.Fatalf("no admin credential configured; set admin_key (or auth_key) before starting in normal mode")
+		log.Printf("[main][WARN] 未配置 admin_key:管理入口依赖 owner 账号的 JWT。" +
+			"建议登录后在 /dashboard 设置一个 admin_key 作为紧急恢复凭证(owner 忘密码时的唯一后门)")
 	}
 	if installer.GetMode() == installer.ModeNormal {
 		log.Printf("[main] 管理凭证来源: %s", setting.GetAdminKeySource())
