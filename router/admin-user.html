@@ -27,6 +27,7 @@
                     </div>
                     <div class="page-actions">
                         <button class="btn" @click="openCharge">充值</button>
+                        <button class="btn" @click="openResetPwd">重置密码</button>
                         <button class="btn" @click="editUser">编辑</button>
                         <button class="btn btn-danger-ghost" @click="removeUser" v-if="user.status !== 3">删除</button>
                     </div>
@@ -360,6 +361,57 @@
                 </div>
             </transition>
         </teleport>
+        <!-- 重置密码 modal(POST /api/admin/users/{id}/password-reset;留空=后端生成随机密码仅显示一次) -->
+        <teleport to="body">
+            <transition name="modal">
+                <div v-if="showResetModal" class="modal-backdrop" @click.self="closeResetModal">
+                    <div class="modal" @click.stop>
+                        <div class="modal-head">
+                            <h2>重置密码 · {{ user ? user.name : '' }}</h2>
+                            <button class="btn-icon" @click="closeResetModal" title="关闭" style="flex: 0; padding: 4px 10px;">×</button>
+                        </div>
+                        <div class="modal-body">
+                            <template v-if="!resetDone">
+                                <div class="field">
+                                    <label>新密码（可选，留空则随机生成）</label>
+                                    <input type="password" v-model="resetForm.newPassword" placeholder="留空 = 生成 16 位随机密码" autocomplete="new-password">
+                                    <div class="hint">重置后该用户所有已登录设备立即失效（token_version+1）；明文密码只显示一次。</div>
+                                </div>
+                                <div v-if="resetErr" class="alert alert-danger" style="margin-top: 14px;">
+                                    <span class="alert-icon">⚠</span>
+                                    <div class="alert-body">
+                                        <div class="alert-title">重置失败</div>
+                                        <div class="alert-desc">{{ resetErr }}</div>
+                                    </div>
+                                </div>
+                            </template>
+                            <template v-else>
+                                <div class="alert alert-warning" style="text-align:left;">
+                                    <span class="alert-icon">⚠</span>
+                                    <div class="alert-body">
+                                        <div class="alert-title">密码已重置 —— 请立即复制，只显示这一次</div>
+                                        <div class="alert-desc">关闭后无法再次查看；旧密码与所有登录态均已失效。</div>
+                                    </div>
+                                </div>
+                                <div class="key-reveal mono">{{ resetResult }}</div>
+                                <button class="btn btn-sm" @click="copyResetResult" style="margin-top:8px;">复制</button>
+                            </template>
+                        </div>
+                        <div class="modal-foot">
+                            <template v-if="!resetDone">
+                                <button class="btn" @click="closeResetModal">取消</button>
+                                <button class="btn btn-primary" @click="submitReset" :disabled="resetSubmitting">
+                                    {{ resetSubmitting ? '提交中...' : '确认重置' }}
+                                </button>
+                            </template>
+                            <template v-else>
+                                <button class="btn btn-primary" @click="closeResetModal">完成</button>
+                            </template>
+                        </div>
+                    </div>
+                </div>
+            </transition>
+        </teleport>
     </div>
 
     <script src="/dashboard/admin-shell.js"></script>
@@ -503,6 +555,51 @@
                 } finally { chargeSubmitting.value = false; }
             };
 
+            // ---- 重置密码(POST /api/admin/users/{id}/password-reset;留空=随机生成,D9)----
+            const showResetModal = ref(false);
+            const resetForm = ref({ newPassword: '' });
+            const resetErr = ref('');
+            const resetSubmitting = ref(false);
+            const resetDone = ref(false);
+            const resetResult = ref('');
+            const openResetPwd = () => {
+                resetForm.value = { newPassword: '' };
+                resetErr.value = '';
+                resetDone.value = false;
+                resetResult.value = '';
+                showResetModal.value = true;
+            };
+            const closeResetModal = () => { showResetModal.value = false; };
+            const submitReset = async () => {
+                resetErr.value = '';
+                resetSubmitting.value = true;
+                try {
+                    const body = {};
+                    if (resetForm.value.newPassword && resetForm.value.newPassword.trim()) {
+                        body.new_password = resetForm.value.newPassword.trim();
+                    }
+                    const r = await http.post(`/admin/users/${uid}/password-reset`, body);
+                    resetResult.value = r.data.password || '';
+                    resetDone.value = true;
+                    toast('ok', body.new_password ? '密码已重置' : '已生成随机密码');
+                    user.value = (await http.get(`/admin/users/${uid}`)).data;
+                } catch (e) {
+                    const code = e.response?.data?.error?.code;
+                    const msg = e.response?.data?.error?.message || e.message;
+                    resetErr.value = code === 'weak_password'
+                        ? '密码不合规：长度至少 8 位，且不能为纯空白。'
+                        : ('重置失败: ' + msg);
+                } finally { resetSubmitting.value = false; }
+            };
+            const copyResetResult = async () => {
+                try {
+                    await navigator.clipboard.writeText(resetResult.value);
+                    toast('ok', '已复制到剪贴板');
+                } catch (e) {
+                    toast('err', '复制失败，请手动选中复制');
+                }
+            };
+
             // ---- is_admin 调整(PATCH /api/admin/users/{id})----
             const toggleAdmin = async () => {
                 const target = !user.value.is_admin;
@@ -603,6 +700,8 @@
                 statusText, statusClass, fmt, fmtBytes, fmtQty, usageStatusText, usageStatusClass,
                 balanceState, balanceCardClass, balancePillClass,
                 showChargeModal, chargeForm, chargeErr, chargeSubmitting, openCharge, closeChargeModal, submitCharge, toggleAdmin,
+                showResetModal, resetForm, resetErr, resetSubmitting, resetDone, resetResult,
+                openResetPwd, closeResetModal, submitReset, copyResetResult,
                 showUserModal, userForm, modalErr, submitting, editUser, closeUserModal, submitUser, removeUser,
                 showTokenModal, tokenEditing, tokenCreated, createdKey, tokenForm,
                 openTokenCreate, openTokenEdit, closeTokenModal, submitToken, copyKey,

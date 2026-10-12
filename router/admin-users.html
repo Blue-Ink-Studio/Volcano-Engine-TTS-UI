@@ -136,6 +136,29 @@
                                 </select>
                                 <div class="hint">停用后该用户所有令牌将拒绝调用（403 user_disabled）</div>
                             </div>
+
+                            <!-- 仅新建时:可选的初始密码 / 初始余额 / 管理员(D16/D26;后端字段全可选指针) -->
+                            <template v-if="!editing">
+                                <div class="divider"></div>
+                                <div class="field">
+                                    <label>初始密码（可选）</label>
+                                    <input type="password" v-model="form.password" placeholder="留空则走「首次设密」流程" autocomplete="new-password">
+                                    <div class="hint">填入后用户可直接用该密码登录；留空则登录时需先设置密码（同 default 用户）。</div>
+                                </div>
+                                <div class="field">
+                                    <label>初始余额（可选）</label>
+                                    <input type="number" step="1" min="0" v-model.number="form.balance" placeholder="默认 0，可留空">
+                                    <div class="hint">正数会写入余额流水 <code>type=grant, source=admin_create</code>（D33）；留空默认为 0。</div>
+                                </div>
+                                <div class="field">
+                                    <label class="check">
+                                        <input type="checkbox" v-model="form.is_admin">
+                                        <span>设为管理员（可访问 /dashboard）</span>
+                                    </label>
+                                    <div class="hint">最后一个启用的管理员无法被降级/禁用（409 <code>last_admin</code>）。</div>
+                                </div>
+                            </template>
+
                             <div v-if="modalErr" class="alert alert-danger" style="margin-top: 14px;">
                                 <span class="alert-icon">⚠</span>
                                 <div class="alert-body">
@@ -253,15 +276,15 @@
             const editingId = ref(0);
             const submitting = ref(false);
             const modalErr = ref('');
-            const form = ref({ name: '', status: 1 });
+            const form = ref({ name: '', status: 1, password: '', balance: null, is_admin: false });
             const openCreate = () => {
                 editing.value = false; editingId.value = 0;
-                form.value = { name: '', status: 1 };
+                form.value = { name: '', status: 1, password: '', balance: null, is_admin: false };
                 modalErr.value = ''; showModal.value = true;
             };
             const openEdit = (u) => {
                 editing.value = true; editingId.value = u.id;
-                form.value = { name: u.name, status: u.status === 3 ? 1 : u.status };
+                form.value = { name: u.name, status: u.status === 3 ? 1 : u.status, password: '', balance: null, is_admin: false };
                 modalErr.value = ''; showModal.value = true;
             };
             const closeModal = () => { showModal.value = false; };
@@ -278,7 +301,14 @@
                         await http.patch(`/admin/users/${editingId.value}`, patch);
                         toast('ok', '用户已更新');
                     } else {
-                        await http.post('/admin/users', { name: form.value.name.trim(), status: form.value.status });
+                        const body = { name: form.value.name.trim(), status: form.value.status };
+                        // 只有填写/勾选才传字段:留空密码=走首次设密,balance 留空=默认 0,不勾 is_admin=普通用户(D16/D26 可选指针)
+                        if (form.value.password && form.value.password.trim()) body.password = form.value.password.trim();
+                        if (form.value.balance !== null && form.value.balance !== '' && !Number.isNaN(Number(form.value.balance))) {
+                            body.balance = Number(form.value.balance);
+                        }
+                        if (form.value.is_admin) body.is_admin = true;
+                        await http.post('/admin/users', body);
                         toast('ok', '用户已创建');
                     }
                     showModal.value = false;
