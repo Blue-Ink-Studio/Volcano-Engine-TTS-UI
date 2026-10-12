@@ -67,7 +67,15 @@ func Setup() *mux.Router {
 	r := mux.NewRouter()
 
 	r.Use(middleware.SecurityHeaders)
-	r.Use(middleware.InstallGuard(installer.GetMode))
+	// STAGE5:setup 安装页复用管理端静态资源(/dashboard/admin.css)。InstallGuard 在 setup
+	// 模式只放行 /setup、/api/setup、/static/,若不额外放行,安装页引用的 admin.css 会被 503。
+	// 这里精确放行静态资源路径(无敏感信息);动态页面(/dashboard、/portal 等)仍被各自
+	// handler 的鉴权中间件拦截,安装模式下照旧 302 跳 /setup。
+	r.Use(middleware.InstallGuard(installer.GetMode,
+		"/dashboard/admin.css", "/dashboard/admin-shell.js",
+		"/admin/admin.css", "/admin/admin-shell.js",
+		"/portal/admin.css", "/portal/admin-shell.js", "/portal/portal-shell.js",
+	))
 	r.Use(middleware.RateLimitWithMetrics)
 	r.Use(middleware.ConcurrencyLimitWithMetrics)
 	r.Use(middleware.Logger)
