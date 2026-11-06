@@ -197,15 +197,20 @@ func Setup() *mux.Router {
 	//   - 308 能保留方法,但对非浏览器脚本仍是行为变化,且多一次往返
 	//   - 别名让新旧路径都能直接用,零往返、零破坏,老脚本完全无感
 	// 旧别名计划在后续版本移除。
+	// STAGE6(M3):voice 改为**按 id** 寻址 —— 同名音色可属不同渠道,
+	// `{name}` 已无法定位唯一行(契约 §8.1)。
 	r.Handle("/api/admin/voices", middleware.RequireAdminOrJWT(http.HandlerFunc(controller.AdminVoicesListHandler))).Methods("GET")
 	r.Handle("/api/admin/voices", middleware.RequireAdminOrJWT(http.HandlerFunc(controller.AdminVoiceCreateHandler))).Methods("POST")
-	r.Handle("/api/admin/voices/{name}", middleware.RequireAdminOrJWT(http.HandlerFunc(controller.AdminVoiceDeleteHandler))).Methods("DELETE")
-	r.Handle("/api/admin/voices/{name}/toggle", middleware.RequireAdminOrJWT(http.HandlerFunc(controller.AdminVoiceToggleHandler))).Methods("PATCH")
+	r.Handle("/api/admin/voices/{id:[0-9]+}", middleware.RequireAdminOrJWT(http.HandlerFunc(controller.AdminVoiceDeleteHandler))).Methods("DELETE")
+	r.Handle("/api/admin/voices/{id:[0-9]+}/toggle", middleware.RequireAdminOrJWT(http.HandlerFunc(controller.AdminVoiceToggleHandler))).Methods("PATCH")
 
 	r.Handle("/api/voices", middleware.RequireAdminOrJWT(http.HandlerFunc(controller.AdminVoicesListHandler))).Methods("GET")
 	r.Handle("/api/voices", middleware.RequireAdminOrJWT(http.HandlerFunc(controller.AdminVoiceCreateHandler))).Methods("POST")
-	r.Handle("/api/voices/{name}", middleware.RequireAdminOrJWT(http.HandlerFunc(controller.AdminVoiceDeleteHandler))).Methods("DELETE")
-	r.Handle("/api/voices/{name}/toggle", middleware.RequireAdminOrJWT(http.HandlerFunc(controller.AdminVoiceToggleHandler))).Methods("PATCH")
+	r.Handle("/api/voices/{id:[0-9]+}", middleware.RequireAdminOrJWT(http.HandlerFunc(controller.AdminVoiceDeleteHandler))).Methods("DELETE")
+	r.Handle("/api/voices/{id:[0-9]+}/toggle", middleware.RequireAdminOrJWT(http.HandlerFunc(controller.AdminVoiceToggleHandler))).Methods("PATCH")
+
+	// STAGE6:已注册的上游适配器列表(渠道页 provider 下拉的数据源)。
+	r.Handle("/api/admin/providers", middleware.RequireAdminOrJWT(http.HandlerFunc(controller.AdminProvidersHandler))).Methods("GET")
 
 	// /api/settings 全局设置 (鉴权) — M3
 	// 同样:/api/admin/settings 为正式路径,/api/settings 为过渡期别名。

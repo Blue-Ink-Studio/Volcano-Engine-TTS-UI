@@ -3,6 +3,7 @@ package setting
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"log"
 	"os"
@@ -11,10 +12,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/volcano-tts/tts-api/adapter/provider"
 	"github.com/volcano-tts/tts-api/adapter/volcano"
 	"github.com/volcano-tts/tts-api/common"
-	"github.com/volcano-tts/tts-api/telemetry"
 )
 
 // 全部环境变量读取的单一入口:其它包不允许直接 os.Getenv,只读这里的全局 Config。
@@ -28,11 +27,20 @@ import (
 //   - Server.Port / TrustedProxyHops / SetupToken 仅启动期写、运行期读,无并发修改,
 //     保持原样不加锁。
 var (
-	ttsMu       sync.RWMutex
-	ttsOptions  volcano.Options
-	ttsTimeout  time.Duration = common.DefaultTimeout
-	ttsConfigErr error
-	authAPIKeys []string
+	ttsMu    sync.RWMutex
+	ttsTimeout time.Duration = common.DefaultTimeout
+	// defaultFormat / defaultSampleRate 是**渠道无关**的输出默认值。
+	//
+	// STAGE6 起不再有"全局 TTS 配置"(api_key/resource_id/default_speaker 全部
+	// 下沉到渠道),但"客户端没指定 response_format 时用什么"仍是全局默认,
+	// 所以这里保留 format 与 sample rate 两个中性项。
+	defaultFormat     string = "mp3"
+	defaultSampleRate int    = 24000
+	// globalExtras 是渠道无关的全局调音参数(bit_rate / additions 等),
+	// 由 controller 透传进 provider.Request.Extra,再交给具体 adapter 解释。
+	// 用 map[string]string 而非火山类型,避免把厂商结构暴露给主干。
+	globalExtras map[string]string
+	authAPIKeys  []string
 	// adminAPIKeys 是**管理接口专用**凭证(admin_key)。
 	// 与 authAPIKeys(业务侧,/v1/audio/speech 用)分离:
 	//   - admin_key 为空时回退到 auth_key/env,老部署行为完全不变
@@ -47,41 +55,71 @@ var (
 	corsOrigins  []string
 )
 
-// GetTTSOptions 读 TTSOptions 快照(值类型,使用方可以放心使用,不会被并发写破坏)。
-// 提供给业务侧(controller)的统一读取入口;LoadRuntimeConfig 写入时用 SetTTSOptions 整体替换。
-// 业务侧不要缓存这个值跨 goroutine 使用(应该每次调用时重新拿)。
-func GetTTSOptions() volcano.Options {
-	ttsMu.RLock()
-	defer ttsMu.RUnlock()
-	return ttsOptions
-}
-
-// GetTTSRequest 返回运行时 TTS 配置映射成的 provider.Request 快照。
-// 阶段0过渡:setting 内部仍构造 volcano.Options,经 volcano.BuildRequest 映射成
-// provider.Request 交给主干;controller 拿到后按本次请求填 Text/Format/Speed,并做 voice 路由覆盖。
-// 阶段2(配置命名空间化)后,此处改为直接构造 provider.Request,不再触碰火山类型。
-func GetTTSRequest() provider.Request {
-	ttsMu.RLock()
-	defer ttsMu.RUnlock()
-	return volcano.BuildRequest(ttsOptions)
-}
+// GetTTSOptions / GetTTSRequest / SetTTSOptions —— STAGE6 已**删除**。
+//
+// 它们的作用是把"全局 volcano.Options"桥接成 provider.Request 交给主干,带来两个误导:
+//  1. 每个请求的 Credentials.Scope 里都恒有一个 resource_id,即使渠道是 OpenAI;
+//  2. 主干以为存在"全局音色/全局凭证"这条路径,而 STAGE5 之后它已经死了
+//     (setup 不再写 api_key/default_speaker)。
+//
+// STAGE6(B8)改为:provider.Request 由 **controller 按渠道 + 音色行现场构造**,
+// 厂商维度全部由 adapter 从 Credentials.Scope / Request.Extra 自行解释。
+// 本包只保留渠道无关的默认值:GetDefaultFormat / GetDefaultSampleRate / GetGlobalExtras。
 
 // GetDefaultFormat 返回默认输出格式(客户端未指定 response_format 时回退用)。
+//
+// STAGE6:不再来自 volcano.Options —— 格式是渠道无关概念,恒有值(默认 mp3)。
 func GetDefaultFormat() string {
 	ttsMu.RLock()
 	defer ttsMu.RUnlock()
-	return ttsOptions.Format
+	if defaultFormat == "" {
+		return "mp3"
+	}
+	return defaultFormat
 }
 
-// GetDefaultProviderName 返回当前默认上游适配器名。
-// 阶段0:仅火山,恒为 "volcano";阶段2 后改从库表 default_provider 读。
-func GetDefaultProviderName() string { return "volcano" }
+// GetDefaultSampleRate 返回默认采样率(渠道无关;无配置时 24000)。
+// adapter 可自行忽略(OpenAI/Azure 固定 24k),火山用它决定上游采样率。
+func GetDefaultSampleRate() int {
+	ttsMu.RLock()
+	defer ttsMu.RUnlock()
+	if defaultSampleRate <= 0 {
+		return 24000
+	}
+	return defaultSampleRate
+}
 
-// SetTTSOptions 整体替换 TTSOptions。LoadRuntimeConfig 写路径专用。
-func SetTTSOptions(o volcano.Options) {
+// GetGlobalExtras 返回全局调音参数(渠道无关)的拷贝。
+//
+// controller 把它塞进 provider.Request.Extra;具体含义由 adapter 解释
+// (火山读 bit_rate / additions 等,OpenAI/Azure 忽略)。
+// 返回拷贝,防止调用方持有底层 map 被并发写破坏。
+func GetGlobalExtras() map[string]string {
+	ttsMu.RLock()
+	defer ttsMu.RUnlock()
+	if len(globalExtras) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(globalExtras))
+	for k, v := range globalExtras {
+		out[k] = v
+	}
+	return out
+}
+
+// SetGlobalExtras 整体替换全局调音参数(LoadRuntimeConfig 写路径专用)。
+func SetGlobalExtras(m map[string]string) {
 	ttsMu.Lock()
 	defer ttsMu.Unlock()
-	ttsOptions = o
+	if len(m) == 0 {
+		globalExtras = nil
+		return
+	}
+	out := make(map[string]string, len(m))
+	for k, v := range m {
+		out[k] = v
+	}
+	globalExtras = out
 }
 
 // GetTTSTimeout 读当前超时;controller 用它派生 context。
@@ -98,19 +136,19 @@ func SetTTSTimeout(d time.Duration) {
 	ttsTimeout = d
 }
 
-// GetTTSConfigErr 读运行时配置错误;nil 表示就绪。
-func GetTTSConfigErr() error {
-	ttsMu.RLock()
-	defer ttsMu.RUnlock()
-	return ttsConfigErr
-}
+// GetTTSConfigErr —— STAGE6 已**删除**。
+//
+// 它承载的是"全局 TTS 必填项(api_key / default_resource_id / default_speaker)
+// 是否齐备"的判定。STAGE5 起 setup 不再写这三项(凭证由渠道自带),于是它
+// **恒非 nil**,导致 /health 在 normal 模式永久 503(K8s readiness 恒红)。
+//
+// 渠道化之后"全局 TTS 配置"这个概念本身就不存在了,因此整个判定被移除:
+//   - /health 只按 store 是否就绪判 503
+//   - 上游凭证缺失由渠道层在请求时自然暴露(no_channel / unknown_model / 上游 401)
+//
+// 保留本注释是为了让后来者知道这里曾有东西、以及为什么删掉。
 
-// SetTTSConfigErr 设运行时配置错误;nil 表示清错。
-func SetTTSConfigErr(err error) {
-	ttsMu.Lock()
-	defer ttsMu.Unlock()
-	ttsConfigErr = err
-}
+// GetAuthAPIKeys 读鉴权 key 列表;返回拷贝防止业务侧持有底层 slice 后被并发写破坏。
 
 // GetAuthAPIKeys 读鉴权 key 列表;返回拷贝防止业务侧持有底层 slice 后被并发写破坏。
 // 外部不应直接读 Auth.APIKeys,统一走 Get*。
@@ -349,64 +387,47 @@ func splitAndLowerOrigins(s string) []string {
 func LoadRuntimeConfig(s Store) error {
 	all, err := s.SettingsGetAll()
 	if err != nil {
-		wrapped := fmt.Errorf("read settings failed: %w", err)
-		SetTTSConfigErr(wrapped)
-		return wrapped
+		return fmt.Errorf("read settings failed: %w", err)
 	}
 
-	apiKey := all["api_key"]
-	resourceId := all["default_resource_id"]
-	speaker := all["default_speaker"]
-	missing := []string{}
-	if apiKey == "" {
-		missing = append(missing, "api_key")
-	}
-	if resourceId == "" {
-		missing = append(missing, "default_resource_id")
-	}
-	if speaker == "" {
-		missing = append(missing, "default_speaker")
-	}
-	if len(missing) > 0 {
-		wrapped := fmt.Errorf("missing required settings: %v", missing)
-		SetTTSConfigErr(wrapped)
-		return wrapped
-	}
-
-	// 【BUG 修复 · 第二轮】default_speaker 是 voice **名字**(如 "chun"),
-	// 不是火山 speaker ID (如 "S_G8tEKnaJ1")。原代码直接把 voice 名当
-	// speaker ID 用,导致调 /v1/audio/speech 不传 voice 时火山 55000000。
+	// STAGE6:**删除"全局 TTS 必填项"判定**。
 	//
-	// 字段优先级:
-	//   - speaker     ←  从 default_speaker 这个 voice 查表拿真 ID (必查)
-	//   - resource_id ←  settings 里的(用户偏好,不被 voice 行覆盖)
-	//   - model       ←  voice 行的优先,settings 里的次之
+	// 旧逻辑要求 api_key / default_resource_id / default_speaker 三项齐备,缺一
+	// 就 SetTTSConfigErr 并让 /v1/audio/speech 返 503。
 	//
-	// 之前 f5563e6 把 resourceId 也覆盖了,导致用户在 setup 设的
-	// default_resource_id 永远没机会生效。这次只覆盖 speaker,不动 resourceId。
-	var voiceModel string
-	if vSpeaker, _, vModel, found, vErr := s.GetVoiceForTTS(speaker); vErr == nil && found {
-		speaker = vSpeaker
-		if vModel != "" {
-			voiceModel = vModel
-		}
-		// 找不到 voice 时不报错 — 保持原值(向后兼容)
-	}
+	// 但 STAGE5 起 setup **刻意不写**这三项(凭证由渠道自带),于是它们永远缺失
+	// ⇒ GetTTSConfigErr() 恒非 nil ⇒ **/health 在 normal 模式永久 503**,
+	// K8s readiness / Docker HEALTHCHECK 恒红(这个 bug 从 STAGE5 一直带到现在)。
+	//
+	// 渠道化之后"全局 TTS 配置"这个概念本就不该存在:缺凭证由渠道层在请求时
+	// 自然暴露(no_channel / unknown_model / 上游 401),不需要启动期判定。
 
-	model := all["model"]
-	if voiceModel != "" {
-		model = voiceModel // voice 行有 model 时优先用 voice 的
-	}
 	format := all["default_format"]
 	if format == "" {
 		format = "mp3"
 	}
 	sampleRate, _ := s.SettingsGetInt("sample_rate", 24000)
+	ttsMu.Lock()
+	defaultFormat = format
+	defaultSampleRate = sampleRate
+	ttsMu.Unlock()
+
+	// 全局调音参数(渠道无关,由 adapter 自行解释)。
+	// 这里只做"把 settings 里的火山风格开关翻译成 Request.Extra 的键"这件事,
+	// 不再构造 volcano.Options / provider.Request。
 	bitRate, _ := s.SettingsGetInt("bit_rate", 0)
 	modelType, _ := s.SettingsGetInt("model_type", 0)
 	explicitLanguage := all["explicit_language"]
 	enableSubtitle, _ := s.SettingsGetBool("enable_subtitle", false)
 
+	extras := map[string]string{}
+	if bitRate != 0 {
+		extras["bit_rate"] = strconv.Itoa(bitRate)
+	}
+	if enableSubtitle {
+		extras["enable_subtitle"] = "1"
+	}
+	// additions 是火山专属的 JSON 字符串;为空时不写这个键。
 	var adds *volcano.Additions
 	if modelType != 0 || explicitLanguage != "" {
 		adds = &volcano.Additions{}
@@ -418,29 +439,25 @@ func LoadRuntimeConfig(s Store) error {
 			adds.ExplicitLanguage = explicitLanguage
 		}
 	}
+	// 默认不过滤 emoji(火山默认过滤会截断 emoji 之后的文本,用户实测)。
+	// 与 adapter/volcano.optionsFromRequest 的默认值保持一致。
+	if adds == nil {
+		d := true
+		adds = &volcano.Additions{DisableEmojiFilter: &d}
+	} else if adds.DisableEmojiFilter == nil {
+		d := true
+		adds.DisableEmojiFilter = &d
+	}
+	if b, err := json.Marshal(adds); err == nil {
+		extras["additions"] = string(b)
+	}
+	SetGlobalExtras(extras)
 
 	timeout := common.DefaultTimeout
 	if v, err := s.SettingsGetDuration("timeout", common.DefaultTimeout); err == nil {
 		timeout = v
-	} else {
-		timeout = common.DefaultTimeout
 	}
 	SetTTSTimeout(timeout)
-
-	SetTTSOptions(volcano.Options{
-		APIKey:         apiKey,
-		ResourceID:     resourceId,
-		UID:            "uid",
-		Speaker:        speaker,
-		Model:          model,
-		Format:         format,
-		SampleRate:     sampleRate,
-		BitRate:        bitRate,
-		SpeechRate:     0,
-		LoudnessRate:   0,
-		EnableSubtitle: enableSubtitle,
-		Additions:      adds,
-	})
 
 	// 鉴权 key:【STAGE5 已退役】。
 	//
@@ -487,25 +504,19 @@ func LoadRuntimeConfig(s Store) error {
 		SetCORS(false, nil)
 	}
 
-	SetTTSConfigErr(nil)
 	return nil
 }
 
 // Store 是 LoadRuntimeConfig 需要的最小接口(避免 setting 包 import store 产生 cycle)。
 //
-// 重要:VoiceGetByName 用 4 个返回值(speaker/resourceID/model/found/err)
-// 而非 (VoiceRef, error),这样 store 包不需要 import setting 包
-// 就能实现这个接口(避免循环 import)。
+// 重要:接口只保留**渠道无关**的设置读取 —— STAGE6 起 setting 不再解析音色
+// (音色归属渠道,由 controller 用 VoiceResolve(channelID, name) 解析),
+// 因此原来的 GetVoiceForTTS 已从接口中移除,store 包不再需要为它做适配。
 type Store interface {
 	SettingsGetAll() (map[string]string, error)
 	SettingsGetInt(key string, def int) (int, error)
 	SettingsGetBool(key string, def bool) (bool, error)
 	SettingsGetDuration(key string, def time.Duration) (time.Duration, error)
-	// GetVoiceForTTS 给定 voice 名字,返 (speaker_id, resource_id, model, found, err)。
-	//   - found=false 表示 voice 不存在(此时 err=nil,返回值是空串)
-	//   - err!=nil 是真错误(db 失败等)
-	//   - 找到时返 voice 行的真实字段值
-	GetVoiceForTTS(name string) (speaker, resourceID, model string, found bool, err error)
 }
 
 func getEnvDefault(name, def string) string {
@@ -563,41 +574,11 @@ func InitSetupToken() {
 	log.Printf("[setup] 一次性安装 token(仅本次启动有效,从本行复制): %s", SetupToken)
 }
 
-// CheckEnvironmentVariables 返回 /health 用的环境变量状态快照。
-func CheckEnvironmentVariables() map[string]interface{} {
-	// 一次性拿所有需要的快照,缩短锁占用窗口;后续只读本地变量。
-	opts := GetTTSOptions()
-	authKeys := GetAuthAPIKeys()
-	allowAll := GetCORSAllowAll()
-	origins := GetCORSOrigins()
-
-	required := map[string]bool{
-		"BYTEDANCE_TTS_API_KEY":     opts.APIKey != "",
-		"BYTEDANCE_TTS_RESOURCE_ID": opts.ResourceID != "",
-		"BYTEDANCE_TTS_SPEAKER":     opts.Speaker != "",
-	}
-	missing := []string{}
-	for k, ok := range required {
-		if !ok {
-			missing = append(missing, k)
-		}
-	}
-	optional := map[string]bool{
-		"BYTEDANCE_TTS_MODEL":             opts.Model != "",
-		"BYTEDANCE_TTS_FORMAT":            opts.Format != "mp3",
-		"BYTEDANCE_TTS_SAMPLE_RATE":       opts.SampleRate != 24000,
-		"BYTEDANCE_TTS_EXPLICIT_LANGUAGE": opts.Additions != nil && opts.Additions.ExplicitLanguage != "",
-		"OPENAI_TTS_API_KEY":              len(authKeys) > 0,
-		"ALLOWED_ORIGINS":                 allowAll || len(origins) > 0,
-		"PORT":                            Server.Port != common.DefaultPort,
-	}
-	return map[string]interface{}{
-		"all_required_vars_set": len(missing) == 0,
-		"missing_required_vars": missing,
-		"required_vars_set":     required,
-		"optional_vars_set":     optional,
-	}
-}
+// CheckEnvironmentVariables —— STAGE6 已**删除**。
+//
+// 它原本给 /health 的 config_status 提供"火山必填项是否齐备"的快照,
+// 而那套判定随渠道化一起消失了(见 README / 契约 §9)。
+// /health 只剩 db_not_ready 一个 503 条件。
 
 // LogStartupSummary 启动期一次性打印所有 Config 状态。
 func LogStartupSummary() {
@@ -640,46 +621,13 @@ func LogStartupSummary() {
 		log.Printf("TRUSTED_PROXY_HOPS: 精确模式,信任 %d 跳反代", h)
 	}
 
-	// 一次性拿 TTSOptions 快照;后续只读本地变量,避免在多个 log.Printf 调用之间
-	// 被 LoadRuntimeConfig 整体替换导致打印出不连贯的数据。
-	opts := GetTTSOptions()
-	log.Printf("火山 TTS 必填项状态:")
-	type ttsCheck struct {
-		name  string
-		value string
-		ok    bool
-	}
-	checks := []ttsCheck{
-		{"BYTEDANCE_TTS_API_KEY", maskAPIKey(opts.APIKey), opts.APIKey != ""},
-		{"BYTEDANCE_TTS_RESOURCE_ID", telemetry.MaskResourceID(opts.ResourceID), opts.ResourceID != ""},
-		// speaker 是火山复刻音色 ID(用户付费资产),日志里打码,避免明文落盘
-		{"BYTEDANCE_TTS_SPEAKER", telemetry.MaskSpeaker(opts.Speaker), opts.Speaker != ""},
-	}
-	missingCount := 0
-	for _, c := range checks {
-		mark := "✓"
-		if !c.ok {
-			mark = "✗"
-			missingCount++
-		}
-		val := c.value
-		if val == "" {
-			val = "(未设置)"
-		}
-		log.Printf("  %s %s: %s", mark, c.name, val)
-	}
-
-	if err := GetTTSConfigErr(); err != nil {
-		// STAGE5:这条"缺全局 TTS 配置"在渠道化之后**不再是服务不可用的原因**。
-		//
-		// 旧文案是"/v1/audio/speech 路由将全部返回 500",那在 STAGE5 已经是错的:
-		// 凭证由渠道自带,请求层只看"有没有 enabled 渠道",没有才返 503 no_channel
-		// (见 controller/tts.go)。留着旧文案会把排障引向错误方向。
-		log.Printf("火山 TTS 全局配置: 未就绪(%d 个必填项缺失)—— STAGE5 起不阻断服务,"+
-			"渠道自带凭证即可;仅当**无任何 enabled 渠道**时 /v1/audio/speech 返 503 no_channel", missingCount)
-	} else {
-		log.Printf("火山 TTS 整体: 初始化成功")
-	}
+	// STAGE6:不再打印"火山 TTS 必填项状态"。
+	//
+	// 那三项(api_key / default_resource_id / default_speaker)自 STAGE5 起就不再由
+	// setup 写入,每次启动都会打印三行 ✗,把排障引向"配置坏了"的错误方向 ——
+	// 实际上凭证在渠道里,服务是正常的。这里改为打印渠道无关的默认值。
+	log.Printf("TTS 默认值: 格式=%s 采样率=%d 超时=%v(凭证由渠道自带,不在此校验)",
+		GetDefaultFormat(), GetDefaultSampleRate(), GetTTSTimeout())
 }
 
 func maskAPIKey(key string) string {

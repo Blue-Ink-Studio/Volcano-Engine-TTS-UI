@@ -34,7 +34,10 @@ import (
 //	6 → STAGE5 Setup 改版 + 用户体系埋点:
 //	    users 补 role/user_group、channels 补 channel_group、is_admin 冻结(role 成唯一真源)、
 //	    owner 唯一性索引;并做一次**版本门控**的 is_admin → role 回填
-const schemaVersion = 6
+//	7 → STAGE6 多服务商聚合(渠道即模型):
+//	    voices **重建**(去掉表级 UNIQUE(name)、新增 channel_id、复合唯一 (channel_id,name))、
+//	    channels 补 default_voice、废弃 settings.default_speaker、清空历史音色
+const schemaVersion = 7
 
 // stage5SchemaVersion 是引入「is_admin → role 一次性回填」的那个版本号。
 //
@@ -43,6 +46,12 @@ const schemaVersion = 6
 // 回填被重跑。而重跑是破坏性的:is_admin 已冻结,`role='admin' WHERE is_admin=1`
 // 会把"曾提升、后降级"的账号**重新提权**(权限静默回弹)。
 const stage5SchemaVersion = 6
+
+// stage6SchemaVersion 是引入「voices 表重建」的那个版本号。
+//
+// 同样必须钉死在 7(引入时的版本),而不是引用 schemaVersion ——
+// 将来升到 8 时若用 schemaVersion 做门控,重建会**再次执行并清空音色**。
+const stage6SchemaVersion = 7
 
 // Store 是 SQLite 访问层的统一入口;所有 settings/voices 操作都通过它。
 type Store struct {
@@ -154,13 +163,24 @@ func (s *Store) migrate() error {
 		return fmt.Errorf("create settings: %w", err)
 	}
 
-	// voices 表(音色库)
+	// voices 表(音色库)。STAGE6 起音色**归属渠道**,渠道内 name 唯一。
+	//
+	// ⚠️ 为什么这里没有 `name TEXT NOT NULL UNIQUE`:
+	// 旧结构那行是**表级约束**,SQLite 会为它生成 sqlite_autoindex_voices_1,
+	// 而 `DROP INDEX` 删不掉表级约束 ⇒ 同名音色永远无法跨渠道共存(实测
+	// "UNIQUE constraint failed: voices.name")。STAGE6 因此改为重建表(见
+	// applyStage6Migration),基表 DDL 也同步成新结构 —— 否则全新库一旦迁移
+	// 失败(WARN 不阻断)就会**静默停留在全局唯一**,而且没有任何报错。
+	//
+	// 渠道内唯一性由 idx_voices_channel_name(channel_id, name) 保证;
+	// NULL channel_id 的行不参与该约束(SQLite 中 NULL 互不相等)。
 	if _, err := s.db.Exec(`
 		CREATE TABLE IF NOT EXISTS voices (
 			id          INTEGER PRIMARY KEY AUTOINCREMENT,
-			name        TEXT NOT NULL UNIQUE,
+			channel_id  INTEGER,
+			name        TEXT NOT NULL,
 			speaker     TEXT NOT NULL,
-			resource_id TEXT NOT NULL,
+			resource_id TEXT NOT NULL DEFAULT '',
 			model       TEXT DEFAULT '',
 			language    TEXT DEFAULT '',
 			description TEXT DEFAULT '',
@@ -170,9 +190,10 @@ func (s *Store) migrate() error {
 		)`); err != nil {
 		return fmt.Errorf("create voices: %w", err)
 	}
-	if _, err := s.db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_voices_name ON voices(name)`); err != nil {
-		return fmt.Errorf("create idx_voices_name: %w", err)
-	}
+
+	// ⚠️ 曾经这里还有一行 `CREATE UNIQUE INDEX idx_voices_name ON voices(name)`,
+	// STAGE6 已删除 —— 它与表级 UNIQUE 重复,且会让"渠道内同名"永久失败。
+	// 老库的这两个约束由 applyStage6Migration 重建表来消除。
 
 	// ⚠️ schema_version 的写入**不在这个位置** —— 它被移到 migrate() 末尾(STAGE5 §4.2)。
 	//
@@ -432,12 +453,123 @@ func (s *Store) migrate() error {
 		log.Printf("[store] WARN: 创建 owner 唯一性索引失败,降级为仅逻辑保证(不阻断启动): %v", err)
 	}
 
+	// ===== STAGE6:多服务商聚合(渠道即模型)=====
+	//
+	// 契约:docs/STAGE6_MULTI_PROVIDER_PLAN.md。三件事:
+	//   1. channels 补 default_voice(渠道级默认音色,取代全局 settings.default_speaker)
+	//   2. voices 补 channel_id + 复合唯一 (channel_id, name) —— 音色归属渠道
+	//   3. 一次性**重建** voices 表(去表级 UNIQUE(name)),版本门控
+	if err := s.ensureColumn("channels", "default_voice",
+		`default_voice TEXT NOT NULL DEFAULT ''`); err != nil {
+		return err
+	}
+	// 老库在这里补列;全新库的基表 DDL 已含该列(幂等)。
+	if err := s.ensureColumn("voices", "channel_id",
+		`channel_id INTEGER`); err != nil {
+		return err
+	}
+
+	// 复合唯一索引:全新库靠这一条就正确;老库随后会被重建覆盖(重建里再建一次)。
+	//
+	// 为什么放在重建**之前**也安全:老库此刻 channel_id 全为 NULL,
+	// SQLite 中 NULL 互不相等 ⇒ 不会因既有同名行而建索引失败。
+	// 这样即使重建失败(WARN 不阻断),全新库仍保有渠道内唯一性。
+	if _, err := s.db.Exec(`
+		CREATE UNIQUE INDEX IF NOT EXISTS idx_voices_channel_name
+		    ON voices(channel_id, name)`); err != nil {
+		log.Printf("[store] WARN: 创建 idx_voices_channel_name 失败(不阻断启动): %v", err)
+	}
+
+	// 一次性重建:仅在本库从 <7 升上来时执行。
+	//
+	// 不做门控的后果见 stage6SchemaVersion 的注释(升到 8 时会把音色再清空一次)。
+	if curVersion < stage6SchemaVersion {
+		if err := s.applyStage6Migration(); err != nil {
+			log.Printf("[store] WARN: STAGE6 voices 重建失败,不阻断启动(下次启动重跑): %v", err)
+		}
+	}
+
 	// 版本记账(与回填的原子标记互为兜底;此处 INSERT OR IGNORE 幂等)。
 	if _, err := s.db.Exec(`
 		INSERT OR IGNORE INTO schema_version (version) VALUES (?)`, schemaVersion); err != nil {
 		return fmt.Errorf("insert schema_version: %w", err)
 	}
 
+	return nil
+}
+
+// newVoicesDDL 是 STAGE6 重建后的 voices 表结构(单事务内使用)。
+//
+// 与基表 DDL 保持一致:**name 上没有表级 UNIQUE**。
+// 这是本迁移存在的全部理由 —— 旧结构 `name TEXT NOT NULL UNIQUE` 生成的
+// sqlite_autoindex_voices_1 无法用 DROP INDEX 删除,只能重建表。
+const newVoicesDDL = `CREATE TABLE voices_new (
+	id          INTEGER PRIMARY KEY AUTOINCREMENT,
+	channel_id  INTEGER,
+	name        TEXT NOT NULL,
+	speaker     TEXT NOT NULL,
+	resource_id TEXT NOT NULL DEFAULT '',
+	model       TEXT DEFAULT '',
+	language    TEXT DEFAULT '',
+	description TEXT DEFAULT '',
+	enabled     INTEGER NOT NULL DEFAULT 1,
+	created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+	updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
+)`
+
+// applyStage6Migration 是 6→7 的**一次性**迁移,单事务完成四件事:
+//
+//  1. 按新结构重建 voices(去掉表级 UNIQUE(name),引入 channel_id);
+//  2. **清空**音色(C12:无生产环境,不搬数据,由管理员按渠道重建);
+//  3. 建复合唯一索引 (channel_id, name);
+//  4. 写入版本号 —— **与 1~3 同事务**,这是本函数的结构性要求:
+//     版本不能先记后改数据,否则中途失败会导致下次启动跳过重建(§4.2)。
+//
+// 失败 → 整体回滚(表与版本都回到原状),上层降 WARN 不阻断启动,下次重跑。
+//
+// 注意:本函数必须用 tx,绝不能用 s.db —— Store 是 SetMaxOpenConns(1),
+// 事务持有期间用 s.db 会自锁(见 store/db.go 的 ensureColumn 注释)。
+func (s *Store) applyStage6Migration() error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return fmt.Errorf("store: stage6 migration begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	// 1) 新结构
+	if _, err := tx.Exec(newVoicesDDL); err != nil {
+		return fmt.Errorf("store: stage6 create voices_new: %w", err)
+	}
+
+	// 2) 清空重建(C12):DROP 旧表即清空,旧行不搬。
+	//    DROP TABLE 会连带删掉旧表上的 idx_voices_name 与 sqlite_autoindex_*。
+	if _, err := tx.Exec(`DROP TABLE voices`); err != nil {
+		return fmt.Errorf("store: stage6 drop old voices: %w", err)
+	}
+	if _, err := tx.Exec(`ALTER TABLE voices_new RENAME TO voices`); err != nil {
+		return fmt.Errorf("store: stage6 rename voices: %w", err)
+	}
+
+	// 3) 复合唯一:渠道内 name 唯一;NULL channel_id 行不受约束。
+	if _, err := tx.Exec(`
+		CREATE UNIQUE INDEX IF NOT EXISTS idx_voices_channel_name
+		    ON voices(channel_id, name)`); err != nil {
+		return fmt.Errorf("store: stage6 create idx_voices_channel_name: %w", err)
+	}
+
+	// 4) 版本记账 —— 必须与上面三步同事务提交。
+	//    表是 schema_version(version INTEGER PRIMARY KEY, applied_at),
+	//    不是 schema_meta(那张表从来不存在)。
+	if _, err := tx.Exec(`INSERT OR IGNORE INTO schema_version (version) VALUES (?)`,
+		stage6SchemaVersion); err != nil {
+		return fmt.Errorf("store: stage6 stamp version: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("store: stage6 migration commit: %w", err)
+	}
+	log.Printf("[store] STAGE6 迁移完成:voices 已重建(音色已清空,请在渠道下重新创建),schema_version=%d",
+		stage6SchemaVersion)
 	return nil
 }
 

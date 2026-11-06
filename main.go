@@ -11,6 +11,10 @@ import (
 
 	"github.com/volcano-tts/tts-api/controller"
 	// 空导入注册上游适配器:新增上游只需在此加一行,主干零改动。
+	// STAGE6:注册上游适配器(空导入,各自 init() 里 provider.Register)。
+	// 新增上游 = 写一个 adapter 包 + 在这里加一行。
+	_ "github.com/volcano-tts/tts-api/adapter/azure"
+	_ "github.com/volcano-tts/tts-api/adapter/openai"
 	_ "github.com/volcano-tts/tts-api/adapter/volcano"
 	"github.com/volcano-tts/tts-api/adapter/route"
 	"github.com/volcano-tts/tts-api/installer"
@@ -76,12 +80,14 @@ func main() {
 			len(routerChs), controller.CountEnabledChannels(routerChs))
 	}
 
-	// 4) M3: 从 store 加载运行时 TTS 配置(替代原来的 env-based InitTTSConfig)
-	// 必须在 LogStartupSummary 之前,这样日志显示的是真实状态(API key 已从 DB 加载,不再读 env)
+	// 4) M3: 从 store 加载运行时配置(默认格式/采样率/超时/全局调音参数)
+	// 必须在 LogStartupSummary 之前,这样日志显示的是真实状态。
 	//
-	// 模式区分:
-	//   - setup 模式 + 失败 = 正常(还没装), 警告即可
-	//   - normal 模式 + 失败 = 致命(已装但配置坏), fail-fast 让 K8s/进程管理器拉起
+	// STAGE6:这里**不存在"失败"概念了**。
+	//
+	// 旧的失败条件是"api_key / default_resource_id / default_speaker 三项必填"
+	// (STAGE5 起 setup 不再写它们,所以它恒为失败),且失败会让 /health 永久 503。
+	// 渠道化之后凭证在渠道里,加载运行时配置只剩"读几个默认值",读失败按默认值兜底即可。
 	if st != nil {
 		if err := setting.LoadRuntimeConfig(st); err != nil {
 			mode := installer.GetMode()
@@ -90,20 +96,12 @@ func main() {
 				modeName = "normal"
 			}
 			metrics.ConfigLoadFailures.Inc(telemetry.Labels{"mode": modeName})
-			// STAGE5(契约 §3):这里**不再 fail-fast**。
-			//
-			// 原因:STAGE5 起渠道凭证由渠道自带,setup 不再写 api_key /
-			// default_resource_id / default_speaker,因此 normal 模式下"缺全局 TTS 配置"
-			// 是**正常状态**。继续 Fatalf 会让"装完 → 重启"直接起不来(H1),
-			// 而且没有任何入口去补配置(要进设置页得先能启动)—— 是死锁。
-			//
-			// 服务可用性改由"是否有 enabled 渠道"决定,在请求层返 503 no_channel。
-			log.Printf("[main][WARN] TTS 全局配置未就绪(mode=%s,不阻断启动;渠道自带凭证即可服务): %v",
+			// 真·读库失败(不是"缺配置")才走到这里:降级用内置默认值,不阻断启动。
+			log.Printf("[main][WARN] 读取运行时配置失败(mode=%s,已回退内置默认值,不阻断启动): %v",
 				modeName, err)
 		} else {
-			opts := setting.GetTTSOptions()
-			log.Printf("[main] TTS 运行时配置已加载(api_key=***, speaker=%s, resource=%s, format=%s)",
-				telemetry.MaskSpeaker(opts.Speaker), telemetry.MaskResourceID(opts.ResourceID), opts.Format)
+			log.Printf("[main] 运行时配置已加载(默认格式=%s 默认采样率=%d 超时=%v;凭证由渠道自带)",
+				setting.GetDefaultFormat(), setting.GetDefaultSampleRate(), setting.GetTTSTimeout())
 		}
 	}
 

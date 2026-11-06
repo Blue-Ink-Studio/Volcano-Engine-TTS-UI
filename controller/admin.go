@@ -6,11 +6,13 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/gorilla/mux"
+	"github.com/volcano-tts/tts-api/adapter/provider"
 	"github.com/volcano-tts/tts-api/installer"
 	"github.com/volcano-tts/tts-api/middleware"
 	"github.com/volcano-tts/tts-api/store"
@@ -158,7 +160,10 @@ func AdminVoicesListHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 // AdminVoiceCreateRequest 是 POST /api/voices 的 body。
+//
+// STAGE6:必须带 channel_id(音色归属渠道)。resource_id 改为可选(非火山渠道没有)。
 type AdminVoiceCreateRequest struct {
+	ChannelID   int64  `json:"channel_id"`
 	Name        string `json:"name"`
 	Speaker     string `json:"speaker"`
 	ResourceID  string `json:"resource_id"`
@@ -193,7 +198,27 @@ func AdminVoiceCreateHandler(w http.ResponseWriter, r *http.Request) {
 		enabled = *body.Enabled
 	}
 
+	// STAGE6:channel_id 必填(G5)。store 侧也会校验,这里提前给出明确 code。
+	if body.ChannelID <= 0 {
+		middleware.SendJSONError(w, http.StatusBadRequest,
+			"channel_id is required", "invalid_request_error", "invalid_channel")
+		return
+	}
+	if _, chErr := s.ChannelGet(body.ChannelID); chErr != nil {
+		if errors.Is(chErr, store.ErrNotFound) {
+			middleware.SendJSONError(w, http.StatusBadRequest,
+				fmt.Sprintf("channel %d does not exist", body.ChannelID),
+				"invalid_request_error", "invalid_channel")
+			return
+		}
+		log.Printf("[admin] voice create check channel: %v", chErr)
+		middleware.SendJSONError(w, http.StatusInternalServerError, "channel lookup failed", "server_error", "db_read_failed")
+		return
+	}
+	chID := body.ChannelID
+
 	v := store.Voice{
+		ChannelID:   &chID,
 		Name:        body.Name,
 		Speaker:     body.Speaker,
 		ResourceID:  body.ResourceID,
@@ -205,16 +230,19 @@ func AdminVoiceCreateHandler(w http.ResponseWriter, r *http.Request) {
 	id, err := s.VoiceInsert(v)
 	if err != nil {
 		switch {
-		case err == store.ErrDuplicate:
+		case errors.Is(err, store.ErrDuplicate):
 			middleware.SendJSONError(w, http.StatusConflict,
-				fmt.Sprintf("voice name %q already exists", v.Name),
+				fmt.Sprintf("voice name %q already exists in this channel", v.Name),
 				"invalid_request_error", "voice_duplicate")
 		case errors.Is(err, store.ErrInvalid):
-			// 客户端输入不合法(name 格式 / speaker / resource_id 缺失):400。
-			// 走 ErrInvalid 哨兵 + 原始 detail,前端可以直接显示。
-			middleware.SendJSONError(w, http.StatusBadRequest,
-				stripInvalidPrefix(err.Error()),
-				"invalid_request_error", "voice_invalid")
+			// 客户端输入不合法(name 格式 / speaker 缺失 / channel 不存在):400。
+			// channel 相关的 ErrInvalid 优先翻成 invalid_channel,前端据此定位表单字段。
+			msg := stripInvalidPrefix(err.Error())
+			code := "voice_invalid"
+			if strings.Contains(msg, "channel_id") || strings.Contains(msg, "channel") {
+				code = "invalid_channel"
+			}
+			middleware.SendJSONError(w, http.StatusBadRequest, msg, "invalid_request_error", code)
 		default:
 			// 兜底:DB 连接失败 / Exec 错误 / LastInsertId 失败等都是服务端问题,
 			// 返 500 + 通用 message,详细 err 走日志(不直接暴露给前端,避免信息泄漏)。
@@ -230,7 +258,9 @@ func AdminVoiceCreateHandler(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(created)
 }
 
-// AdminVoiceDeleteHandler DELETE /api/voices/{name}
+// AdminVoiceDeleteHandler DELETE /api/voices/{id}
+//
+// STAGE6(M3):按 **id** 寻址。同名音色可属不同渠道,`{name}` 已无法定位唯一行。
 func AdminVoiceDeleteHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodDelete {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -241,46 +271,43 @@ func AdminVoiceDeleteHandler(w http.ResponseWriter, r *http.Request) {
 		middleware.SendJSONError(w, http.StatusServiceUnavailable, "database not ready", "configuration_error", "db_not_ready")
 		return
 	}
-	name := mux.Vars(r)["name"]
-	if name == "" {
-		middleware.SendJSONError(w, http.StatusBadRequest, "missing voice name", "invalid_request_error", "bad_request")
+	id, ok := parseVoiceIDPath(w, r)
+	if !ok {
 		return
 	}
 
-	v, err := s.VoiceGetByName(name)
+	// 先取一次:① 404 判断;② 删除成功后回显被删的名字/渠道,便于前端提示
+	v, err := s.VoiceGet(id)
 	if err != nil {
-		if err == store.ErrNotFound {
+		if errors.Is(err, store.ErrNotFound) {
 			http.Error(w, "voice not found", http.StatusNotFound)
 			return
 		}
-		log.Printf("[admin] voice lookup: %v", err)
+		log.Printf("[admin] voice lookup id=%d: %v", id, err)
 		middleware.SendJSONError(w, http.StatusInternalServerError, "lookup failed", "server_error", "db_read_failed")
 		return
 	}
-	if err := s.VoiceDelete(v.ID); err != nil {
-		switch err {
-		case store.ErrInUse:
-			middleware.SendJSONError(w, http.StatusConflict,
-				fmt.Sprintf("voice %q is referenced by default_speaker; remove the default first", name),
-				"invalid_request_error", "voice_in_use")
-		case store.ErrNotFound:
+
+	if err := s.VoiceDelete(id); err != nil {
+		// STAGE6:ErrInUse 已退役(全局 default_speaker 已废弃),删除不再被拒。
+		if errors.Is(err, store.ErrNotFound) {
 			http.Error(w, "voice not found", http.StatusNotFound)
-		default:
-			log.Printf("[admin] voice delete: %v", err)
-			middleware.SendJSONError(w, http.StatusInternalServerError, "delete failed", "server_error", "db_write_failed")
+			return
 		}
+		log.Printf("[admin] voice delete id=%d: %v", id, err)
+		middleware.SendJSONError(w, http.StatusInternalServerError, "delete failed", "server_error", "db_write_failed")
 		return
 	}
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "deleted": name})
+	_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "deleted": v.Name, "id": id})
 }
 
-// AdminVoiceToggleRequest 是 PATCH /api/voices/{name}/toggle 的 body。
+// AdminVoiceToggleRequest 是 PATCH /api/voices/{id}/toggle 的 body。
 type AdminVoiceToggleRequest struct {
 	Enabled bool `json:"enabled"`
 }
 
-// AdminVoiceToggleHandler PATCH /api/voices/{name}/toggle
+// AdminVoiceToggleHandler PATCH /api/voices/{id}/toggle
 func AdminVoiceToggleHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPatch {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -291,35 +318,59 @@ func AdminVoiceToggleHandler(w http.ResponseWriter, r *http.Request) {
 		middleware.SendJSONError(w, http.StatusServiceUnavailable, "database not ready", "configuration_error", "db_not_ready")
 		return
 	}
-	name := mux.Vars(r)["name"]
-	if name == "" {
-		middleware.SendJSONError(w, http.StatusBadRequest, "missing voice name", "invalid_request_error", "bad_request")
+	id, ok := parseVoiceIDPath(w, r)
+	if !ok {
 		return
 	}
-	v, err := s.VoiceGetByName(name)
-	if err != nil {
-		if err == store.ErrNotFound {
-			http.Error(w, "voice not found", http.StatusNotFound)
-			return
-		}
-		log.Printf("[admin] voice lookup: %v", err)
-		middleware.SendJSONError(w, http.StatusInternalServerError, "lookup failed", "server_error", "db_read_failed")
-		return
-	}
+
 	var body AdminVoiceToggleRequest
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<10)
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		middleware.SendJSONError(w, http.StatusBadRequest, "invalid JSON body", "invalid_request_error", "bad_request")
 		return
 	}
-	if err := s.VoiceToggleEnabled(v.ID, body.Enabled); err != nil {
-		log.Printf("[admin] voice toggle: %v", err)
+	if err := s.VoiceToggleEnabled(id, body.Enabled); err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			http.Error(w, "voice not found", http.StatusNotFound)
+			return
+		}
+		log.Printf("[admin] voice toggle id=%d: %v", id, err)
 		middleware.SendJSONError(w, http.StatusInternalServerError, "toggle failed", "server_error", "db_write_failed")
 		return
 	}
-	updated, _ := s.VoiceGet(v.ID)
+	updated, _ := s.VoiceGet(id)
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	_ = json.NewEncoder(w).Encode(updated)
+}
+
+// AdminProvidersHandler GET /api/admin/providers —— 返回已注册的上游适配器名。
+//
+// STAGE6(契约 §8.2):渠道管理页用它渲染 provider 下拉,避免前端硬编码列表
+// (新增上游只需在 main.go 加一行空导入,前端自动就能选到)。
+//
+// 只服务**管理端**(G3):它挂 RequireAdminOrJWT,普通用户 JWT 调会 401 ——
+// 所以"门户展示可用 model 列表"不能复用它,那是另一个(user-facing)接口,本期不做。
+func AdminProvidersHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"providers": provider.Names(),
+	})
+}
+
+// parseVoiceIDPath 从 path 取并校验 voice id;失败已写好 400 响应,返回 ok=false。
+func parseVoiceIDPath(w http.ResponseWriter, r *http.Request) (int64, bool) {
+	raw := mux.Vars(r)["id"]
+	id, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil || id <= 0 {
+		middleware.SendJSONError(w, http.StatusBadRequest,
+			fmt.Sprintf("invalid voice id %q", raw), "invalid_request_error", "invalid_id")
+		return 0, false
+	}
+	return id, true
 }
 
 // stripInvalidPrefix 把 wrap 后的 ErrInvalid 错误字符串中的 "store: voice invalid: " 前缀剥掉,

@@ -46,6 +46,9 @@ type channelView struct {
 	Voices          string `json:"voices"`
 	// ChannelGroup 是渠道可服务的用户组集合 CSV(STAGE5 埋点,本期不参与路由)。
 	ChannelGroup string `json:"channel_group"`
+	// DefaultVoice 是渠道级默认音色(STAGE6):请求不带 voice 时用它。
+	// 空 = 请求必须自带 voice(否则 400 voice_required)。
+	DefaultVoice string `json:"default_voice"`
 	Priority     int    `json:"priority"`
 	Weight       int    `json:"weight"`
 	Status       int    `json:"status"`
@@ -65,6 +68,8 @@ type channelCreateReq struct {
 	Voices      string                `json:"voices"`
 	// ChannelGroup:组集合 CSV,省略 → "default"(STAGE5 §3.3,本期只落数据)
 	ChannelGroup string `json:"channel_group"`
+	// DefaultVoice:渠道级默认音色(STAGE6,必须在渠道内之后才可设;创建时留空即可)
+	DefaultVoice string `json:"default_voice"`
 	Priority     int    `json:"priority"`
 	Weight       int    `json:"weight"`
 	Status       int    `json:"status"`
@@ -77,6 +82,7 @@ type channelUpdateReq struct {
 	Credentials  *provider.Credentials `json:"credentials"` // 整体替换(缺省=不改)
 	Voices       *string               `json:"voices"`
 	ChannelGroup *string               `json:"channel_group"` // STAGE5:组集合 CSV
+	DefaultVoice *string               `json:"default_voice"` // STAGE6:渠道级默认音色(空串=清空)
 	Priority     *int                  `json:"priority"`
 	Weight       *int                  `json:"weight"`
 	Status       *int                  `json:"status"`
@@ -215,6 +221,7 @@ func viewFromStore(c store.Channel, mask bool) channelView {
 		CredentialsJSON: creds,
 		Voices:          c.Voices,
 		ChannelGroup:    c.ChannelGroup,
+		DefaultVoice:    c.DefaultVoice,
 		Priority:        c.Priority,
 		Weight:          c.Weight,
 		Status:          c.Status,
@@ -337,7 +344,16 @@ func ChannelsCreateHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Provider == "" {
 		middleware.SendJSONError(w, http.StatusBadRequest,
-			"provider is required", "invalid_request_error", "missing_provider")
+			"provider is required", "invalid_request_error", "invalid_provider")
+		return
+	}
+	// STAGE6(M7):建渠道时即校验 provider 已注册。
+	// 旧实现对 provider 名不做任何校验,管理员能建出一个 provider=foo 的渠道,
+	// 直到第一次调用才在运行时 503 provider_unavailable —— 属于"配了但永远用不了"的坑。
+	if _, ok := provider.Get(req.Provider); !ok {
+		middleware.SendJSONError(w, http.StatusBadRequest,
+			fmt.Sprintf("unknown provider %q; registered: %s", req.Provider, strings.Join(provider.Names(), ", ")),
+			"invalid_request_error", "invalid_provider")
 		return
 	}
 	if req.Credentials == nil {
@@ -370,6 +386,7 @@ func ChannelsCreateHandler(w http.ResponseWriter, r *http.Request) {
 		CredentialsJSON: credsJSON,
 		Voices:          req.Voices,
 		ChannelGroup:    req.ChannelGroup, // 空 → store 层填 "default"
+		DefaultVoice:    req.DefaultVoice, // 空 → 该渠道请求必须自带 voice
 		Priority:        req.Priority,
 		Weight:          req.Weight,
 		Status:          req.Status,
@@ -390,8 +407,10 @@ func ChannelsCreateHandler(w http.ResponseWriter, r *http.Request) {
 			middleware.SendJSONError(w, http.StatusConflict,
 				"channel name already exists", "invalid_request_error", "channel_duplicate")
 		case errors.Is(err, store.ErrInvalid):
+			// STAGE6:渠道名不合法 = 对外 model 名不合法(客户端请求不出来),
+			// 统一翻成 invalid_channel,而不是泛化的 bad_request。
 			middleware.SendJSONError(w, http.StatusBadRequest,
-				err.Error(), "invalid_request_error", "bad_request")
+				err.Error(), "invalid_request_error", "invalid_channel")
 		default:
 			log.Printf("[channels] insert: %v", err)
 			middleware.SendJSONError(w, http.StatusInternalServerError,
@@ -460,6 +479,11 @@ func ChannelsUpdateHandler(w http.ResponseWriter, r *http.Request) {
 		v := *req.Voices
 		upd.Voices = &v
 	}
+	// STAGE6:渠道级默认音色(空串 = 清空)。存在性由 store 层校验(必须在本渠道内)。
+	if req.DefaultVoice != nil {
+		v := *req.DefaultVoice
+		upd.DefaultVoice = &v
+	}
 	if req.Priority != nil {
 		upd.Priority = req.Priority
 	}
@@ -503,8 +527,11 @@ func ChannelsUpdateHandler(w http.ResponseWriter, r *http.Request) {
 			middleware.SendJSONError(w, http.StatusConflict,
 				"channel name already exists", "invalid_request_error", "channel_duplicate")
 		case errors.Is(err, store.ErrInvalid):
+			// STAGE6:渠道名/默认音色不合法都走 ErrInvalid。
+			// 名字不合法是"model 名不合法"(客户端请求不出来) → invalid_channel;
+			// 默认音色不存在也归到 invalid_channel(前端知道是渠道配置问题)。
 			middleware.SendJSONError(w, http.StatusBadRequest,
-				err.Error(), "invalid_request_error", "bad_request")
+				err.Error(), "invalid_request_error", "invalid_channel")
 		default:
 			log.Printf("[channels] update id=%d: %v", id, err)
 			middleware.SendJSONError(w, http.StatusInternalServerError,
@@ -632,11 +659,38 @@ func ChannelsTestHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 测活模板:沿用 setting 快照的 default voice(已解析过 upstream speaker)+ 本渠道凭据
-	// 决策 D:避免 voice 解析失败污染测活判断
-	tmpl := setting.GetTTSRequest()
-	tmpl.Text = "test"
-	tmpl.Format = "mp3"
+	// 测活模板:STAGE6 起渠道自带音色,用**该渠道的默认音色**(没有就取该渠道第一条启用音色)
+	// 解析出上游 speaker 再测。决策 D:避免 voice 解析失败污染测活判断 ——
+	// 所以真的没有音色时,退化为"只测鉴权/连通性"的空音色请求(上游会返回明确的错误)。
+	tmpl := provider.Request{
+		Text:       "test",
+		Format:     "mp3",
+		SampleRate: setting.GetDefaultSampleRate(),
+		Extra:      setting.GetGlobalExtras(),
+	}
+	probeVoice := strings.TrimSpace(sc.DefaultVoice)
+	if probeVoice == "" {
+		if list, lErr := s.VoiceList(false); lErr == nil {
+			for _, vv := range list {
+				if vv.ChannelID != nil && *vv.ChannelID == sc.ID {
+					probeVoice = vv.Name
+					break
+				}
+			}
+		}
+	}
+	if probeVoice != "" {
+		if v, vErr := s.VoiceResolve(sc.ID, probeVoice); vErr == nil {
+			tmpl.VoiceKey = v.Speaker
+			tmpl.Model = v.Model
+			if v.ResourceID != "" {
+				if tmpl.Credentials.Scope == nil {
+					tmpl.Credentials.Scope = map[string]string{}
+				}
+				tmpl.Credentials.Scope["resource_id"] = v.ResourceID
+			}
+		}
+	}
 	tmpl.Credentials = rc.Credentials
 
 	// 单独 ctx(短超时,不沿用 r.Context 防止 admin 客户端断开导致测活中断)

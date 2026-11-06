@@ -15,7 +15,6 @@ import (
 	"unicode/utf8"
 
 	"github.com/volcano-tts/tts-api/adapter/provider"
-	"github.com/volcano-tts/tts-api/adapter/route"
 	"github.com/volcano-tts/tts-api/billing"
 	"github.com/volcano-tts/tts-api/common"
 	"github.com/volcano-tts/tts-api/dto"
@@ -207,54 +206,133 @@ func OpenaiTTSHandler(w http.ResponseWriter, r *http.Request) {
 
 	clientFormat := resolveClientFormat(req.ResponseFormat)
 
-	ttsReq := setting.GetTTSRequest()
-	ttsReq.Text = req.Input
-	ttsReq.Format = clientFormat
-	ttsReq.Speed = speed
-
-	// M3: voice 路由
-	//   - voice 为空 → 走 LoadRuntimeConfig 解析过的默认音色(GetTTSRequest 已带)
-	//   - voice 非空 → 查 voices 表,替换 VoiceKey / resource_id / Model
-	//   - 命中但 enabled=0 → 拒绝;未命中 → 400 "unknown voice: <name>"
-	if req.Voice != "" {
-		s := GetAdminStore()
-		if s == nil {
-			log.Printf("警告: voice=%s 路由但 store 未初始化 - 路径=%s", req.Voice, r.URL.Path)
-			middleware.SendJSONError(w, http.StatusServiceUnavailable,
-				"voice routing requires database; not initialized",
-				"configuration_error", "db_not_ready")
-			return
-		}
-		v, err := s.VoiceGetByName(req.Voice)
-		if err != nil {
-			if err == store.ErrNotFound {
-				log.Printf("警告: 未知 voice=%q - 路径=%s 客户端=%s", req.Voice, r.URL.Path, middleware.GetClientIP(r))
-				middleware.SendJSONError(w, http.StatusBadRequest,
-					fmt.Sprintf("unknown voice: '%s'", req.Voice),
-					"invalid_request_error", "unknown_voice")
-				return
-			}
-			log.Printf("警告: voice 查库失败 - 错误=%v voice=%s", err, req.Voice)
-			middleware.SendJSONError(w, http.StatusInternalServerError,
-				"voice lookup failed", "server_error", "db_read_failed")
-			return
-		}
-		// 覆盖音色与厂商凭证(API key / 其它私有参数保留自 GetTTSRequest 快照)
-		if !v.Enabled {
-			log.Printf("警告: voice=%q 已禁用 - 客户端=%s", req.Voice, middleware.GetClientIP(r))
-			middleware.SendJSONError(w, http.StatusForbidden,
-				fmt.Sprintf("voice '%s' is disabled", req.Voice),
-				"invalid_request_error", "voice_disabled")
-			return
-		}
-		ttsReq.VoiceKey = v.Speaker
-		ttsReq.Credentials.Scope["resource_id"] = v.ResourceID
-		if v.Model != "" {
-			ttsReq.Model = v.Model
-		}
-		log.Printf("[tts] voice=%s 命中 (speaker=%s resource=%s model=%s) - 客户端=%s",
-			req.Voice, telemetry.MaskSpeaker(v.Speaker), telemetry.MaskResourceID(v.ResourceID), v.Model, middleware.GetClientIP(r))
+	// ===== STAGE6:model → 渠道 → 渠道内音色 =====
+	//
+	// 契约 docs/STAGE6_MULTI_PROVIDER_PLAN.md §5。判定顺序固定:
+	//   鉴权 → db_not_ready → no_channel(上面已判) → [body] →
+	//   model_required → unknown_model → voice_required → unknown_voice → 预扣 → 合成
+	//
+	// 全部在**预扣之前**完成:参数不合法就不该先扣钱再退(减少额度抖动)。
+	db := GetAdminStore()
+	if db == nil {
+		log.Printf("警告: 渠道路由但 store 未初始化 - 路径=%s", r.URL.Path)
+		middleware.SendJSONError(w, http.StatusServiceUnavailable,
+			"voice routing requires database; not initialized",
+			"configuration_error", "db_not_ready")
+		return
 	}
+
+	// 1) model 必填(渠道即模型:model 就是渠道名)
+	modelName := strings.TrimSpace(req.Model)
+	if modelName == "" {
+		log.Printf("警告: 请求未带 model - 路径=%s 客户端=%s", r.URL.Path, middleware.GetClientIP(r))
+		middleware.SendJSONError(w, http.StatusBadRequest,
+			"model is required; use the channel name as model. "+availableModelsHint(db),
+			"invalid_request_error", "model_required")
+		return
+	}
+
+	// 2) 精确命中唯一渠道(channels.name 有 UNIQUE 约束)
+	ch, err := db.ChannelGetByName(modelName)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			log.Printf("警告: 未知 model=%q - 路径=%s 客户端=%s", modelName, r.URL.Path, middleware.GetClientIP(r))
+			middleware.SendJSONError(w, http.StatusBadRequest,
+				fmt.Sprintf("unknown model: '%s'. %s", modelName, availableModelsHint(db)),
+				"invalid_request_error", "unknown_model")
+			return
+		}
+		log.Printf("警告: model 查库失败 - 错误=%v model=%s", err, modelName)
+		middleware.SendJSONError(w, http.StatusInternalServerError,
+			"model lookup failed", "server_error", "db_read_failed")
+		return
+	}
+	// 命中但已禁用:同一个 code,但 message 明确说 disabled ——
+	// 否则管理员看到 unknown_model 会去查拼写,而不是看渠道状态(G7)。
+	if ch.Status != 1 {
+		log.Printf("警告: model=%q 对应的渠道已禁用 - channel_id=%d 客户端=%s",
+			modelName, ch.ID, middleware.GetClientIP(r))
+		middleware.SendJSONError(w, http.StatusBadRequest,
+			fmt.Sprintf("model '%s' is disabled", modelName),
+			"invalid_request_error", "unknown_model")
+		return
+	}
+
+	// 3) 音色:请求未带 → 用渠道默认音色;仍为空 → voice_required
+	voiceName := strings.TrimSpace(req.Voice)
+	if voiceName == "" {
+		voiceName = ch.DefaultVoice
+		if voiceName == "" {
+			log.Printf("警告: model=%q 未带 voice 且渠道无默认音色 - 客户端=%s",
+				modelName, middleware.GetClientIP(r))
+			middleware.SendJSONError(w, http.StatusBadRequest,
+				fmt.Sprintf("voice is required for model '%s' (channel has no default voice)", modelName),
+				"invalid_request_error", "voice_required")
+			return
+		}
+	}
+
+	// 4) 在该渠道内解析音色(同名音色可属不同渠道,必须带 channelID)
+	v, err := db.VoiceResolve(ch.ID, voiceName)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			log.Printf("警告: 渠道 %q 内无音色 %q - 客户端=%s",
+				modelName, voiceName, middleware.GetClientIP(r))
+			middleware.SendJSONError(w, http.StatusBadRequest,
+				fmt.Sprintf("unknown voice: '%s' for model '%s'", voiceName, modelName),
+				"invalid_request_error", "unknown_voice")
+			return
+		}
+		log.Printf("警告: voice 查库失败 - 错误=%v voice=%s", err, voiceName)
+		middleware.SendJSONError(w, http.StatusInternalServerError,
+			"voice lookup failed", "server_error", "db_read_failed")
+		return
+	}
+	if !v.Enabled {
+		log.Printf("警告: voice=%q 已禁用 - 客户端=%s", voiceName, middleware.GetClientIP(r))
+		middleware.SendJSONError(w, http.StatusForbidden,
+			fmt.Sprintf("voice '%s' is disabled", voiceName),
+			"invalid_request_error", "voice_disabled")
+		return
+	}
+
+	// 5) 构造渠道无关的 provider.Request(B8)。
+	//
+	// 三个 model 的流向(契约 §6)必须分清:
+	//   - 对外 model = ch.Name      → usage.model / 日志 / 响应(记在 publicModel)
+	//   - 上游 model = v.Model      → ttsReq.Model(空则由 adapter 用自己的默认值,G6)
+	//   - 火山复刻 model = settings.model → 通过 Request.Extra["model"] 透传
+	creds, credErr := unmarshalCredentials(ch.CredentialsJSON)
+	if credErr != nil {
+		log.Printf("警告: 渠道凭据损坏 channel_id=%d - 错误=%v", ch.ID, credErr)
+		middleware.SendJSONError(w, http.StatusServiceUnavailable,
+			"channel credentials corrupted", "configuration_error", "channel_credentials_invalid")
+		return
+	}
+	if v.ResourceID != "" {
+		// 火山需要 resource_id;其它 provider 会忽略 Scope(A4)。
+		if creds.Scope == nil {
+			creds.Scope = map[string]string{}
+		}
+		creds.Scope["resource_id"] = v.ResourceID
+	}
+
+	publicModel := ch.Name
+	ttsReq := provider.Request{
+		Text:        req.Input,
+		VoiceKey:    v.Speaker,
+		Model:       v.Model,
+		Format:      clientFormat,
+		SampleRate:  setting.GetDefaultSampleRate(),
+		Speed:       speed,
+		Extra:       setting.GetGlobalExtras(),
+		Credentials: creds,
+	}
+
+	log.Printf("[tts] 命中 model=%s channel_id=%d provider=%s voice=%s (speaker=%s resource=%s upstream_model=%s) - 客户端=%s",
+		publicModel, ch.ID, ch.Provider, voiceName,
+		telemetry.MaskSpeaker(v.Speaker), telemetry.MaskResourceID(v.ResourceID), v.Model,
+		middleware.GetClientIP(r))
 
 	// ===== 阶段 3b:配额预扣 =====
 	//
@@ -313,9 +391,12 @@ func OpenaiTTSHandler(w http.ResponseWriter, r *http.Request) {
 	if billSess != nil {
 		defer func() {
 			// no-op 条件:成功路径已 Settle(closed=true);setup 模式 billSess=nil
+			//
+			// 退款流水里的 model 用**对外 model**(channel.Name),与 settleUsage 一致 ——
+			// 否则同一次请求的预扣/成功/失败三条流水会落在两个不同的 model 上,对账对不上。
 			if err := billSess.Refund(store.Usage{
 				RequestID:  localReqID,
-				Model:      ttsReq.Model,
+				Model:      publicModel,
 				Characters: chars,
 			}); err != nil {
 				log.Printf("[billing] 兜底退款失败 token_id=%d req_id=%s: %v",
@@ -327,97 +408,69 @@ func OpenaiTTSHandler(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), setting.GetTTSTimeout())
 	defer cancel()
 
-	// 阶段 1:多渠道路由分发
-	//   - router 未注入(等于未配置 channels)→ 走 setting 兜底,行为=阶段 0
-	//   - router 注入了但无任何 channel → 同样走 setting 兜底
-	//   - router 注入了且有 channel → 走 SelectAndSynthesize:按 priority/weight 选
-	//     渠道,Channel.Credentials 整份覆盖 template.Credentials(意味着
-	//     上面 voice 路由对 Scope["resource_id"] 的覆盖会被 Channel 接管——
-	//     这是阶段 1 的设计取舍,Channel 自带完整账号凭据,voice 路由仅用于
-	//     解析上游 speaker ID → ttsReq.VoiceKey,凭据部分由 Channel 决定)
-	//   - voice 不被任一 channel 接受 → router.Select 返 ErrVoiceNotFound,转 400
-	//   - 所有 channel 都失败 → router 返 *route.AggregateError,转 500(日志逐个打印)
-	rtr := GetRouter()
-	if rtr == nil || rtr.Empty() {
-		prov, ok := provider.Get(setting.GetDefaultProviderName())
-		if !ok {
-			log.Printf("警告: 未注册上游适配器=%s - 客户端=%s", setting.GetDefaultProviderName(), middleware.GetClientIP(r))
-			middleware.SendJSONError(w, http.StatusServiceUnavailable,
-				"no upstream adapter registered", "configuration_error", "provider_unavailable")
-			return
-		}
-		result, err := prov.Synthesize(ctx, ttsReq, adapterRec)
-		duration := time.Since(start)
-		// 兜底路径:无 channel 命中,channelID=nil
-		finalizeSynth(w, ttsReq, req.Input, clientFormat, result, err, duration, r.URL.Path,
-			caller, nil, billSess, localReqID)
+	// ===== STAGE6:直接调命中渠道的 provider =====
+	//
+	// 不再经 route.Router.Select / SelectAndSynthesize(B5):
+	// 「渠道即模型」下一个 model 精确对应**唯一**渠道,优先级/加权随机没有意义。
+	// 与之配套,channels.priority / weight / auto_ban 本期**暂不生效**(字段保留,
+	// 等做"model → 渠道组"时再启用)。
+	//
+	// 零渠道兜底分支(STAGE5 前 rtr.Empty() → setting 默认 provider)已删除(B7):
+	// 上面 `CountEnabledChannels(...) == 0` 已经 503 no_channel,那条路径不可能到达。
+	prov, ok := provider.Get(ch.Provider)
+	if !ok {
+		log.Printf("警告: 渠道 provider 未注册 channel_id=%d provider=%q - 客户端=%s",
+			ch.ID, ch.Provider, middleware.GetClientIP(r))
+		middleware.SendJSONError(w, http.StatusServiceUnavailable,
+			"provider not registered: "+ch.Provider,
+			"configuration_error", "provider_unavailable")
 		return
 	}
 
-	// 选渠道路径:以"对外 voice 名"(req.Voice,可能为空表示用默认音色)为过滤键。
-	// 客户端未传 voice 时 req.Voice=="";Channel.Voices 接受一切(空白名单)时也会匹配。
-	// 这里需要先看 router 是否能接受这个 voice:
-	if _, selErr := rtr.Select(req.Voice); selErr != nil {
-		if selErr == route.ErrNoChannels {
-			// 中途被禁用 / 删空:降级到兜底,避免硬挂
-			prov, ok := provider.Get(setting.GetDefaultProviderName())
-			if !ok {
-				middleware.SendJSONError(w, http.StatusServiceUnavailable,
-					"no upstream adapter registered", "configuration_error", "provider_unavailable")
-				return
-			}
-			result, err := prov.Synthesize(ctx, ttsReq, adapterRec)
-			duration := time.Since(start)
-			// 降级到兜底,channelID=nil
-			finalizeSynth(w, ttsReq, req.Input, clientFormat, result, err, duration, r.URL.Path,
-				caller, nil, billSess, localReqID)
-			return
-		}
-		if errors.Is(selErr, route.ErrVoiceNotFound) {
-			log.Printf("警告: voice=%q 不被任何渠道支持 - 路径=%s 客户端=%s",
-				req.Voice, r.URL.Path, middleware.GetClientIP(r))
-			middleware.SendJSONError(w, http.StatusBadRequest,
-				fmt.Sprintf("voice '%s' is not supported by any channel", req.Voice),
-				"invalid_request_error", "voice_not_found")
-			return
-		}
-		log.Printf("警告: 渠道选择失败 - 错误=%v 路径=%s 客户端=%s",
-			selErr, r.URL.Path, middleware.GetClientIP(r))
-		middleware.SendJSONError(w, http.StatusInternalServerError,
-			"channel selection failed", "server_error", "route_error")
-		return
-	}
-
-	result, ch, err := rtr.SelectAndSynthesize(ctx, req.Voice, ttsReq, 3, adapterRec)
-	if err == nil && ch != nil {
-		log.Printf("[tts] 渠道选择命中 channel_id=%d name=%s provider=%s priority=%d weight=%d - 客户端=%s",
-			ch.ID, ch.Name, ch.Provider, ch.Priority, ch.Weight, middleware.GetClientIP(r))
-	}
+	result, synthErr := prov.Synthesize(ctx, ttsReq, adapterRec)
 	duration := time.Since(start)
-	// 选渠道路径:成功时 channelID=&ch.ID,失败时 nil(失败路径 recordUsage 跳过)
-	var channelID *int64
-	if ch != nil {
-		id := ch.ID
-		channelID = &id
+	chID := ch.ID
+	finalizeSynth(w, ttsReq, publicModel, req.Input, clientFormat, result, synthErr, duration, r.URL.Path,
+		caller, &chID, billSess, localReqID)
+}
+
+// availableModelsHint 返回"可用 model(渠道名)"的提示串,用于 model 相关报错的 message。
+//
+// 为什么不直接返回 JSON 数组:错误 message 是给人看的(客户端开发者一眼知道该传什么),
+// 前端仍按 code 分支。渠道数很多时截断,避免错误体膨胀。
+func availableModelsHint(db *store.Store) string {
+	list, err := db.ChannelList(false)
+	if err != nil || len(list) == 0 {
+		return "No enabled channel is configured yet."
 	}
-	finalizeSynth(w, ttsReq, req.Input, clientFormat, result, err, duration, r.URL.Path,
-		caller, channelID, billSess, localReqID)
+	const maxShow = 10
+	names := make([]string, 0, len(list))
+	for i, c := range list {
+		if i >= maxShow {
+			names = append(names, fmt.Sprintf("... (%d more)", len(list)-maxShow))
+			break
+		}
+		names = append(names, c.Name)
+	}
+	return "Available models: " + strings.Join(names, ", ")
 }
 
 // finalizeSynth 把"合成结果 → 响应 + metrics + 日志 + 计费结算"收敛到一处。
-// 阶段 1 改造后,这个函数同时被 3 个分支调用:
-//   1. 零 channel 兜底(直接调 setting 默认 provider)
-//   2. Select 报 ErrNoChannels 降级(同上)
-//   3. SelectAndSynthesize 完整路径
+//
+// STAGE6:调用点只剩一处(model→channel→voice 精确命中),因此去掉了原来的三个分支。
+//
+// publicModel 是**对外 model**(= channel.Name),用于 metrics label 与 usage.model;
+// ttsReq.Model 是**上游 model**(= voices.model),不再出现在对账口径里 —— 二者
+// 一旦混用,usage 会把 openai-main 记成 tts-1(契约 §6.2)。
 //
 // 阶段 3a:成功路径写 usage。阶段 3b:改用 billing 会话结算(多退少补 + 计费列);
-// 失败路径不再在这里退款 —— 由 OpenaiTTSHandler 的 defer 兜底退款统一处理,
-// 好处是"provider 未注册 / voice 不匹配"这类提前 return 也自动退款,不会漏。
+// 失败路径不在这里退款 —— 由 OpenaiTTSHandler 的 defer 兜底退款统一处理。
 //
-// bill 为 nil 表示不计费(setup 模式或无身份),此时跳过结算(沿用阶段 0 行为)。
+// bill 为 nil 表示不计费(setup 模式或无身份),此时跳过结算。
 func finalizeSynth(
 	w http.ResponseWriter,
 	ttsReq provider.Request,
+	publicModel string,
 	inputText string,
 	clientFormat string,
 	result *dto.SynthesisResult,
@@ -430,19 +483,20 @@ func finalizeSynth(
 	localReqID string,
 ) {
 	finalLabels := telemetry.Labels{
-		"format":  clientFormat,
-		// speaker 是火山复刻音色 ID(用户付费资产),不能直接出现在 /metrics label 里
+		"format": clientFormat,
+		// speaker 是上游音色 ID(用户付费资产),不能直接出现在 /metrics label 里
 		//(无鉴权可枚举)。用 sha1[:8] 替代:同 speaker 同 label 保留 per-voice 观测,
 		//但反推不出原值。Admin UI 想要看原名通过 /api/voices 拿 name 字段。
 		"speaker": telemetry.SpeakerLabel(ttsReq.VoiceKey),
-		"model":   ttsReq.Model,
+		// model label 用**对外 model**(渠道名),它才是客户端看到/计费口径的值。
+		"model": publicModel,
 	}
 	if err != nil {
 		finalLabels["status"] = classifyStatus(err)
 		metrics.RequestTotal.Inc(finalLabels)
 		metrics.RequestDuration.Observe(duration.Seconds(), telemetry.Labels{"status": finalLabels["status"], "format": clientFormat})
-		log.Printf("警告: TTS 合成失败 - 路径=%s 文本长度=%d 耗时=%v 错误=%v",
-			urlPath, len(inputText), duration, err)
+		log.Printf("警告: TTS 合成失败 - 路径=%s model=%s 文本长度=%d 耗时=%v 错误=%v",
+			urlPath, publicModel, len(inputText), duration, err)
 		// 不在此处退款:defer 兜底退款会处理(bill 未 Settle → Refund 生效)
 		middleware.SendJSONError(w, http.StatusInternalServerError, "TTS synthesis failed.", "server_error", "synthesis_failed")
 		return
@@ -454,7 +508,7 @@ func finalizeSynth(
 
 	// 阶段 3b:结算(多退少补 + 写 status=1 流水)
 	// 成功时优先用上游 ReqID(对账可追溯),为空则回退本地请求号
-	settleUsage(bill, caller, channelID, ttsReq, result, inputText, localReqID)
+	settleUsage(bill, caller, channelID, publicModel, result, inputText, localReqID)
 
 	w.Header().Set("Content-Type", contentTypeFor(result.Format))
 	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(result.AudioData)))
@@ -499,11 +553,14 @@ func preConsumeQuota(caller *middleware.Caller, chars int, reqID string) (*billi
 
 // settleUsage 合成成功后结算:按实际音频时长多退少补,并写 status=1 的流水。
 // 失败仅 log warn,不影响已成功的主请求(决策 #7 的延续:计量/计费故障不阻断交付)。
+//
+// publicModel 是对外 model(= channel.Name)。**不要**改成 ttsReq.Model ——
+// 那是发给上游的 model 标识(如 tts-1),记进 usage 后就无法按"用户请求的 model"对账了。
 func settleUsage(
 	bill *billing.Session,
 	caller *middleware.Caller,
 	channelID *int64,
-	ttsReq provider.Request,
+	publicModel string,
 	result *dto.SynthesisResult,
 	inputText string,
 	localReqID string,
@@ -518,7 +575,7 @@ func settleUsage(
 	u := store.Usage{
 		ChannelID:  channelID,
 		RequestID:  reqID,
-		Model:      ttsReq.Model,
+		Model:      publicModel,
 		Characters: utf8.RuneCountInString(inputText), // rune 而非字节
 		AudioMS:    result.Duration.Milliseconds(),    // 决策 #11:字段是 Duration,转 MS
 		AudioBytes: len(result.AudioData),
@@ -586,25 +643,30 @@ func HealthzHandler(w http.ResponseWriter, r *http.Request) {
 func HealthHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 
-	// 安装模式下 /health 仍然 200,但通过 installed 字段让探针/运维识别
-	// (Kubernetes readiness probe 可以用 installed=false 决定是否放流量)
 	mode := installer.GetMode()
-	if mode == installer.ModeSetup {
-		w.WriteHeader(http.StatusOK) // 200,因为进程活着,只是还没初始化
-	} else if setting.GetTTSConfigErr() != nil {
-		w.WriteHeader(http.StatusServiceUnavailable)
-	} else {
+
+	// STAGE6:503 条件只剩"store 未就绪"。
+	//
+	// 旧条件是 `setting.GetTTSConfigErr() != nil`,而那是"全局 TTS 必填项
+	// (api_key / default_resource_id / default_speaker)是否齐备"的判定。
+	// STAGE5 起 setup **刻意不写**这三项(凭证由渠道自带)⇒ 它恒非 nil
+	// ⇒ **normal 模式下 /health 永久 503**,K8s readiness / Docker HEALTHCHECK 恒红。
+	// 渠道化之后"全局 TTS 配置"这个概念不存在,判定整个删除(B7/G9)。
+	//
+	// setup 模式仍 200(进程活着,只是还没初始化),由 installed 字段区分。
+	storeReady := GetAdminStore() != nil
+	if mode == installer.ModeSetup || storeReady {
 		w.WriteHeader(http.StatusOK)
+	} else {
+		w.WriteHeader(http.StatusServiceUnavailable)
 	}
 
-	env := setting.CheckEnvironmentVariables()
-	allRequired := env["all_required_vars_set"].(bool)
-
 	status := "ok"
-	if mode == installer.ModeSetup {
+	switch {
+	case mode == installer.ModeSetup:
 		status = "not_installed"
-	} else if !allRequired {
-		status = "configuration_error"
+	case !storeReady:
+		status = "db_not_ready"
 	}
 
 	resp := dto.HealthResponse{
@@ -615,24 +677,10 @@ func HealthHandler(w http.ResponseWriter, r *http.Request) {
 		Uptime:    fmt.Sprintf("%.0f seconds", time.Since(startTime).Seconds()),
 		StartTime: startTime.Format(time.RFC3339),
 		Memory:    collectMemorySnapshot(),
-		ConfigStatus: dto.ConfigStatusResponse{
-			AllRequiredVarsSet: allRequired,
-			ConfigError:        setting.GetTTSConfigErr() != nil,
-			Error:              configErrorMessage(setting.GetTTSConfigErr()),
-		},
 		Installed: mode == installer.ModeNormal,
 		Mode:      mode.String(),
 	}
 	json.NewEncoder(w).Encode(resp)
-}
-
-// configErrorMessage 把运行时配置错误(setting.GetTTSConfigErr())安全地转成可对外暴露的字符串。
-// 仅在 normal 模式且有错时调用, error 为 nil 时返 "" (被 omitempty 跳过)。
-func configErrorMessage(err error) string {
-	if err == nil {
-		return ""
-	}
-	return err.Error()
 }
 
 var startTime time.Time

@@ -32,6 +32,11 @@ type Channel struct {
 	// 匹配时必须用带分隔符的判断(`','||channel_group||',' LIKE '%,vip,%'`),
 	// **严禁 `LIKE '%vip%'`** —— 那会把 svip 误判成 vip。
 	ChannelGroup string `json:"channel_group"`
+	// DefaultVoice 是该渠道的默认音色名(STAGE6,取代全局 settings.default_speaker)。
+	//
+	// 请求未带 voice 时用它;为空则请求必须自带 voice,否则 400 voice_required。
+	// 必须是本渠道 voices 里的 name(改名/删除时由 store 侧同步维护,见 voices.go)。
+	DefaultVoice string `json:"default_voice"`
 	Priority     int    `json:"priority"`
 	Weight       int    `json:"weight"`
 	// Status: 1 = enabled, 2 = disabled(对齐 voices.enabled 的 0/1 风格,
@@ -45,7 +50,7 @@ type Channel struct {
 // ChannelList 列出所有渠道(按 priority DESC, id ASC),includeDisabled=false 时只返回 enabled。
 // 排序规则固定,便于 router 启动期一次性加载后做 priority 分桶。
 func (s *Store) ChannelList(includeDisabled bool) ([]Channel, error) {
-	q := `SELECT id, name, provider, credentials_json, voices, channel_group, priority, weight, status, auto_ban, created_at, updated_at
+	q := `SELECT id, name, provider, credentials_json, voices, channel_group, default_voice, priority, weight, status, auto_ban, created_at, updated_at
 	      FROM channels`
 	if !includeDisabled {
 		q += ` WHERE status = 1`
@@ -74,7 +79,7 @@ func (s *Store) ChannelList(includeDisabled bool) ([]Channel, error) {
 
 // ChannelGet 按 id 查;未命中返回 ErrNotFound。
 func (s *Store) ChannelGet(id int64) (*Channel, error) {
-	row := s.db.QueryRow(`SELECT id, name, provider, credentials_json, voices, channel_group, priority, weight, status, auto_ban, created_at, updated_at
+	row := s.db.QueryRow(`SELECT id, name, provider, credentials_json, voices, channel_group, default_voice, priority, weight, status, auto_ban, created_at, updated_at
 	                     FROM channels WHERE id = ?`, id)
 	c, err := scanChannel(row)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -86,6 +91,24 @@ func (s *Store) ChannelGet(id int64) (*Channel, error) {
 	return &c, nil
 }
 
+// ChannelGetByName 按 name 查(STAGE6 路由主入口)。
+//
+// 「渠道即模型」:channel.name 就是客户端请求里的 model 值,所以每次 /v1/audio/speech
+// 都要按 name 精确命中唯一渠道(channels.name 有 UNIQUE 约束)。
+// 未命中返回 ErrNotFound —— 调用方据此返回 400 unknown_model。
+func (s *Store) ChannelGetByName(name string) (*Channel, error) {
+	row := s.db.QueryRow(`SELECT id, name, provider, credentials_json, voices, channel_group, default_voice, priority, weight, status, auto_ban, created_at, updated_at
+	                     FROM channels WHERE name = ?`, strings.TrimSpace(name))
+	c, err := scanChannel(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("store: channel getbyname %q: %w", name, err)
+	}
+	return &c, nil
+}
+
 // ChannelInsert 新增一条渠道;name 冲突返回 ErrDuplicate。
 // 输入校验错误(必填项缺失)返回 wrap ErrInvalid;服务端错误(DB 失败等)不被 wrap。
 func (s *Store) ChannelInsert(c Channel) (int64, error) {
@@ -93,9 +116,11 @@ func (s *Store) ChannelInsert(c Channel) (int64, error) {
 	c.Provider = strings.TrimSpace(c.Provider)
 	c.CredentialsJSON = strings.TrimSpace(c.CredentialsJSON)
 	c.Voices = normalizeVoicesCSV(c.Voices)
+	c.DefaultVoice = strings.TrimSpace(c.DefaultVoice)
 
-	if c.Name == "" {
-		return 0, fmt.Errorf("%w: name is required", ErrInvalid)
+	// STAGE6:name 同时是对外 model 名,必须能被客户端请求出来(S8)。
+	if err := validateChannelName(c.Name); err != nil {
+		return 0, err
 	}
 	if c.Provider == "" {
 		return 0, fmt.Errorf("%w: provider is required", ErrInvalid)
@@ -106,6 +131,12 @@ func (s *Store) ChannelInsert(c Channel) (int64, error) {
 	// credentials_json 必须是合法 JSON;否则后续 router 加载会崩,这里挡掉。
 	if !json.Valid([]byte(c.CredentialsJSON)) {
 		return 0, fmt.Errorf("%w: credentials_json is not valid JSON", ErrInvalid)
+	}
+	// STAGE6:default_voice 只校验"名字格式"—— 建渠道时该渠道还没有音色行,
+	// 无法校验存在性;存在性在 ChannelUpdate 时校验(那时才有 channel_id)。
+	if c.DefaultVoice != "" && !voiceNameRe.MatchString(c.DefaultVoice) {
+		return 0, fmt.Errorf("%w: default_voice %q invalid (must match [a-zA-Z0-9_-]{1,64})",
+			ErrInvalid, c.DefaultVoice)
 	}
 	if c.Weight <= 0 {
 		c.Weight = 1 // 默认权重 1
@@ -124,9 +155,9 @@ func (s *Store) ChannelInsert(c Channel) (int64, error) {
 	}
 
 	res, err := s.db.Exec(`
-		INSERT INTO channels (name, provider, credentials_json, voices, channel_group, priority, weight, status, auto_ban, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))`,
-		c.Name, c.Provider, c.CredentialsJSON, c.Voices, c.ChannelGroup,
+		INSERT INTO channels (name, provider, credentials_json, voices, channel_group, default_voice, priority, weight, status, auto_ban, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))`,
+		c.Name, c.Provider, c.CredentialsJSON, c.Voices, c.ChannelGroup, c.DefaultVoice,
 		c.Priority, c.Weight, c.Status, boolToInt(c.AutoBan))
 	if err != nil {
 		if isUniqueViolation(err) {
@@ -173,6 +204,7 @@ type ChannelUpdate struct {
 	CredentialsJSON *string
 	Voices          *string
 	ChannelGroup    *string // STAGE5:组集合 CSV(归一化 + 白名单校验)
+	DefaultVoice    *string // STAGE6:渠道级默认音色(必须存在于本渠道,空串=清空)
 	Priority        *int
 	Weight          *int
 	Status          *int
@@ -201,12 +233,37 @@ func (s *Store) ChannelUpdate(id int64, p ChannelUpdate) error {
 		v := normalizeVoicesCSV(*p.Voices)
 		p.Voices = &v
 	}
+	if p.Name != nil {
+		n := strings.TrimSpace(*p.Name)
+		if err := validateChannelName(n); err != nil {
+			return err
+		}
+		p.Name = &n
+	}
 	if p.ChannelGroup != nil {
 		v := normalizeCSVSet(*p.ChannelGroup)
 		if !ValidGroupSet(v) {
 			return fmt.Errorf("%w: channel_group must be a non-empty subset of default/vip/svip", ErrInvalid)
 		}
 		p.ChannelGroup = &v
+	}
+	// STAGE6:default_voice —— 非空时必须存在于本渠道(此时 channel_id 已知,可校验)。
+	// 空串表示"清空默认音色"(之后请求必须自带 voice)。
+	if p.DefaultVoice != nil {
+		v := strings.TrimSpace(*p.DefaultVoice)
+		if v != "" {
+			if !voiceNameRe.MatchString(v) {
+				return fmt.Errorf("%w: default_voice %q invalid (must match [a-zA-Z0-9_-]{1,64})",
+					ErrInvalid, v)
+			}
+			if _, err := s.VoiceResolve(id, v); err != nil {
+				if errors.Is(err, ErrNotFound) {
+					return fmt.Errorf("%w: default_voice %q not found in this channel", ErrInvalid, v)
+				}
+				return fmt.Errorf("store: channel update resolve default_voice: %w", err)
+			}
+		}
+		p.DefaultVoice = &v
 	}
 
 	// 2) 动态构造 UPDATE —— 避免拼 SQL 字符串,改用 slice 占位符
@@ -228,6 +285,10 @@ func (s *Store) ChannelUpdate(id int64, p ChannelUpdate) error {
 	if p.ChannelGroup != nil {
 		sets = append(sets, "channel_group=?")
 		args = append(args, *p.ChannelGroup)
+	}
+	if p.DefaultVoice != nil {
+		sets = append(sets, "default_voice=?")
+		args = append(args, *p.DefaultVoice)
 	}
 	if p.Priority != nil {
 		sets = append(sets, "priority=?")
@@ -307,12 +368,28 @@ func scanChannel(r scanner) (Channel, error) {
 	var c Channel
 	var autoBan int
 	err := r.Scan(&c.ID, &c.Name, &c.Provider, &c.CredentialsJSON, &c.Voices,
-		&c.ChannelGroup, &c.Priority, &c.Weight, &c.Status, &autoBan, &c.CreatedAt, &c.UpdatedAt)
+		&c.ChannelGroup, &c.DefaultVoice, &c.Priority, &c.Weight, &c.Status, &autoBan,
+		&c.CreatedAt, &c.UpdatedAt)
 	if err != nil {
 		return c, err
 	}
 	c.AutoBan = autoBan != 0
 	return c, nil
+}
+
+// validateChannelName 校验渠道名 —— STAGE6 起它同时是对外 model 名(渠道即模型)。
+//
+// 规则与 voices 的对外名一致([a-zA-Z0-9_-]{1,64}),复用 voiceNameRe 避免两条规则漂移。
+// 为什么要卡这个:OpenAI SDK / 客户端的 model 参数只接受这类字符,含空格/斜杠/中文的
+// 渠道名**客户端根本请求不出来**(还会被 controller 的 model 校验拦掉),属于建了也没用的配置。
+func validateChannelName(name string) error {
+	if name == "" {
+		return fmt.Errorf("%w: name is required", ErrInvalid)
+	}
+	if !voiceNameRe.MatchString(name) {
+		return fmt.Errorf("%w: name %q invalid (must match [a-zA-Z0-9_-]{1,64})", ErrInvalid, name)
+	}
+	return nil
 }
 
 // normalizeVoicesCSV 把 "a,,b, a ,c" 规整成 "a,b,c" —— 重复项去重,

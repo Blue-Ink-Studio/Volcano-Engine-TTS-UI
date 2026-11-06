@@ -149,20 +149,16 @@ func SettingsUpdateHandler(w http.ResponseWriter, r *http.Request) {
 		}
 		updates["default_resource_id"] = v
 	}
+	// STAGE6:default_speaker 已废弃(A2) —— **静默忽略 + WARN**,不返回 400。
+	//
+	// 语义从"全局默认音色"变成"渠道级 channels.default_voice":
+	// 同名音色可以属于不同渠道,一个全局 key 根本无法定位到唯一的行。
+	//
+	// 为什么忽略而不是报错:旧版管理页/脚本可能还在提交这个字段,直接 400 会让
+	// 一次无关的保存整体失败;而它本身无害,忽略掉即可。
 	if body.DefaultSpeaker != nil {
-		v := strings.TrimSpace(*body.DefaultSpeaker)
-		if v == "" {
-			middleware.SendJSONError(w, http.StatusBadRequest, "default_speaker cannot be empty", "invalid_request_error", "missing_field")
-			return
-		}
-		// 校验音色在库中(避免 default_speaker 引用不存在的 voice)
-		if _, err := s.VoiceGetByName(v); err != nil {
-			middleware.SendJSONError(w, http.StatusBadRequest,
-				fmt.Sprintf("default_speaker %q not found in voices table", v),
-				"invalid_request_error", "default_speaker_missing")
-			return
-		}
-		updates["default_speaker"] = v
+		log.Printf("[settings] WARN: 忽略已废弃字段 default_speaker=%q"+
+			"(STAGE6 起改为渠道级 default_voice,请在渠道管理页设置)", strings.TrimSpace(*body.DefaultSpeaker))
 	}
 	if body.DefaultFormat != nil {
 		v := strings.TrimSpace(*body.DefaultFormat)
