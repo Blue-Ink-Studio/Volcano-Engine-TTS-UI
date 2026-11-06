@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>火山 TTS · 用户管理</title>
+    <title>TTSHub · 用户管理</title>
     <script>try{var t=localStorage.getItem('ttsTheme')||'auto',d=t==='auto'?(matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light'):t;document.documentElement.setAttribute('data-theme',d)}catch(e){}</script>
     <script src="https://cdn.bootcdn.net/ajax/libs/vue/3.4.21/vue.global.prod.js"></script>
     <script src="https://cdn.bootcdn.net/ajax/libs/axios/1.6.7/axios.min.js"></script>
@@ -46,8 +46,8 @@
                     </div>
                 </div>
 
-                <div class="data-card">
-                    <table class="data-table" v-if="items.length">
+                <div class="data-card card-plain">
+                    <table class="data-table responsive-cards cards-users" v-if="items.length">
                         <thead>
                             <tr>
                                 <th>用户</th>
@@ -79,10 +79,23 @@
                                 <td><span class="text-mute">{{ fmt(u.created_at) }}</span></td>
                                 <td class="th-actions">
                                     <div class="td-actions">
-                                        <button class="btn btn-sm" @click="view(u)">详情</button>
-                                        <button class="btn btn-sm" @click="openCharge(u)">充值</button>
-                                        <button class="btn btn-sm" @click="openEdit(u)">编辑</button>
-                                        <button class="btn btn-sm btn-danger-ghost" @click="remove(u)" v-if="u.status !== 3">删除</button>
+                                        <div class="actions-desktop">
+                                            <button class="btn btn-sm" @click="view(u)">详情</button>
+                                            <button class="btn btn-sm" @click="openCharge(u)">充值</button>
+                                            <button class="btn btn-sm" @click="openEdit(u)">编辑</button>
+                                            <button class="btn btn-sm btn-danger-ghost" @click="remove(u)" v-if="u.status !== 3">删除</button>
+                                        </div>
+                                        <div class="actions-mobile">
+                                            <button class="icon-btn" title="编辑" @click="openEdit(u)">✎</button>
+                                            <div class="more-wrap">
+                                                <button class="icon-btn" title="更多操作" @click.stop="toggleMenu(u.id)">⋯</button>
+                                                <div class="more-menu" v-if="menuId === u.id" @click.stop>
+                                                    <button class="more-item" @click="closeMenu(); view(u)">详情<span>›</span></button>
+                                                    <button class="more-item" @click="closeMenu(); openCharge(u)">充值<span>＋</span></button>
+                                                    <button class="more-item danger" v-if="u.status !== 3" @click="closeMenu(); remove(u)">删除<span>⌫</span></button>
+                                                </div>
+                                            </div>
+                                        </div>
                                     </div>
                                 </td>
                             </tr>
@@ -238,6 +251,9 @@
             const loaded = ref(false);
             const actionErr = ref('');
             const search = ref('');
+            const menuId = ref(null);
+            const toggleMenu = (id) => { menuId.value = menuId.value === id ? null : id; };
+            const closeMenu = () => { menuId.value = null; };
 
             const statusText = (s) => s === 1 ? '启用' : s === 2 ? '停用' : s === 3 ? '已删除' : '未知';
             const statusClass = (s) => s === 1 ? 'pill-success' : s === 2 ? 'pill-warning' : 'pill-mute';
@@ -375,6 +391,7 @@
 
             onMounted(() => {
                 if (!getKey()) { location.href = '/dashboard/login'; return; }
+                document.addEventListener('click', closeMenu);
                 mountShell({
                     activeNav: 'users',
                     overview: overview.value,
@@ -386,6 +403,7 @@
 
             return {
                 overview, items, total, offset, limit, loaded, actionErr, search,
+                menuId, toggleMenu, closeMenu,
                 statusText, statusClass, fmt, fmtBal, balClass, balState, onSearch, goPage, loadUsers,
                 showModal, editing, form, submitting, modalErr,
                 openCreate, openEdit, closeModal, submit, view, remove, reloadAll,

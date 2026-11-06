@@ -160,7 +160,10 @@
         const corsConfigured = !!options.corsConfigured;
         const themePref = getThemePref();
         slot.outerHTML = `
-<aside class="sidebar">
+<button class="mobile-menu-btn" id="btn-mobile-menu" aria-label="打开菜单">☰ 菜单</button>
+<div class="sidebar-backdrop" id="sidebar-backdrop"></div>
+<aside class="sidebar" id="admin-sidebar-panel">
+<button class="sidebar-close" id="sidebar-close" aria-label="关闭菜单">×</button>
     <div class="brand">
         <div class="brand-logo">TTS</div>
         <div>
@@ -246,6 +249,32 @@
             });
         });
         renderThemeUI();
+
+        // 移动端抽屉:汉堡按钮开/关,遮罩与导航项点击后关闭,ESC 关闭,回到桌面宽度自动收起
+        const panel = document.getElementById('admin-sidebar-panel');
+        const backdrop = document.getElementById('sidebar-backdrop');
+        const btnMenu = document.getElementById('btn-mobile-menu');
+        const setSidebarOpen = (open) => {
+            document.body.classList.toggle('sidebar-open', open);
+            if (panel) panel.classList.toggle('open', open);
+            if (backdrop) backdrop.classList.toggle('show', open);
+        };
+        if (btnMenu) btnMenu.addEventListener('click', () => {
+            setSidebarOpen(!document.body.classList.contains('sidebar-open'));
+        });
+        if (backdrop) backdrop.addEventListener('click', () => setSidebarOpen(false));
+        const btnClose = document.getElementById('sidebar-close');
+        if (btnClose) btnClose.addEventListener('click', () => setSidebarOpen(false));
+        if (panel) panel.querySelectorAll('.nav-item').forEach(a => {
+            a.addEventListener('click', () => setSidebarOpen(false));
+        });
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape' && document.body.classList.contains('sidebar-open')) setSidebarOpen(false);
+        });
+        window.addEventListener('resize', () => {
+            if (window.innerWidth > 760 && document.body.classList.contains('sidebar-open')) setSidebarOpen(false);
+        });
+
         return {};
     };
 

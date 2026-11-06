@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>火山 TTS · 登录</title>
+    <title>TTSHub · 登录</title>
     <script src="https://cdn.bootcdn.net/ajax/libs/vue/3.4.21/vue.global.prod.js"></script>
     <script src="https://cdn.bootcdn.net/ajax/libs/axios/1.6.7/axios.min.js"></script>
     <script>try{var t=localStorage.getItem('ttsTheme')||'auto',d=t==='auto'?(matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light'):t;document.documentElement.setAttribute('data-theme',d)}catch(e){}</script>
@@ -17,7 +17,7 @@
 
                 <!-- ===== 统一登录页(D15):①账号密码 → JWT ②admin_key 直连 ===== -->
                 <template v-if="view === 'login'">
-                    <h1>火山 TTS</h1>
+                    <h1>TTSHub</h1>
                     <div class="sub">登录后按角色进入管理后台或用户门户</div>
 
                     <div class="login-tabs">
@@ -85,7 +85,7 @@
     } = window.admin;
 
     // 登录失败统一文案(§17):invalid_credentials **不区分**账号是否存在
-    const CRED_MSG = '用户名或密码错误';
+    const CRED_MSG = '用户名或密码不正确';
     const KEY_MSG = '鉴权失败';
 
     createApp({
@@ -159,10 +159,14 @@
             const loginErrText = (e) => {
                 const code = e.response?.data?.error?.code;
                 const msg = e.response?.data?.error?.message;
-                if (code === 'invalid_credentials') return CRED_MSG;
-                if (code === 'too_many_attempts') return '连续失败次数过多，请 15 分钟后重试';
+                const status = e.response?.status;
+                // 密码错误统一文案(兼容后端返回 invalid_credentials 或裸 401)
+                if (code === 'invalid_credentials' || status === 401 || status === 403) return CRED_MSG;
+                if (code === 'too_many_attempts' || status === 429) return '连续失败次数过多，请稍后重试';
                 if (code === 'user_disabled') return '账号已被禁用，请联系管理员';
-                return msg || e.message || CRED_MSG;
+                if (!e.response) return '网络连接失败，请检查网络后重试';
+                if (status >= 500) return '服务暂时不可用（HTTP ' + status + '），请稍后重试';
+                return msg || CRED_MSG;
             };
 
             // ② admin_key 直连

@@ -146,6 +146,10 @@ body {
 
 /* === App shell === */
 .app-shell { display: flex; min-height: 100vh; }
+/* 移动端才显示的抽屉触发器/遮罩(桌面端隐藏) */
+.mobile-menu-btn { display: none; }
+.sidebar-backdrop { display: none; }
+.sidebar-close { display: none; }
 .sidebar {
     width: var(--sidebar-w);
     background: var(--bg-sidebar);
@@ -369,6 +373,8 @@ body {
 .cell-sub { font-size: 11px; color: var(--text-mute); margin-top: 2px; }
 .cell-mono { font-family: ui-monospace, SFMono-Regular, monospace; font-size: 12px; color: var(--text-dim); }
 .td-actions { display: inline-flex; align-items: center; gap: 8px; }
+.actions-desktop { display: inline-flex; align-items: center; gap: 8px; }
+.actions-mobile { display: none; }
 
 .empty { padding: 64px 24px; text-align: center; color: var(--text-dim); }
 .empty-icon { font-size: 36px; opacity: 0.3; margin-bottom: 12px; }
@@ -660,10 +666,50 @@ code { font-family: ui-monospace, SFMono-Regular, monospace; font-size: 0.9em; b
 }
 @media (max-width: 760px) {
     .app-shell { flex-direction: column; }
-    .sidebar {
-        width: 100%; height: auto; position: static;
-        border-right: none; border-bottom: 1px solid var(--border);
+
+    /* 侧栏折叠为抽屉:默认移出屏幕,点汉堡按钮滑入;不再是顶部整块 */
+    .mobile-menu-btn {
+        display: inline-flex; align-items: center; gap: 6px;
+        position: fixed; top: 12px; left: 12px; z-index: 70;
+        height: 40px; padding: 0 14px;
+        background: var(--bg-card); color: var(--text);
+        border: 1px solid var(--border); border-radius: var(--radius);
+        box-shadow: var(--shadow-sm);
+        font-family: inherit; font-size: 13px; cursor: pointer;
     }
+    .sidebar {
+        position: fixed; top: 0; left: 0; bottom: 0;
+        width: var(--sidebar-w); max-width: 82vw;
+        height: 100%;
+        z-index: 60;
+        border-right: 1px solid var(--border);
+        border-bottom: none;
+        box-shadow: var(--shadow-lg);
+        transform: translateX(-100%);
+        transition: transform 0.25s ease;
+        will-change: transform;
+    }
+    .sidebar.open { transform: translateX(0); }
+    /* 抽屉打开时隐藏汉堡按钮,避免挡住 brand/logo;抽屉内改用右上角关闭按钮 */
+    body.sidebar-open .mobile-menu-btn { display: none; }
+    .sidebar-close {
+        display: flex; align-items: center; justify-content: center;
+        position: absolute; top: 10px; right: 10px; z-index: 1;
+        width: 34px; height: 34px; padding: 0;
+        background: transparent; border: 0; border-radius: 50%;
+        color: var(--text-dim); font-size: 20px; line-height: 1;
+        cursor: pointer; font-family: inherit;
+    }
+    .sidebar-close:hover { background: var(--bg-hover); color: var(--text); }
+    .sidebar-backdrop {
+        display: block;
+        position: fixed; inset: 0; z-index: 55;
+        background: rgba(0, 0, 0, 0.45);
+        opacity: 0; pointer-events: none;
+        transition: opacity 0.25s ease;
+    }
+    .sidebar-backdrop.show { opacity: 1; pointer-events: auto; }
+    body.sidebar-open { overflow: hidden; }
     .portal-side .nav { display: flex; gap: 6px; overflow-x: auto; padding: 10px 12px; }
     .portal-side .nav-item { flex: 0 0 auto; margin-bottom: 0; white-space: nowrap; }
     .portal-side .nav-item.active::before { display: none; }
@@ -673,14 +719,94 @@ code { font-family: ui-monospace, SFMono-Regular, monospace; font-size: 0.9em; b
     .portal-side .sidebar-foot-row { flex: 0 0 auto; }
     .portal-side .sidebar-foot-row .btn-icon { padding: 8px 12px; }
     .brand { padding: 12px 14px; }
-    .main { padding: 16px; max-width: 100%; }
+    .main { padding: 64px 16px 16px; max-width: 100%; }
     .page-head { align-items: flex-start; }
     .page-title { font-size: 19px; }
     .stat-value { font-size: 22px; }
     .filter-bar { grid-template-columns: 1fr 1fr; padding: 12px; }
     .grid-2, .grid-3 { grid-template-columns: 1fr; }
     .modal { max-width: 100%; }
-    .data-table th, .data-table td { padding: 10px 12px; }
+    /* 窄屏普通表格:横向可滑动 */
+    .data-card { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+    .data-table { min-width: max-content; border-collapse: separate; border-spacing: 0; }
+    .data-table th, .data-table td { padding: 10px 12px; white-space: nowrap; }
+
+    /* 列表类表格在手机上改为卡片式:字段纵向排列,操作按钮不再遮挡内容 */
+    .data-table.responsive-cards { display: block; min-width: 0; }
+    .responsive-cards thead { display: none; }
+    .responsive-cards tbody { display: block; }
+    .responsive-cards tbody tr {
+        display: block; padding: 12px 14px;
+        border-bottom: 1px solid var(--border);
+    }
+    .responsive-cards tbody tr:last-child { border-bottom: none; }
+    .responsive-cards tbody td {
+        display: flex; align-items: flex-start; justify-content: space-between;
+        gap: 12px; padding: 5px 0; border-bottom: 0; white-space: normal;
+    }
+    .responsive-cards tbody td::before {
+        color: var(--text-mute); font-size: 12px; flex-shrink: 0;
+        text-align: left; padding-top: 1px;
+    }
+    /* 第一列作为卡片标题,不显示字段名 */
+    .responsive-cards tbody td:first-child { display: block; padding-bottom: 8px; border-bottom: 0; }
+    .responsive-cards tbody td:first-child::before { display: none; }
+    .responsive-cards tbody td:first-child .cell-name { font-size: 15px; font-weight: 600; }
+    /* 操作列:按钮组右对齐、可换行 */
+    .responsive-cards tbody td.th-actions {
+        position: static; box-shadow: none; background: transparent;
+        padding-top: 10px; align-items: center;
+    }
+    .responsive-cards tbody td.th-actions .td-actions { flex-wrap: wrap; justify-content: flex-end; }
+
+    .cards-users td:nth-child(2)::before { content: "状态"; }
+    .cards-users td:nth-child(3)::before { content: "余额"; }
+    .cards-users td:nth-child(4)::before { content: "已用额度"; }
+    .cards-users td:nth-child(5)::before { content: "令牌数"; }
+    .cards-users td:nth-child(6)::before { content: "创建时间"; }
+    .cards-users td:nth-child(7)::before { content: "操作"; }
+
+    .cards-voices td:nth-child(2)::before { content: "名称"; }
+    .cards-voices td:nth-child(3)::before { content: "Speaker"; }
+    .cards-voices td:nth-child(4)::before { content: "资源 ID"; }
+    .cards-voices td:nth-child(5)::before { content: "Model"; }
+    .cards-voices td:nth-child(6)::before { content: "状态"; }
+    .cards-voices td:nth-child(7)::before { content: "操作"; }
+
+    .cards-channels td:nth-child(2)::before { content: "Provider"; }
+    .cards-channels td:nth-child(3)::before { content: "默认音色"; }
+    .cards-channels td:nth-child(4)::before { content: "权重"; }
+    .cards-channels td:nth-child(5)::before { content: "优先级"; }
+    .cards-channels td:nth-child(6)::before { content: "状态"; }
+    .cards-channels td:nth-child(7)::before { content: "测活"; }
+    .cards-channels td:nth-child(8)::before { content: "操作"; }
+
+    /* 手机操作区:笔=编辑,⋯=其余操作(弹出菜单) */
+    .data-card.card-plain { overflow: visible; }
+    .actions-desktop { display: none; }
+    .actions-mobile { display: inline-flex; align-items: center; gap: 8px; }
+    .icon-btn {
+        width: 38px; height: 38px; padding: 0; border-radius: 10px;
+        border: 1px solid var(--border); background: var(--bg-card);
+        color: var(--text); font-size: 18px; line-height: 1;
+        display: inline-flex; align-items: center; justify-content: center;
+    }
+    .icon-btn:active { background: var(--bg-hover); }
+    .more-wrap { position: relative; display: inline-flex; }
+    .more-menu {
+        position: absolute; right: 0; bottom: calc(100% + 8px);
+        min-width: 152px; padding: 6px; z-index: 60;
+        background: var(--bg-card); border: 1px solid var(--border);
+        border-radius: 12px; box-shadow: 0 10px 30px rgba(0, 0, 0, 0.22);
+    }
+    .more-item {
+        width: 100%; display: flex; align-items: center; justify-content: space-between;
+        gap: 12px; padding: 10px 12px; border: 0; border-radius: 8px;
+        background: none; color: var(--text); font-size: 14px; text-align: left;
+    }
+    .more-item:active { background: var(--bg-hover); }
+    .more-item span { color: var(--text-mute); font-size: 14px; }
+    .more-item.danger, .more-item.danger span { color: var(--danger); }
     .login-card { padding: 26px 20px; }
 }
 @media (max-width: 520px) {
