@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>火山 TTS · 音色管理</title>
+    <title>TTS · 音色管理</title>
     <script src="https://cdn.bootcdn.net/ajax/libs/vue/3.4.21/vue.global.prod.js"></script>
     <script src="https://cdn.bootcdn.net/ajax/libs/axios/1.6.7/axios.min.js"></script>
     <script>try{var t=localStorage.getItem('ttsTheme')||'auto',d=t==='auto'?(matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light'):t;document.documentElement.setAttribute('data-theme',d)}catch(e){}</script>
@@ -18,7 +18,7 @@
                 <header class="page-head">
                     <div>
                         <h1 class="page-title">音色管理</h1>
-                        <p class="page-sub">管理火山 TTS 音色及其启用状态</p>
+                        <p class="page-sub">音色归属渠道；请求时用 <span class="mono">model=渠道名 &amp; voice=音色名</span> 定位</p>
                     </div>
                     <div class="page-actions">
                         <button class="btn btn-primary" @click="openAdd">+ 新增音色</button>
@@ -29,7 +29,7 @@
                     <div class="toolbar-left">
                         <div class="search">
                             <span class="search-icon">⌕</span>
-                            <input v-model="voiceSearch" placeholder="搜索名称、Speaker、资源 ID...">
+                            <input v-model="voiceSearch" placeholder="搜索名称、Speaker、资源 ID、渠道...">
                         </div>
                         <div class="seg">
                             <button class="seg-btn" :class="{active: voiceFilter===null}" @click="voiceFilter=null">全部</button>
@@ -38,8 +38,18 @@
                         </div>
                     </div>
                     <div class="toolbar-right">
-                        <span v-if="voiceSearch || voiceFilter !== null">{{ filteredVoices.length }} / {{ voices.length }}</span>
+                        <span v-if="voiceSearch || voiceFilter !== null || channelFilter !== null">{{ filteredVoices.length }} / {{ voices.length }}</span>
                         <span v-else>共 {{ voices.length }} 条</span>
+                    </div>
+                </div>
+
+                <div class="toolbar" style="margin-top: 0;">
+                    <div class="toolbar-left">
+                        <label class="text-dim" style="font-size: 13px;">按渠道筛选</label>
+                        <select v-model="channelFilter" style="min-width: 220px;">
+                            <option :value="null">全部渠道</option>
+                            <option v-for="c in channels" :key="c.id" :value="c.id">{{ c.name }}（{{ c.provider }}）</option>
+                        </select>
                     </div>
                 </div>
 
@@ -55,22 +65,27 @@
                     <table class="data-table" v-if="filteredVoices.length">
                         <thead>
                             <tr>
+                                <th>渠道</th>
                                 <th>名称</th>
-                                <th>Speaker</th>
-                                <th>资源 ID</th>
+                                <th>Speaker / 上游音色</th>
+                                <th>资源 ID / Scope</th>
                                 <th>Model</th>
                                 <th>状态</th>
                                 <th class="th-actions">操作</th>
                             </tr>
                         </thead>
                         <tbody>
-                            <tr v-for="v in filteredVoices" :key="v.name">
+                            <tr v-for="v in filteredVoices" :key="v.id">
+                                <td>
+                                    <span class="tag" v-if="v.channel_name">{{ v.channel_name }}</span>
+                                    <span class="text-mute" v-else>未归属</span>
+                                </td>
                                 <td>
                                     <div class="cell-name">{{ v.name }}</div>
                                     <div v-if="v.description" class="cell-sub">{{ v.description }}</div>
                                 </td>
                                 <td><span class="mono text-dim">{{ v.speaker }}</span></td>
-                                <td><span class="mono text-dim">{{ v.resource_id }}</span></td>
+                                <td><span class="mono text-dim">{{ v.resource_id || '—' }}</span></td>
                                 <td><span class="mono text-dim">{{ v.model || '—' }}</span></td>
                                 <td>
                                     <span class="pill" :class="v.enabled ? 'pill-success' : 'pill-mute'">
@@ -92,7 +107,7 @@
                     <div v-else-if="voices.length === 0" class="empty">
                         <div class="empty-icon">♪</div>
                         <div class="empty-title">还没有音色</div>
-                        <div class="empty-desc">点击右上角「+ 新增音色」开始添加第一个火山 TTS 音色</div>
+                        <div class="empty-desc">点击右上角「+ 新增音色」开始添加。音色必须归属某个渠道</div>
                         <button class="btn btn-primary" @click="openAdd">+ 新增音色</button>
                     </div>
 
@@ -100,7 +115,7 @@
                         <div class="empty-icon">⌕</div>
                         <div class="empty-title">没有匹配的音色</div>
                         <div class="empty-desc">尝试调整搜索词或筛选条件</div>
-                        <button class="btn" @click="voiceSearch=''; voiceFilter=null">清除筛选</button>
+                        <button class="btn" @click="voiceSearch=''; voiceFilter=null; channelFilter=null">清除筛选</button>
                     </div>
                 </div>
             </main>
@@ -116,22 +131,32 @@
                             <button class="btn-icon" @click="showAdd=false" title="关闭" style="flex: 0; padding: 4px 10px;">×</button>
                         </div>
                         <div class="modal-body">
+                            <div class="field">
+                                <label>归属渠道 <span class="req">*</span></label>
+                                <select v-model.number="form.channel_id">
+                                    <option :value="0" disabled>请选择渠道</option>
+                                    <option v-for="c in channels" :key="c.id" :value="c.id">{{ c.name }}（{{ c.provider }}）</option>
+                                </select>
+                                <div v-if="!channels.length" class="hint">还没有渠道，请先到「渠道管理」创建渠道</div>
+                            </div>
+
                             <div class="grid-2">
                                 <div class="field">
                                     <label>对外名 (voice) <span class="req">*</span></label>
-                                    <input v-model="form.name" placeholder="qian" class="mono">
+                                    <input v-model="form.name" placeholder="chun" class="mono">
+                                    <div class="hint">同一渠道内唯一；不同渠道可以重名</div>
                                 </div>
                                 <div class="field">
-                                    <label>Speaker (火山音色 ID) <span class="req">*</span></label>
-                                    <input v-model="form.speaker" placeholder="S_xxx" class="mono">
+                                    <label>Speaker / 上游音色 <span class="req">*</span></label>
+                                    <input v-model="form.speaker" placeholder="火山 S_xxx / OpenAI alloy" class="mono">
                                 </div>
                                 <div class="field">
-                                    <label>资源 ID <span class="req">*</span></label>
-                                    <input v-model="form.resource_id" placeholder="seed-icl-2.0" class="mono">
+                                    <label>资源 ID / Scope</label>
+                                    <input v-model="form.resource_id" placeholder="火山填 seed-icl-2.0；其他可留空" class="mono">
                                 </div>
                                 <div class="field">
-                                    <label>Model</label>
-                                    <input v-model="form.model" placeholder="seed-tts-2.0-standard" class="mono">
+                                    <label>上游 Model</label>
+                                    <input v-model="form.model" placeholder="seed-tts-2.0-standard / tts-1" class="mono">
                                 </div>
                                 <div class="field">
                                     <label>Language</label>
@@ -168,26 +193,31 @@
         setup() {
             const overview = ref({});
             const voices = ref([]);
+            const channels = ref([]);
             const actionErr = ref('');
 
             const voiceSearch = ref('');
             const voiceFilter = ref(null);
+            const channelFilter = ref(null);
             const filteredVoices = computed(() => {
                 const q = voiceSearch.value.trim().toLowerCase();
                 return voices.value.filter(v => {
                     if (voiceFilter.value === 'on' && !v.enabled) return false;
                     if (voiceFilter.value === 'off' && v.enabled) return false;
+                    if (channelFilter.value !== null && v.channel_id !== channelFilter.value) return false;
                     if (!q) return true;
                     return (v.name || '').toLowerCase().includes(q)
                         || (v.speaker || '').toLowerCase().includes(q)
-                        || (v.resource_id || '').toLowerCase().includes(q);
+                        || (v.resource_id || '').toLowerCase().includes(q)
+                        || (v.channel_name || '').toLowerCase().includes(q);
                 });
             });
 
             const showAdd = ref(false);
             const adding = ref(false);
             const addErr = ref('');
-            const form = ref({ name: '', speaker: '', resource_id: 'seed-icl-2.0', model: 'seed-tts-2.0-standard', language: '', description: '' });
+            const emptyForm = () => ({ channel_id: 0, name: '', speaker: '', resource_id: '', model: '', language: '', description: '' });
+            const form = ref(emptyForm());
 
             const loadOverview = async () => {
                 try { overview.value = (await http.get('/admin/overview')).data; }
@@ -197,22 +227,33 @@
                 try { const r = await http.get('/voices'); voices.value = r.data.voices || []; }
                 catch (e) { actionErr.value = '加载音色失败: ' + e.message; }
             };
-            const reloadAll = () => { loadOverview(); loadVoices(); };
+            const loadChannels = async () => {
+                try { const r = await http.get('/admin/channels'); channels.value = r.data.channels || []; }
+                catch (e) { actionErr.value = '加载渠道失败: ' + (e.response?.data?.error?.message || e.message); }
+            };
+            const reloadAll = () => { loadOverview(); loadVoices(); loadChannels(); };
 
             const openAdd = () => {
-                form.value = { name: '', speaker: '', resource_id: 'seed-icl-2.0', model: 'seed-tts-2.0-standard', language: '', description: '' };
+                form.value = emptyForm();
+                if (channelFilter.value !== null) form.value.channel_id = channelFilter.value;
                 addErr.value = '';
                 showAdd.value = true;
             };
             const submitAdd = async () => {
                 addErr.value = '';
-                if (!form.value.name || !form.value.speaker || !form.value.resource_id) {
-                    addErr.value = '请填写名称、Speaker、资源 ID';
-                    return;
-                }
+                if (!form.value.channel_id) { addErr.value = '请选择归属渠道'; return; }
+                if (!form.value.name || !form.value.speaker) { addErr.value = '请填写对外名和 Speaker'; return; }
                 adding.value = true;
                 try {
-                    await http.post('/voices', form.value);
+                    await http.post('/voices', {
+                        channel_id: form.value.channel_id,
+                        name: form.value.name.trim(),
+                        speaker: form.value.speaker.trim(),
+                        resource_id: (form.value.resource_id || '').trim(),
+                        model: (form.value.model || '').trim(),
+                        language: (form.value.language || '').trim(),
+                        description: (form.value.description || '').trim(),
+                    });
                     showAdd.value = false;
                     await loadVoices();
                     await loadOverview();
@@ -222,15 +263,15 @@
                 } finally { adding.value = false; }
             };
             const toggle = async (v) => {
-                try { await http.patch(`/voices/${v.name}/toggle`, { enabled: !v.enabled }); await loadVoices(); }
+                try { await http.patch(`/voices/${v.id}/toggle`, { enabled: !v.enabled }); await loadVoices(); }
                 catch (e) {
                     actionErr.value = '切换失败: ' + (e.response?.data?.error?.message || e.message);
                     toast('err', actionErr.value);
                 }
             };
             const remove = async (v) => {
-                if (!confirm(`确定删除音色 "${v.name}" 吗?`)) return;
-                try { await http.delete(`/voices/${v.name}`); await loadVoices(); await loadOverview(); toast('ok', '音色已删除'); }
+                if (!confirm(`确定删除音色 "${v.name}"（渠道：${v.channel_name || '未归属'}）吗?`)) return;
+                try { await http.delete(`/voices/${v.id}`); await loadVoices(); await loadOverview(); toast('ok', '音色已删除'); }
                 catch (e) {
                     actionErr.value = '删除失败: ' + (e.response?.data?.error?.message || e.message);
                     toast('err', actionErr.value);
@@ -239,6 +280,10 @@
 
             onMounted(() => {
                 if (!getKey()) { location.href = '/dashboard/login'; return; }
+                // 支持从渠道页跳转过来：?channel_id=<id>
+                const qs = new URLSearchParams(location.search);
+                const ch = qs.get('channel_id');
+                if (ch && Number(ch) > 0) channelFilter.value = Number(ch);
                 mountShell({
                     activeNav: 'voices',
                     overview: overview.value,
@@ -249,8 +294,8 @@
             });
 
             return {
-                overview, voices, actionErr,
-                voiceSearch, voiceFilter, filteredVoices,
+                overview, voices, channels, actionErr,
+                voiceSearch, voiceFilter, channelFilter, filteredVoices,
                 showAdd, form, addErr, adding, openAdd, submitAdd, toggle, remove,
                 reloadAll,
             };
