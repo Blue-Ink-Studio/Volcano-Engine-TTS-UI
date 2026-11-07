@@ -356,7 +356,7 @@
 
             // ---- 删除 ----
             const remove = async (c) => {
-                if (!confirm(`确定删除渠道 "${c.name}" 吗？删除后该上游将不再被调用。`)) return;
+                if (!confirm(`确定删除渠道 "${c.name}" 吗？该渠道下的所有音色也会一并删除，删除后该上游将不再被调用。`)) return;
                 try {
                     await http.delete(`/admin/channels/${c.id}`);
                     await loadChannels();
