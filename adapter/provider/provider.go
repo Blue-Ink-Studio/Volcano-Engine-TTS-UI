@@ -74,6 +74,42 @@ type Credentials struct {
 	Scope  map[string]string `json:"scope,omitempty"`
 }
 
+// ScopeNormalizer 是**可选**接口:provider 可以声明如何归一化渠道的 scope。
+//
+// 为什么需要它:不同 provider 对"scope"这个字段的键名要求不同
+// (火山要 resource_id、Azure 要 region、OpenAI 不要),但**管理端表单只有一个
+// "Scope"输入框** —— 前端不该、也不需要知道每个 provider 的键名(那是厂商知识,
+// 属于 adapter 层)。
+//
+// 于是约定:管理端把用户填的那个值统一放进 scope["resource_id"]
+// (历史字段名,前端无感),由 provider 自行搬运到它真正需要的键。
+//
+// 实现示例见 adapter/azure:它把 scope["resource_id"] 的值搬到 scope["region"]。
+//
+// 不实现本接口的 provider 直接用原样的 scope(volcano/openai 天然如此)。
+type ScopeNormalizer interface {
+	// NormalizeScope 返回归一化后的 scope 副本;不应修改入参。
+	// 入参为 nil 或空 map 时返回 nil/空即可。
+	NormalizeScope(scope map[string]string) map[string]string
+}
+
+// NormalizeScopeFor 按 provider 名做 scope 归一化;provider 未注册或未实现
+// ScopeNormalizer 时原样返回。
+//
+// 供 controller 建/改渠道时调用 —— 厂商键名的知识只留在 adapter 层,
+// 管理端与主干都不需要知道"azure 用 region、volcano 用 resource_id"。
+func NormalizeScopeFor(name string, scope map[string]string) map[string]string {
+	p, ok := Get(name)
+	if !ok {
+		return scope
+	}
+	n, ok := p.(ScopeNormalizer)
+	if !ok {
+		return scope
+	}
+	return n.NormalizeScope(scope)
+}
+
 // MetricsRecorder 是适配器向上报告埋点的接口。
 // 适配器本身不依赖 telemetry 包,controller 在 main 启动时把 Meter 适配成实现;
 // 这样测试可以注入 mock,生产可以无侵入替换成 OTel。

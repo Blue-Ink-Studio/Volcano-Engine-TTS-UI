@@ -43,6 +43,34 @@ func New() *Provider {
 // Name 实现 provider.Provider。
 func (p *Provider) Name() string { return "azure" }
 
+// NormalizeScope 实现 provider.ScopeNormalizer。
+//
+// 管理端表单只有一个 "Scope" 输入框,前端**统一**把用户填的值放进
+// scope["resource_id"](历史字段名),而 Azure 需要的是 scope["region"]。
+// 这里做一次搬运,让管理端不必知道每个 provider 的键名。
+//
+// 规则:
+//   - scope["region"] 已有值 → 以它为准,不动 resource_id
+//   - 否则 scope["resource_id"] 有值 → 搬到 region
+//   - 都没有 → 不动(运行时再报"requires scope.region")
+//
+// 其它键(base_url 等)原样保留。
+func (p *Provider) NormalizeScope(scope map[string]string) map[string]string {
+	if len(scope) == 0 {
+		return scope
+	}
+	out := make(map[string]string, len(scope)+1)
+	for k, v := range scope {
+		out[k] = v
+	}
+	if strings.TrimSpace(out["region"]) == "" {
+		if v := strings.TrimSpace(out["resource_id"]); v != "" {
+			out["region"] = v
+		}
+	}
+	return out
+}
+
 // Capabilities 实现 provider.Provider。
 //
 // Formats 只列对外能真实交付的:mp3 / wav / pcm。

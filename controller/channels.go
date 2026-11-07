@@ -121,6 +121,21 @@ func unmarshalCredentials(raw string) (provider.Credentials, error) {
 	return c, nil
 }
 
+// marshalCredentialsNormalized 序列化凭据,并让 provider 把 scope 归一化到
+// **它真正认的键**上(STAGE6)。
+//
+// 背景:管理端表单只有一个 "Scope" 输入框,前端把用户填的值统一放进
+// scope["resource_id"](历史字段名)。但 azure 需要的是 scope["region"] ——
+// 若不在这里搬运,管理员给 Azure 填了 region,运行时却报
+// "azure channel requires scope.region",而数据库里明明"填了"。
+//
+// provider 通过实现 provider.ScopeNormalizer 声明自己的搬运规则;
+// 未实现的(volcano/openai)原样使用。
+func marshalCredentialsNormalized(providerName string, c provider.Credentials) (string, error) {
+	c.Scope = provider.NormalizeScopeFor(providerName, c.Scope)
+	return marshalCredentials(c)
+}
+
 // maskCredentialsJson 脱敏:反序列化 → APIKey 替换为 "***" → 重序列化。
 // 反序列化失败(脏数据)时原样返 raw,不阻断 GET(回显是次要,主流程能跑就行)。
 func maskCredentialsJson(raw string) string {
@@ -361,7 +376,7 @@ func ChannelsCreateHandler(w http.ResponseWriter, r *http.Request) {
 			"credentials is required", "invalid_request_error", "missing_credentials")
 		return
 	}
-	credsJSON, err := marshalCredentials(*req.Credentials)
+	credsJSON, err := marshalCredentialsNormalized(req.Provider, *req.Credentials)
 	if err != nil {
 		middleware.SendJSONError(w, http.StatusBadRequest,
 			"credentials marshal failed: "+err.Error(), "invalid_request_error", "bad_credentials")
@@ -454,6 +469,19 @@ func ChannelsUpdateHandler(w http.ResponseWriter, r *http.Request) {
 	// 这里只把值透传;store 会 wrap ErrInvalid,由统一的 400 分支返回。
 	upd.ChannelGroup = req.ChannelGroup
 
+	// 先把旧渠道读出来:① 归一化 scope 时要用它的 provider(provider 不可改);
+	// ② 后面校验凭据合并时也要用。
+	existing, err := s.ChannelGet(id)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			http.Error(w, "channel not found", http.StatusNotFound)
+			return
+		}
+		middleware.SendJSONError(w, http.StatusInternalServerError,
+			"read failed", "server_error", "db_read_failed")
+		return
+	}
+
 	// 字段直接传递(指针语义已经由 channelUpdateReq 表达)
 	if req.Name != nil {
 		n := strings.TrimSpace(*req.Name)
@@ -465,8 +493,11 @@ func ChannelsUpdateHandler(w http.ResponseWriter, r *http.Request) {
 		upd.Name = &n
 	}
 	if req.Credentials != nil {
-		// 决策 #2:提供完整对象 = 整体替换;marshal 后入库
-		cj, err := marshalCredentials(*req.Credentials)
+		// 决策 #2:提供完整对象 = 整体替换;marshal 后入库。
+		//
+		// STAGE6:scope 归一化用**该渠道自己的 provider**(provider 字段不可改),
+		// 这样"给 Azure 渠道填 region"会被搬到 scope.region 而不是 resource_id。
+		cj, err := marshalCredentialsNormalized(existing.Provider, *req.Credentials)
 		if err != nil {
 			middleware.SendJSONError(w, http.StatusBadRequest,
 				"credentials marshal failed: "+err.Error(),
@@ -497,18 +528,9 @@ func ChannelsUpdateHandler(w http.ResponseWriter, r *http.Request) {
 		upd.AutoBan = req.AutoBan
 	}
 
-	// 决策 #5:若改凭据,先校验新凭据;同时把"旧行" + "新值" 在内存里合并后 FromStoreChannel 验证
+	// 决策 #5:若改凭据,先校验新凭据;把"旧行" + "新值" 在内存里合并后 FromStoreChannel 验证。
+	// (existing 已在上面读出,这里直接复用。)
 	if upd.CredentialsJSON != nil {
-		existing, err := s.ChannelGet(id)
-		if err != nil {
-			if errors.Is(err, store.ErrNotFound) {
-				http.Error(w, "channel not found", http.StatusNotFound)
-				return
-			}
-			middleware.SendJSONError(w, http.StatusInternalServerError,
-				"read failed", "server_error", "db_read_failed")
-			return
-		}
 		merged := *existing
 		merged.CredentialsJSON = *upd.CredentialsJSON
 		if _, convErr := route.FromStoreChannel(merged); convErr != nil {

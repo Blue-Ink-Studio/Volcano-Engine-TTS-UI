@@ -336,15 +336,38 @@ func (s *Store) ChannelUpdate(id int64, p ChannelUpdate) error {
 	return nil
 }
 
-// ChannelDelete 按 id 删;未命中返回 ErrNotFound。
+// ChannelDelete 按 id 删渠道,并**级联删除该渠道的音色**;未命中返回 ErrNotFound。
+//
+// STAGE6:音色归属渠道(channel_id),删除渠道若不删音色会留下**孤儿行** ——
+// 它们永远路由不到(model 先命中渠道才查音色),却仍出现在音色列表里
+// (LEFT JOIN → channel_name 为空),而且「归属渠道」下拉里会出现已删除的渠道。
+// SQLite 不强制外键,所以这个级联必须由应用层保证。
+//
+// 放在一个事务里:要么渠道和它的音色一起消失,要么都不动(不留半残状态)。
 func (s *Store) ChannelDelete(id int64) error {
-	res, err := s.db.Exec(`DELETE FROM channels WHERE id = ?`, id)
+	tx, err := s.db.Begin()
+	if err != nil {
+		return fmt.Errorf("store: channel delete begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	// 1) 删该渠道的音色(级联)
+	if _, err := tx.Exec(`DELETE FROM voices WHERE channel_id = ?`, id); err != nil {
+		return fmt.Errorf("store: channel delete cascade voices id=%d: %w", id, err)
+	}
+
+	// 2) 删渠道
+	res, err := tx.Exec(`DELETE FROM channels WHERE id = ?`, id)
 	if err != nil {
 		return fmt.Errorf("store: channel delete id=%d: %w", id, err)
 	}
 	n, _ := res.RowsAffected()
 	if n == 0 {
 		return ErrNotFound
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("store: channel delete commit: %w", err)
 	}
 	return nil
 }
