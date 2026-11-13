@@ -43,6 +43,10 @@
         if (err.response && err.response.status === 401) {
             clearCred();
         }
+        // 阶段3c:管理接口也纳入限流,429 统一成中文提示(避免各页面直接显示 axios 原文)
+        if (err.response && err.response.status === 429 && err.response.data && err.response.data.error) {
+            err.response.data.error.message = '请求过于频繁，请稍后重试';
+        }
         return Promise.reject(err);
     });
 
