@@ -47,6 +47,7 @@ func matchOrigin(origin string) (string, bool) {
 //     Origin=https://app.example.com, Host=server:80
 //     默认不同源;但如果设置 TRUSTED_PROXY_HOPS 或 X-Forwarded-Host,要让它们一致。
 //   - 浏览器对同源 POST 也会设 Origin(避免被自己的 CORS 误伤),这里豁免。
+//
 // 返回 true 表示请求来自自己,无需 CORS 介入。
 func isSameOrigin(r *http.Request) bool {
 	origin := r.Header.Get("Origin")

@@ -1,7 +1,8 @@
 // dumpdb 是个 ops 工具: dump tts.db 里的 settings + voices 表(明文打码)。
 //
 // 用法:
-//   go run ./cmd/dumpdb /path/to/tts.db
+//
+//	go run ./cmd/dumpdb /path/to/tts.db
 //
 // 输出 schema_version / settings(键值,敏感字段打码) / voices(完整行)。
 // 调试时方便:不依赖 sqlite3 CLI,不暴露明文 key/speaker ID。

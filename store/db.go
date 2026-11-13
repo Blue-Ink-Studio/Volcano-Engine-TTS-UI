@@ -631,9 +631,10 @@ func (s *Store) applyStage5Backfill() error {
 //
 // 候选顺序(均要求 status=1 启用 —— 把 owner 提给一个禁用/软删账号等于没提,
 // 系统仍无人可管,所以这里比契约原文的"非软删"更严):
-//  ① name='default' 且 is_admin=1(历史默认管理员,优先保持原状)
-//  ② 最早的 is_admin=1
-//  ③ 最早的启用用户(打 WARN,说明是兜底提升)
+//
+//	① name='default' 且 is_admin=1(历史默认管理员,优先保持原状)
+//	② 最早的 is_admin=1
+//	③ 最早的启用用户(打 WARN,说明是兜底提升)
 func ensureOwnerExistsTx(tx *sql.Tx) (int64, error) {
 	var n int
 	if err := tx.QueryRow(`SELECT COUNT(*) FROM users WHERE role = 'owner' AND status <> ?`,

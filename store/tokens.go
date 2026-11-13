@@ -31,10 +31,10 @@ type Token struct {
 	// ⚠️ Unlimited=true 时本字段被**忽略**(不计费也就无所谓限额);
 	// 不会因为置 unlimited 而自动清空它,以免"切换开关丢配置"。
 	LimitQuota *int64 `json:"limit_quota"`
-	Unlimited   bool   `json:"unlimited"`    // 1=不限(不计费,但仍受欠费停服约束)
-	Status      int    `json:"status"`       // 1=enabled 2=disabled
-	CreatedAt   string `json:"created_at"`
-	UpdatedAt   string `json:"updated_at"`
+	Unlimited  bool   `json:"unlimited"` // 1=不限(不计费,但仍受欠费停服约束)
+	Status     int    `json:"status"`    // 1=enabled 2=disabled
+	CreatedAt  string `json:"created_at"`
+	UpdatedAt  string `json:"updated_at"`
 }
 
 // tokenColumns 是 tokens 表的统一 SELECT 列顺序(四处查询共用,防 scan 顺序漂移)。
@@ -109,8 +109,9 @@ func insertToken(ex sqlExecer, t Token) (int64, error) {
 // 未命中 → ErrNotFound。
 //
 // 注意:不在此函数内 JOIN users,因为 status 校验分两步:
-//   1) token.status=1  → 否则 403 token_disabled
-//   2) user.status=1   → 否则 403 user_disabled
+//  1. token.status=1  → 否则 403 token_disabled
+//  2. user.status=1   → 否则 403 user_disabled
+//
 // 中间件顺序读两步,语义清晰。
 func (s *Store) TokenGetByKeyHash(hash string) (*Token, error) {
 	row := s.db.QueryRow(`SELECT `+tokenColumns+`

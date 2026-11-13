@@ -572,7 +572,7 @@ func (s *Store) UserSetPassword(userID int64, hash string) (int64, error) {
 // 管理入口现在以账号为主、admin_key 只是运维后门,所以真正会"锁死"的是
 // "没有能登录的 owner",而不是旧判断里的"auth_key 为空"(auth_key 已退役)。
 //
-// 之所以还要查 `password_hash <> ''`:一个没设密的 owner 登录不了(D29),
+// 之所以还要查 `password_hash <> ”`:一个没设密的 owner 登录不了(D29),
 // 等于没有 owner。
 func (s *Store) HasUsableOwner() (bool, error) {
 	var n int

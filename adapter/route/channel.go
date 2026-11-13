@@ -25,12 +25,12 @@ import (
 type Channel struct {
 	ID          int64
 	Name        string
-	Provider    string            // 对应 provider.Registry 里的 Provider.Name()
+	Provider    string // 对应 provider.Registry 里的 Provider.Name()
 	Credentials provider.Credentials
-	Voices      []string          // 对外 voice 名白名单;空 = 不限
+	Voices      []string // 对外 voice 名白名单;空 = 不限
 	Priority    int
 	Weight      int
-	Status      int               // 1=enabled 2=disabled
+	Status      int // 1=enabled 2=disabled
 	AutoBan     bool
 }
 

@@ -1,0 +1,71 @@
+name: CI
+
+# 触发条件:
+#   - push 到 develop / main
+#   - 针对 develop / main 的 PR
+#
+# 为什么需要这个 workflow:
+#   docker.yml 只在打 tag 时构建镜像,既不编译检查也不跑测试 ——
+#   提交能不能编译、有没有破坏计费逻辑,没人自动盯着。
+#
+# 本版相对旧版的关键变化(STAGE6 安全加固):
+#   1. **测试源码已入库**(.gitignore 不再排除 *_test.go),
+#      所以下面的 go test / go test -race 是**真的会跑**的,
+#      不再是 "no test files" 空转 —— 这是资金路径(预扣/结算/退款/
+#      充值码核销/owner 转让)的**第一道**自动化防护。
+#   2. 新增 **gofmt 零容忍检查**(P3-1):仓库历史上积累了 18 个未格式化文件,
+#      没有门禁就会持续漂移。
+#   3. 新增 **go test -race**:计费与路由涉及并发(map/DB 单连接),
+#      数据竞争必须拦在合并前。
+on:
+  push:
+    branches: [develop, main]
+  pull_request:
+    branches: [develop, main]
+
+# 同一分支的重复推送取消上一次未完成的运行,省 CI 时间。
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          # 以 go.mod 里的 go 指令为准,避免两处版本漂移
+          go-version-file: go.mod
+          cache: true
+
+      - name: 下载依赖
+        run: go mod download
+
+      - name: 编译检查
+        run: go build ./...
+
+      - name: 静态检查
+        run: go vet ./...
+
+      # 格式零容忍:CI 用与开发者相同的判定方式(直接 gofmt -l),
+      # 避免"本机 CRLF / CI LF"造成的假阳性。
+      - name: 格式检查(gofmt)
+        run: |
+          unformatted="$(gofmt -l . | grep -v '^$' || true)"
+          if [ -n "$unformatted" ]; then
+            echo "::error::以下文件未 gofmt 格式化,请执行 gofmt -w 后提交:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      # -count=1 禁用测试缓存,避免"改坏了却因缓存仍显示通过"。
+      - name: 测试
+        run: go test ./... -count=1
+
+      # 竞态检测:计费/路由/限流都涉及共享状态(map、DB 单连接)。
+      - name: 竞态检测(-race)
+        run: go test ./... -count=1 -race

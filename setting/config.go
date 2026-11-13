@@ -27,7 +27,7 @@ import (
 //   - Server.Port / TrustedProxyHops / SetupToken 仅启动期写、运行期读,无并发修改,
 //     保持原样不加锁。
 var (
-	ttsMu    sync.RWMutex
+	ttsMu      sync.RWMutex
 	ttsTimeout time.Duration = common.DefaultTimeout
 	// defaultFormat / defaultSampleRate 是**渠道无关**的输出默认值。
 	//
@@ -269,9 +269,10 @@ var TrustedProxyHops int
 var SetupToken string
 
 // SetupTokenSource 标记 SetupToken 的来源,便于日志区分。
-//   "env"      = 来自 TTS_ADMIN_KEY
-//   "ephemeral"= 启动时随机生成(每次启动变)
-//   ""         = 未设置
+//
+//	"env"      = 来自 TTS_ADMIN_KEY
+//	"ephemeral"= 启动时随机生成(每次启动变)
+//	""         = 未设置
 var SetupTokenSource string
 
 // InitAllConfigs 集中初始化所有配置,启动期调用一次。
@@ -357,7 +358,7 @@ func splitAndLowerOrigins(s string) []string {
 
 // LoadRuntimeConfig 从 store 加载 TTS 全局配置到 TTSOptions / TTSTimeout / Auth.APIKeys 内存。
 // 启动期(master 模式)调一次,或 PUT /api/settings 后调一次(改完立即生效)。
-////
+// //
 // 与原 InitTTSConfig 的区别:
 //   - 不再读 BYTEDANCE_TTS_* env;全部从 store.Settings 读
 //   - 必填项(api_key / default_resource_id / default_speaker)缺失时返 error
@@ -368,17 +369,18 @@ func splitAndLowerOrigins(s string) []string {
 // 用 Get* 拿快照不会读到半写状态。
 //
 // 字段映射(原 env → store key):
-//   BYTEDANCE_TTS_API_KEY        → api_key
-//   BYTEDANCE_TTS_RESOURCE_ID    → default_resource_id
-//   BYTEDANCE_TTS_SPEAKER        → default_speaker
-//   BYTEDANCE_TTS_MODEL          → model
-//   BYTEDANCE_TTS_FORMAT         → default_format (默认 mp3)
-//   BYTEDANCE_TTS_SAMPLE_RATE    → sample_rate (默认 24000)
-//   BYTEDANCE_TTS_BIT_RATE       → bit_rate (默认 0)
-//   BYTEDANCE_TTS_MODEL_TYPE     → model_type (默认 0)
-//   BYTEDANCE_TTS_EXPLICIT_LANGUAGE → explicit_language
-//   BYTEDANCE_TTS_ENABLE_SUBTITLE   → enable_subtitle (默认 false)
-//   BYTEDANCE_TTS_TIMEOUT        → TTSTimeout (默认 30s)
+//
+//	BYTEDANCE_TTS_API_KEY        → api_key
+//	BYTEDANCE_TTS_RESOURCE_ID    → default_resource_id
+//	BYTEDANCE_TTS_SPEAKER        → default_speaker
+//	BYTEDANCE_TTS_MODEL          → model
+//	BYTEDANCE_TTS_FORMAT         → default_format (默认 mp3)
+//	BYTEDANCE_TTS_SAMPLE_RATE    → sample_rate (默认 24000)
+//	BYTEDANCE_TTS_BIT_RATE       → bit_rate (默认 0)
+//	BYTEDANCE_TTS_MODEL_TYPE     → model_type (默认 0)
+//	BYTEDANCE_TTS_EXPLICIT_LANGUAGE → explicit_language
+//	BYTEDANCE_TTS_ENABLE_SUBTITLE   → enable_subtitle (默认 false)
+//	BYTEDANCE_TTS_TIMEOUT        → TTSTimeout (默认 30s)
 //
 // 鉴权 key(auth_key)优先级:DB > env OPENAI_TTS_API_KEY
 //   - 首次启动(无 DB 数据):用 env,保证向后兼容

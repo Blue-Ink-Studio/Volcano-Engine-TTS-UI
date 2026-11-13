@@ -18,11 +18,11 @@ import (
 // 避免安装模式下被限流计数污染(参考 M1 风险点 #2)。
 func InstallGuard(currentMode func() installer.Mode, allowPrefixes ...string) func(http.Handler) http.Handler {
 	defaults := []string{
-		"/setup",          // 安装引导页
-		"/api/setup",      // 安装相关 API
-		"/health",         // 部署探针要能识别未安装状态
-		"/metrics",        // Prometheus 拉取
-		"/static/",        // 引导页静态资源(留口子)
+		"/setup",     // 安装引导页
+		"/api/setup", // 安装相关 API
+		"/health",    // 部署探针要能识别未安装状态
+		"/metrics",   // Prometheus 拉取
+		"/static/",   // 引导页静态资源(留口子)
 	}
 	allow := append(defaults, allowPrefixes...)
 

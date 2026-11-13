@@ -102,12 +102,12 @@ func (r *Router) Select(voice string) (*Channel, error) {
 
 // SelectAndSynthesize 一次请求的完整"选渠道→调 Synthesize"循环:
 //
-//   pool = 全部 enabled 且支持 voice 的 channel,按 priority DESC 排序
-//   循环 maxRetry 次:
-//     从 pool 当前最高档里按 weight 加权随机选一个
-//     从 pool 移除该 channel(防重复)
-//     调 Synthesize;成功 → 返回;失败 → 累计错误,继续
-//   全失败 → 返聚合错误
+//	pool = 全部 enabled 且支持 voice 的 channel,按 priority DESC 排序
+//	循环 maxRetry 次:
+//	  从 pool 当前最高档里按 weight 加权随机选一个
+//	  从 pool 移除该 channel(防重复)
+//	  调 Synthesize;成功 → 返回;失败 → 累计错误,继续
+//	全失败 → 返聚合错误
 //
 // 设计要点:
 //   - "换下一个" = 同档里挑别的;pool 自动收紧

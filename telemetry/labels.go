@@ -44,6 +44,7 @@ func SpeakerLabel(s string) string {
 //   - 空 → "***"
 //   - 长度 ≤ 4 → 全打码
 //   - 其它 → 前 4 + **** + 后 4 (保留前缀便于肉眼区分 "S_xx 开头" vs "BV001_...")
+//
 // 例子: "S_G8tEKnaJ1" → "S_G8****naJ1"
 func MaskSpeaker(s string) string {
 	return maskWithAffix(s, "(未设置)")
@@ -54,6 +55,7 @@ func MaskSpeaker(s string) string {
 //   - 空 → "(未设置)"
 //   - 长度 ≤ 4 → 全打码
 //   - 其它 → 前 4 + **** + 后 4
+//
 // 例子: "volc.megatts.icl" → "volc****.icl"; "seed-icl-2.0" → "seed****2.0"
 func MaskResourceID(s string) string {
 	return maskWithAffix(s, "(未设置)")

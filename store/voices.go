@@ -152,6 +152,7 @@ func (s *Store) VoiceGetByName(name string) (*Voice, error) {
 // GetVoiceForTTS 实现 setting.Store 接口,返 voice 行的 TTS 关键字段。
 //   - found=false: voice 不存在(ErrNotFound 翻译为 found=false)
 //   - err != nil:  真错误(db 失败等)
+//
 // 这个方法存在是为了让 *Store 满足 setting.Store 接口,且不引起
 // setting → store → setting 循环 import。
 func (s *Store) GetVoiceForTTS(name string) (speaker, resourceID, model string, found bool, err error) {

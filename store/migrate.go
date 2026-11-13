@@ -12,7 +12,9 @@ package store
 type Migration struct {
 	From int
 	To   int
-	Fn   func(tx interface{ Exec(query string, args ...any) (any, error) }) error
+	Fn   func(tx interface {
+		Exec(query string, args ...any) (any, error)
+	}) error
 }
 
 // migrations 是按 From 升序排列的迁移列表;首条 From 必须等于 1。
