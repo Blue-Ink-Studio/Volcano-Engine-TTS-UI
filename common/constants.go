@@ -6,15 +6,24 @@ import "time"
 var DebugLog bool
 
 const (
-	DefaultPort           = "8080"
-	DefaultTimeout        = 30 * time.Second
-	MaxTextLength         = 5000
-	MinSpeed              = 0.25
-	MaxSpeed              = 4.0
-	DefaultSpeed          = 1.0
-	MaxRequestBodySize    = 1024 * 1024
-	RateLimitRequests     = 100
-	RateLimitWindow       = time.Minute
+	DefaultPort        = "8080"
+	DefaultTimeout     = 30 * time.Second
+	MaxTextLength      = 5000
+	MinSpeed           = 0.25
+	MaxSpeed           = 4.0
+	DefaultSpeed       = 1.0
+	MaxRequestBodySize = 1024 * 1024
+	RateLimitRequests  = 100
+	RateLimitWindow    = time.Minute
+	// AdminRateLimitRequests 是管理/自助接口(/api/admin/*、/api/me/*、/api/auth/*)
+	// 的宽松限流阈值(STAGE6 P2-6)。
+	//
+	// 取值理由:业务接口 100 次/分钟已经算严;管理端是低频人工操作、
+	// 门户是用户自助查询,给 600 次/分钟(10 倍)—— 正常用完全无感,
+	// 但脚本狂刷/压测级调用会被挡下,不至于把 DB 打垮。
+	AdminRateLimitRequests = 600
+	// AdminRateLimitWindow 与业务接口同窗口(1 分钟)。
+	AdminRateLimitWindow  = time.Minute
 	MaxConcurrentRequests = 10
 	CleanupInterval       = time.Hour
 	MaxModelNameLength    = 64

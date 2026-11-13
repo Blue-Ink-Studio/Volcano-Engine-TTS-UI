@@ -15,8 +15,8 @@ import (
 	// 新增上游 = 写一个 adapter 包 + 在这里加一行。
 	_ "github.com/volcano-tts/tts-api/adapter/azure"
 	_ "github.com/volcano-tts/tts-api/adapter/openai"
-	_ "github.com/volcano-tts/tts-api/adapter/volcano"
 	"github.com/volcano-tts/tts-api/adapter/route"
+	_ "github.com/volcano-tts/tts-api/adapter/volcano"
 	"github.com/volcano-tts/tts-api/installer"
 	"github.com/volcano-tts/tts-api/metrics"
 	"github.com/volcano-tts/tts-api/middleware"
@@ -44,6 +44,10 @@ func main() {
 	middleware.InitRateLimiter()
 	// v0.3.0:根路径 /metrics 的内网白名单(未配置则根路径完全不注册)
 	middleware.InitMetricsAllowList()
+	// STAGE6:启动登录失败记录的后台清理协程。
+	// 没有它,攻击者打一轮就停的话,那些 map 条目会一直留在内存里
+	// (惰性清理只在"有新失败进来"时触发)⇒ 内存不回落。
+	controller.StartLoginCleanup(nil)
 
 	// 2) 启动期关键步骤:打开/建库 → 检测 lock → 判定模式
 	dbPath := ttsDBPath()

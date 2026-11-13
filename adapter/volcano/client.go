@@ -5,7 +5,8 @@ import (
 	"context"
 	"fmt"
 	"net/http"
-	"time"
+
+	"github.com/volcano-tts/tts-api/common"
 )
 
 // HTTPClient 持有共享的 http.Client 以便复用连接(v3 keep-alive 1 分钟)。
@@ -14,16 +15,12 @@ type HTTPClient struct {
 }
 
 // NewHTTPClient 构造默认配置的 HTTPClient。
+//
+// STAGE6(P2-7):Transport 参数已下沉到 common.NewUpstreamHTTPClient(),
+// 三个 adapter 共用同一份,避免以后再漂移。
 func NewHTTPClient() *HTTPClient {
 	return &HTTPClient{
-		client: &http.Client{
-			Transport: &http.Transport{
-				MaxIdleConns:        100,
-				MaxIdleConnsPerHost: 20,
-				IdleConnTimeout:     90 * time.Second,
-				TLSHandshakeTimeout: 10 * time.Second,
-			},
-		},
+		client: common.NewUpstreamHTTPClient(),
 	}
 }
 

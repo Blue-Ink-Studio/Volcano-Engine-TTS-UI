@@ -48,14 +48,14 @@ type Capabilities struct {
 // Request 是主干交给适配器的、已归一化的合成请求。
 // 注意:这里刻意不出现任何厂商专属字段。
 type Request struct {
-	Text         string
-	VoiceKey     string            // voices 表的主键语义(对外 voice 名或上游音色 ID)
-	Model        string
-	Format       string            // 客户端期望格式(主干已归一化:mp3/wav/pcm/ogg_opus)
-	SampleRate   int
-	Speed        float64           // 1.0 = 原速
-	Language     string
-	Extra        map[string]string // 厂商专属配置,从 voices/settings 的 JSON 列读
+	Text       string
+	VoiceKey   string // voices 表的主键语义(对外 voice 名或上游音色 ID)
+	Model      string
+	Format     string // 客户端期望格式(主干已归一化:mp3/wav/pcm/ogg_opus)
+	SampleRate int
+	Speed      float64 // 1.0 = 原速
+	Language   string
+	Extra      map[string]string // 厂商专属配置,从 voices/settings 的 JSON 列读
 
 	// Credentials 由 provider 自己解释:
 	// 火山读 api_key + resource_id;OpenAI 只读 api_key。
@@ -122,7 +122,7 @@ type MetricsRecorder interface {
 // nopMetrics 是 MetricsRecorder 的 no-op 默认值。
 type nopMetrics struct{}
 
-func (nopMetrics) UpstreamStarted(string, string, string)        {}
+func (nopMetrics) UpstreamStarted(string, string, string) {}
 func (nopMetrics) UpstreamFinished(string, string, string, string, time.Duration, time.Duration, int, int, int) {
 }
 func (nopMetrics) UpstreamUsage(string, int) {}

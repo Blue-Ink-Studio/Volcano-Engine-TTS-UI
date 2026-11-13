@@ -28,6 +28,7 @@ import (
 	"github.com/gorilla/mux"
 	"github.com/volcano-tts/tts-api/adapter/provider"
 	"github.com/volcano-tts/tts-api/adapter/route"
+	"github.com/volcano-tts/tts-api/common"
 	"github.com/volcano-tts/tts-api/dto"
 	"github.com/volcano-tts/tts-api/middleware"
 	"github.com/volcano-tts/tts-api/setting"
@@ -134,6 +135,29 @@ func unmarshalCredentials(raw string) (provider.Credentials, error) {
 func marshalCredentialsNormalized(providerName string, c provider.Credentials) (string, error) {
 	c.Scope = provider.NormalizeScopeFor(providerName, c.Scope)
 	return marshalCredentials(c)
+}
+
+// validateChannelBaseURL 校验渠道凭据里的 base_url(STAGE6 P1-5,SSRF 防护)。
+//
+// 为什么建渠道时也要查:运行时那道是最后一道闸,但那时管理员已经点了保存、
+// 填了别的字段,才发现"base_url 不安全"体验很差。保存时就拦,能立刻给出
+// 明确反馈。
+//
+// DNS 解析失败**放行**(见 common.IsDNSFailure 的说明):内网自建上游常用
+// 内网 DNS,解析失败不代表恶意;真正危险的"解析到内网 IP"已在
+// common.ValidateBaseURL 里拦掉了。
+func validateChannelBaseURL(c provider.Credentials) error {
+	raw := strings.TrimSpace(c.Scope["base_url"])
+	if raw == "" {
+		return nil
+	}
+	if _, err := common.ValidateBaseURL(raw); err != nil {
+		if common.IsDNSFailure(err) {
+			return nil
+		}
+		return err
+	}
+	return nil
 }
 
 // maskCredentialsJson 脱敏:反序列化 → APIKey 替换为 "***" → 重序列化。
@@ -382,6 +406,12 @@ func ChannelsCreateHandler(w http.ResponseWriter, r *http.Request) {
 			"credentials marshal failed: "+err.Error(), "invalid_request_error", "bad_credentials")
 		return
 	}
+	// STAGE6(P1-5):base_url SSRF 校验(保存时就拦,给管理员明确反馈)。
+	if vErr := validateChannelBaseURL(*req.Credentials); vErr != nil {
+		middleware.SendJSONError(w, http.StatusBadRequest,
+			"base_url rejected: "+vErr.Error(), "invalid_request_error", "invalid_base_url")
+		return
+	}
 	// 默认值对齐 store.ChannelInsert
 	if req.Weight == 0 {
 		req.Weight = 1
@@ -505,6 +535,14 @@ func ChannelsUpdateHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		upd.CredentialsJSON = &cj
+	}
+	// STAGE6(P1-5):改凭据时同样校验 base_url(SSRF 防护)。
+	if req.Credentials != nil {
+		if vErr := validateChannelBaseURL(*req.Credentials); vErr != nil {
+			middleware.SendJSONError(w, http.StatusBadRequest,
+				"base_url rejected: "+vErr.Error(), "invalid_request_error", "invalid_base_url")
+			return
+		}
 	}
 	if req.Voices != nil {
 		v := *req.Voices

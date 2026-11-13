@@ -58,7 +58,9 @@ var portalShellJS []byte
 
 // Setup 返回主路由。
 // 中间件顺序(由外向内):
-//   SecurityHeaders → InstallGuard → RateLimit → ConcurrencyLimit → Logger → handler
+//
+//	SecurityHeaders → InstallGuard → RateLimit → ConcurrencyLimit → Logger → handler
+//
 // 关键: InstallGuard 必须在 RateLimit 之前,避免安装模式被限流计数污染。
 //
 // /admin 和 /api/admin/* 都加 RequireAdmin;InstallGuard 不预先放行(让安装模式下
@@ -66,6 +68,12 @@ var portalShellJS []byte
 func Setup() *mux.Router {
 	r := mux.NewRouter()
 
+	// STAGE6(P3-2):panic 恢复必须装在**最外层** —— 装在中间件链的最后
+	// 只能兜住 handler 里的 panic,兜不住中间件自身的 panic。
+	//
+	// 效果:单次请求的 panic 不再终止整个进程(那会让所有在线用户的服务
+	// 瞬间中断),只影响那一个请求 —— 打日志 + 回 500。
+	r.Use(middleware.PanicRecovery)
 	r.Use(middleware.SecurityHeaders)
 	// STAGE5:setup 安装页复用管理端静态资源(/dashboard/admin.css)。InstallGuard 在 setup
 	// 模式只放行 /setup、/api/setup、/static/,若不额外放行,安装页引用的 admin.css 会被 503。

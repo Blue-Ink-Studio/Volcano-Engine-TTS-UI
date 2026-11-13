@@ -86,11 +86,11 @@ func ValidateAPIKey(r *http.Request) bool {
 // AuthenticateWithStore 业务鉴权(normal 模式)。
 //
 // 流程:
-//   1) Bearer 头缺失或格式错 → CodeInvalidKey
-//   2) sha256(token) 查 tokens 表 → 未命中 → CodeInvalidKey
-//   3) token.status != 1 → CodeTokenDisabled
-//   4) 查 user(SELECT 一次),user.status != 1 → CodeUserDisabled
-//   5) 成功 → 返 *Caller(身份)
+//  1. Bearer 头缺失或格式错 → CodeInvalidKey
+//  2. sha256(token) 查 tokens 表 → 未命中 → CodeInvalidKey
+//  3. token.status != 1 → CodeTokenDisabled
+//  4. 查 user(SELECT 一次),user.status != 1 → CodeUserDisabled
+//  5. 成功 → 返 *Caller(身份)
 //
 // 设计要点:
 //   - 按 key_hash 查 tokens 表(SQL WHERE),hash 是查询键、非秘密比对;库中只存

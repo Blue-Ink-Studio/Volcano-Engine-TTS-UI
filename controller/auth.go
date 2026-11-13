@@ -83,60 +83,220 @@ func CheckPassword(hash, pw string) bool {
 	return bcrypt.CompareHashAndPassword([]byte(hash), []byte(pw)) == nil
 }
 
-// ---- 登录失败锁定(决策 D10:内存 map,重启失效,已接受) ----
+// ---- 登录失败锁定(STAGE6 安全加固) ----
+//
+// 原实现(D10)只有**账号维度**一把锁,存在两个可被未认证攻击者直接利用的问题:
+//
+//  1. **账号 DoS**:攻击者对任意用户名连续 5 次错误密码,就把那个账号锁 15 分钟。
+//     锁的 key 是用户名 ⇒ 知道管理员账号名(用户名往往可枚举,甚至写在文档里)
+//     就能把管理员锁在门外,反复执行即可长期拒绝服务。
+//  2. **内存 OOM**:loginAttempts 是个只增不减的 map,失败的账号名**永不清理**。
+//     海量随机用户名 ⇒ map 无限增长 ⇒ 进程被 OOM killer 干掉(100% DoS)。
+//
+// 现在是**三层防护**:
+//
+//   A. 账号维度锁(保留):同名账号连续失败仍锁定 —— 防"针对某账号的爆破"。
+//   B. IP 维度锁(新增):同一 IP 无论打哪个账号,累计失败超阈值即锁定 ——
+//      这是防"批量账号枚举/分布式爆破"的主力。注意它与 A 是**或**关系:
+//      换 IP 可以绕过 A,但**绕不过 B 对该 IP 的累计计数**;
+//      而换 IP 攻击同一账号会被 A 拦住。两层互补,不是二选一。
+//   C. 容量与过期(新增):map 条目有上限,且过期条目会被定期清理 ——
+//      杜绝"海量随机用户名撑爆内存"。
+//
+// ⚠️ 关于"改成 (用户名,IP) 组合键"的方案:它**单独用是不够的** ——
+// 攻击者只要每换一个 IP 就只失败 1 次,组合键永远不触发锁定。
+// 所以本实现保留纯账号键(A),另加 IP 键(B)。
 
 type loginAttempt struct {
 	fails      int
 	lockedTill time.Time
+	// lastSeen 用于惰性清理:条目最后一次被访问的时间。
+	lastSeen time.Time
 }
 
 var (
-	loginMu       sync.Mutex
+	loginMu sync.Mutex
+	// loginAttempts:账号维度(纯用户名,保留 D10 语义)。
 	loginAttempts = map[string]*loginAttempt{}
+	// loginIPAttempts:IP 维度(防批量枚举 / 换 IP 爆破)。
+	loginIPAttempts = map[string]*loginAttempt{}
+)
+
+// 容量与阈值(STAGE6):
+const (
+	// loginMaxIPFail 是同一 IP 在窗口内允许的累计失败次数。
+	// 比账号维度的 5 宽松 —— 因为一个 IP 后面可能是 NAT 出口的多个用户,
+	// 太紧会误伤正常用户。20 次/15 分钟仍足以挡住暴力破解。
+	loginMaxIPFail = 20
+	// loginMaxEntries 是两张 map 各自的条目上限。
+	// 超过后触发清理;若清理后仍超,则拒绝记录新条目(宁可漏记也不 OOM)。
+	loginMaxEntries = 10000
+	// loginCleanupInterval 是后台清理周期。
+	loginCleanupInterval = 5 * time.Minute
 )
 
 func loginKey(name string) string { return strings.ToLower(strings.TrimSpace(name)) }
 
-// loginLocked 返回 (是否被锁, 剩余时长)。
-func loginLocked(name string) (bool, time.Duration) {
-	loginMu.Lock()
-	defer loginMu.Unlock()
-	a := loginAttempts[loginKey(name)]
-	if a == nil {
-		return false, 0
-	}
-	if remain := time.Until(a.lockedTill); remain > 0 {
-		return true, remain
-	}
-	return false, 0
+// loginIPKey 取客户端 IP 作为限流键。
+//
+// ⚠️ 用 middleware.GetClientIP 而不是 r.RemoteAddr:部署在反代后面时,
+// RemoteAddr 恒是反代 IP ⇒ 所有用户共用一个桶 ⇒ 一个用户输错就把全站锁了。
+// GetClientIP 已处理 XFF 与可信代理跳数(见 middleware/ratelimit.go)。
+func loginIPKey(r *http.Request) string {
+	return middleware.GetClientIP(r)
 }
 
-// loginRecordFailure 记一次失败,达到阈值即锁定。
+// loginLocked 返回 (是否被锁, 剩余时长)。
+// 账号维度与 IP 维度任一被锁即算被锁。
+func loginLocked(name string, ip string) (bool, time.Duration) {
+	loginMu.Lock()
+	defer loginMu.Unlock()
+	now := time.Now()
+
+	var longest time.Duration
+	check := func(m map[string]*loginAttempt, key string) {
+		a := m[key]
+		if a == nil {
+			return
+		}
+		a.lastSeen = now
+		if remain := a.lockedTill.Sub(now); remain > 0 {
+			if remain > longest {
+				longest = remain
+			}
+		}
+	}
+	check(loginAttempts, loginKey(name))
+	check(loginIPAttempts, ip)
+	return longest > 0, longest
+}
+
+// loginRecordFailure 记一次失败。
 //
 // ⚠️ "用户不存在"与"账号未设密"两个分支**也要**调用:否则攻击者可据响应差异
 // 枚举账号是否存在(X15)。
-func loginRecordFailure(name string) {
+//
+// 账号维度达到 loginMaxFail → 锁该账号;
+// IP 维度累计达到 loginMaxIPFail → 锁该 IP。
+func loginRecordFailure(name string, ip string) {
 	loginMu.Lock()
 	defer loginMu.Unlock()
+	now := time.Now()
+
+	// --- 账号维度 ---
 	k := loginKey(name)
 	a := loginAttempts[k]
 	if a == nil {
-		a = &loginAttempt{}
-		loginAttempts[k] = a
+		if len(loginAttempts) >= loginMaxEntries {
+			loginCleanupLocked(now)
+		}
+		if len(loginAttempts) >= loginMaxEntries {
+			// 清理后仍超限:跳过记录(不能为了记一条把内存撑爆)。
+			// 代价:极端洪水下这条账号的计数不准 —— 可接受。
+			log.Printf("[auth] 账号锁定表已达上限 %d,跳过记录(账号=%q)", loginMaxEntries, k)
+		} else {
+			a = &loginAttempt{}
+			loginAttempts[k] = a
+		}
 	}
-	a.fails++
-	if a.fails >= loginMaxFail {
-		a.lockedTill = time.Now().Add(loginLockWindow)
-		a.fails = 0
-		log.Printf("[auth] 账号 %q 连续失败达 %d 次,锁定至 %s", k, loginMaxFail, a.lockedTill.Format(time.RFC3339))
+	if a != nil {
+		a.fails++
+		a.lastSeen = now
+		if a.fails >= loginMaxFail {
+			a.lockedTill = now.Add(loginLockWindow)
+			a.fails = 0
+			log.Printf("[auth] 账号 %q 连续失败达 %d 次,锁定至 %s", k, loginMaxFail, a.lockedTill.Format(time.RFC3339))
+		}
+	}
+
+	// --- IP 维度 ---
+	if ip != "" {
+		ia := loginIPAttempts[ip]
+		if ia == nil {
+			if len(loginIPAttempts) >= loginMaxEntries {
+				loginCleanupLocked(now)
+			}
+			if len(loginIPAttempts) >= loginMaxEntries {
+				log.Printf("[auth] IP 失败表已达上限 %d,跳过记录(ip=%s)", loginMaxEntries, ip)
+			} else {
+				ia = &loginAttempt{}
+				loginIPAttempts[ip] = ia
+			}
+		}
+		if ia != nil {
+			ia.fails++
+			ia.lastSeen = now
+			if ia.fails >= loginMaxIPFail {
+				ia.lockedTill = now.Add(loginLockWindow)
+				ia.fails = 0
+				log.Printf("[auth] IP %s 累计失败达 %d 次,锁定至 %s", ip, loginMaxIPFail, ia.lockedTill.Format(time.RFC3339))
+			}
+		}
 	}
 }
 
-// loginReset 登录成功后清零计数。
-func loginReset(name string) {
+// loginCleanupLocked 清理过期条目。**调用方必须已持有 loginMu**。
+//
+// 清理两种条目:
+//   - 已过锁定时间且很久没被访问的 → 直接删;
+//   - 超过锁定窗口仍活跃的 → 保留(它还在窗口内)。
+func loginCleanupLocked(now time.Time) {
+	for k, a := range loginAttempts {
+		if now.After(a.lockedTill) && now.Sub(a.lastSeen) > loginLockWindow {
+			delete(loginAttempts, k)
+		}
+	}
+	for k, a := range loginIPAttempts {
+		if now.After(a.lockedTill) && now.Sub(a.lastSeen) > loginLockWindow {
+			delete(loginIPAttempts, k)
+		}
+	}
+}
+
+// loginReset 登录成功后清零计数(账号 + IP 两个维度都清)。
+func loginReset(name string, ip string) {
 	loginMu.Lock()
 	defer loginMu.Unlock()
 	delete(loginAttempts, loginKey(name))
+	if ip != "" {
+		delete(loginIPAttempts, ip)
+	}
+}
+
+// startLoginCleanup 启动后台清理协程,定期回收过期条目。
+//
+// 为什么必须后台跑:惰性清理只在"有新失败进来"时触发 ——
+// 攻击者打一轮就停,那些条目会一直留在内存里直到下次攻击。
+// 后台清理保证"攻击停止 ⇒ 内存回落"。
+//
+// stopCh 用于测试与优雅退出;**传 nil 表示永不停止**
+// (select 里的 nil channel 永远不就绪,等于禁用该分支)。
+func startLoginCleanup(stopCh <-chan struct{}) {
+	go func() {
+		ticker := time.NewTicker(loginCleanupInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-stopCh:
+				return
+			case now := <-ticker.C:
+				loginMu.Lock()
+				before := len(loginAttempts) + len(loginIPAttempts)
+				loginCleanupLocked(now)
+				after := len(loginAttempts) + len(loginIPAttempts)
+				loginMu.Unlock()
+				if before != after {
+					log.Printf("[auth] 清理登录失败记录: %d → %d 条", before, after)
+				}
+			}
+		}
+	}()
+}
+
+// StartLoginCleanup 是 startLoginCleanup 的对外入口(main 启动时调用)。
+// stopCh 传 nil 表示随进程生命周期常驻。
+func StartLoginCleanup(stopCh <-chan struct{}) {
+	startLoginCleanup(stopCh)
 }
 
 // decodeAuthBody 解析请求体并限制大小。
@@ -278,7 +438,8 @@ type authLoginReq struct {
 //  2. password_hash 为空 → 200 {need_setup_password:true},**不签发任何凭证**(D29)
 //  3. 被禁用账号 → 403 user_disabled
 //
-// 限流(决策 D10):先查锁定;失败分支(含 1、2)全部计数;成功清零。
+// 限流(STAGE6 加固):**账号维度 + IP 维度**双锁,先查锁定;
+// 失败分支(含 1、2)全部计数;成功两个维度都清零。
 func LoginHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -294,9 +455,10 @@ func LoginHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	name := strings.TrimSpace(req.Name)
+	ip := loginIPKey(r)
 
 	// 锁定检查放在最前:被锁后连"账号是否存在"都不再回答
-	if locked, remain := loginLocked(name); locked {
+	if locked, remain := loginLocked(name, ip); locked {
 		secs := int(remain.Seconds())
 		if secs < 1 {
 			secs = 1
@@ -308,7 +470,7 @@ func LoginHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if name == "" {
-		loginRecordFailure(name)
+		loginRecordFailure(name, ip)
 		denyLogin(w)
 		return
 	}
@@ -320,7 +482,7 @@ func LoginHandler(w http.ResponseWriter, r *http.Request) {
 	u, err := s.UserGetByName(name)
 	if err != nil {
 		// 不存在也计数:否则可用"是否被锁"区分账号存在性
-		loginRecordFailure(name)
+		loginRecordFailure(name, ip)
 		denyLogin(w)
 		return
 	}
@@ -332,14 +494,14 @@ func LoginHandler(w http.ResponseWriter, r *http.Request) {
 	// 🔒 D29:空密码账号**永不签发凭证**,只告知需要设密。
 	// 不校验传入的 password —— 未设密的账号没有可校验的秘密。
 	if u.PasswordHash == "" {
-		loginRecordFailure(name)
+		loginRecordFailure(name, ip)
 		log.Printf("[auth] 账号 %q 尚未设置密码,要求先经由本机/admin_key 通道设密", u.Name)
 		writeJSON(w, http.StatusOK, map[string]any{"need_setup_password": true})
 		return
 	}
 
 	if !CheckPassword(u.PasswordHash, req.Password) {
-		loginRecordFailure(name)
+		loginRecordFailure(name, ip)
 		denyLogin(w)
 		return
 	}
@@ -350,7 +512,7 @@ func LoginHandler(w http.ResponseWriter, r *http.Request) {
 		middleware.SendJSONError(w, http.StatusInternalServerError, "issue session failed", "server_error", "internal_error")
 		return
 	}
-	loginReset(name)
+	loginReset(name, ip)
 	log.Printf("[auth] 登录成功 user_id=%d name=%q is_admin=%v", u.ID, u.Name, u.IsAdmin)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"token":    tok,

@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/volcano-tts/tts-api/adapter/provider"
+	"github.com/volcano-tts/tts-api/common"
 	"github.com/volcano-tts/tts-api/dto"
 )
 
@@ -40,13 +41,11 @@ type Provider struct {
 }
 
 // New 构造 OpenAI provider,供 init() 注册。
+//
+// STAGE6(P2-7):用 common.NewUpstreamHTTPClient() 而不是裸 &http.Client{} ——
+// 补上连接池与 TLS 握手超时(此前只有火山 adapter 有)。
 func New() *Provider {
-	return &Provider{
-		client: &http.Client{
-			// 不设 Timeout:由调用方 ctx 控制(与火山一致,便于逐请求超时)。
-			Timeout: 0,
-		},
-	}
+	return &Provider{client: common.NewUpstreamHTTPClient()}
 }
 
 // Name 实现 provider.Provider。
@@ -104,7 +103,18 @@ func (p *Provider) Synthesize(ctx context.Context, req provider.Request, mtr pro
 
 	base := strings.TrimRight(defaultBaseURL, "/")
 	if v := req.Credentials.Scope["base_url"]; v != "" {
-		base = strings.TrimRight(v, "/")
+		// STAGE6(P1-5):base_url 是管理员填的出站目标,必须做 SSRF 校验。
+		// 校验放在**运行时**而不是只放在建渠道时 —— 渠道记录可能来自旧数据/
+		// 直接改库,而运行时这道是最后一道闸。
+		safe, vErr := common.ValidateBaseURL(v)
+		if vErr != nil && !common.IsDNSFailure(vErr) {
+			return nil, &provider.UpstreamError{
+				Code:    0,
+				Message: "openai base_url rejected: " + vErr.Error(),
+				Stage:   "request",
+			}
+		}
+		base = strings.TrimRight(safe.String(), "/")
 	}
 	endpoint := base + "/v1/audio/speech"
 

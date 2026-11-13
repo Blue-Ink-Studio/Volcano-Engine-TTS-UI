@@ -26,7 +26,10 @@ type RateLimiter struct {
 
 var (
 	GlobalRateLimiter *RateLimiter
-	ConcurrencySem    chan struct{}
+	// AdminRateLimiter 是管理/自助接口用的宽松限流器(STAGE6 P2-6)。
+	// 详见 InitRateLimiter 里的说明。
+	AdminRateLimiter *RateLimiter
+	ConcurrencySem   chan struct{}
 	// trustedProxyHops controls how X-Forwarded-For (XFF) is parsed when the
 	// direct connection comes from a private IP (i.e., we're behind a reverse
 	// proxy). Two modes are supported, switched by this single value:
@@ -72,6 +75,20 @@ func InitRateLimiter() {
 	GlobalRateLimiter = &RateLimiter{
 		requests: make(map[string][]time.Time),
 		limit:    common.RateLimitRequests,
+		window:   common.RateLimitWindow,
+	}
+	// STAGE6(P2-6):管理/自助接口的**宽松**限流。
+	//
+	// 为什么要单独一套:业务接口(/v1/*)限流很严(每 IP 每窗口固定配额),
+	// 管理端是低频人工操作、门户是用户自助,套用同一套阈值会误伤。
+	// 但完全不限流也不行 —— 审计 P2-6 指出重查询(用量统计、用户列表)能被
+	// 打垮,登录/注册这类未认证端点尤其危险。
+	//
+	// 这里给一个**明显更宽松但非零**的上限:正常人工使用完全无感,
+	// 而"脚本狂刷"会被挡下。
+	AdminRateLimiter = &RateLimiter{
+		requests: make(map[string][]time.Time),
+		limit:    common.AdminRateLimitRequests,
 		window:   common.RateLimitWindow,
 	}
 	ConcurrencySem = make(chan struct{}, common.MaxConcurrentRequests)

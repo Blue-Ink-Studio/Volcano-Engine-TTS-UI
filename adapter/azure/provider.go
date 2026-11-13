@@ -36,8 +36,11 @@ type Provider struct {
 }
 
 // New 构造 Azure provider,供 init() 注册。
+//
+// STAGE6(P2-7):用 common.NewUpstreamHTTPClient() 而不是裸 &http.Client{} ——
+// 补上连接池与 TLS 握手超时(此前只有火山 adapter 有)。
 func New() *Provider {
-	return &Provider{client: &http.Client{}}
+	return &Provider{client: common.NewUpstreamHTTPClient()}
 }
 
 // Name 实现 provider.Provider。
@@ -113,7 +116,16 @@ func (p *Provider) Synthesize(ctx context.Context, req provider.Request, mtr pro
 
 	base := strings.TrimRight(fmt.Sprintf("https://%s.tts.speech.microsoft.com", region), "/")
 	if v := req.Credentials.Scope["base_url"]; v != "" {
-		base = strings.TrimRight(v, "/")
+		// STAGE6(P1-5):base_url 是管理员填的出站目标,必须做 SSRF 校验。
+		safe, vErr := common.ValidateBaseURL(v)
+		if vErr != nil && !common.IsDNSFailure(vErr) {
+			return nil, &provider.UpstreamError{
+				Code:    0,
+				Message: "azure base_url rejected: " + vErr.Error(),
+				Stage:   "request",
+			}
+		}
+		base = strings.TrimRight(safe.String(), "/")
 	}
 	endpoint := base + "/cognitiveservices/v1"
 
